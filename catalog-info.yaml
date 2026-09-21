@@ -1,0 +1,17 @@
+# For more information about the available options please visit: http://go/catalog-info (VPN required)
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  annotations:
+    github.com/project-slug: Unity-Technologies/com.unity.usd-toolkit
+  name: com.unity.usd-toolkit
+  description: "A C# integration layer for connecting Unity to NVIDIA's Omniverse/OpenUSD ecosystem. Wraps Pixar's OpenUSD 26.05 native binaries via P/Invoke so Unity can read, write, and round-trip USD stages authored for or consumed by NVIDIA Omniverse pipelines, including live scene sync between Unity Editor and Isaac Sim."
+  labels:
+    costcenter: "2105"
+  tags:
+    - planned-public
+    - enterprise
+spec:
+  type: unity-package
+  lifecycle: experimental
+  owner: Unity-Technologies/industrial-solutions-engineering
