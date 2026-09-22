@@ -1,0 +1,186 @@
+#usda 1.0
+(
+    defaultPrim = "Fixture"
+    upAxis = "Y"
+    metersPerUnit = 1
+)
+
+def Xform "Fixture"
+{
+    # A: two quads sharing points 1 and 2, faceVarying + indexed st with different UVs on the
+    # shared corners. Cannot be represented per point -> must split 6 points into 8 vertices.
+    def Mesh "A_faceVarying_indexed"
+    {
+        point3f[] points = [(0,0,0), (1,0,0), (1,1,0), (0,1,0), (2,0,0), (2,1,0)]
+        int[] faceVertexCounts = [4, 4]
+        int[] faceVertexIndices = [0, 1, 2, 3, 1, 4, 5, 2]
+        texCoord2f[] primvars:st = [(0,0), (1,0), (1,1), (0,1), (0.5,0.5)] (
+            interpolation = "faceVarying"
+        )
+        int[] primvars:st:indices = [0, 1, 2, 3, 4, 1, 2, 4]
+    }
+
+    # B: the already-working layout (vertex, unindexed) -- must stay on the fast path.
+    def Mesh "B_vertex_plain" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        rel material:binding = </Fixture/Looks/CutoutMat>
+        point3f[] points = [(0,0,0), (1,0,0), (1,1,0), (0,1,0)]
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        texCoord2f[] primvars:st = [(0,0), (1,0), (1,1), (0,1)] (
+            interpolation = "vertex"
+        )
+    }
+
+    # C: alias name (Blender/Maya style), faceVarying.
+    def Mesh "C_alias_UVMap"
+    {
+        point3f[] points = [(0,0,0), (1,0,0), (1,1,0), (0,1,0)]
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        texCoord2f[] primvars:UVMap = [(0.1,0.1), (0.9,0.1), (0.9,0.9), (0.1,0.9)] (
+            interpolation = "faceVarying"
+        )
+    }
+
+    # D: three UV sets -> Unity uv0/uv1/uv2.
+    def Mesh "D_three_sets"
+    {
+        point3f[] points = [(0,0,0), (1,0,0), (1,1,0), (0,1,0)]
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        texCoord2f[] primvars:st = [(0,0), (1,0), (1,1), (0,1)] (
+            interpolation = "vertex"
+        )
+        texCoord2f[] primvars:st1 = [(0,0), (0.5,0), (0.5,0.5), (0,0.5)] (
+            interpolation = "vertex"
+        )
+        texCoord2f[] primvars:st2 = [(0,0), (0.25,0), (0.25,0.25), (0,0.25)] (
+            interpolation = "vertex"
+        )
+    }
+
+    # E: normals authored as a faceVarying primvar instead of the schema attribute.
+    def Mesh "E_primvar_normals"
+    {
+        point3f[] points = [(0,0,0), (1,0,0), (1,1,0), (0,1,0)]
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        normal3f[] primvars:normals = [(0,0,1), (0,0,1), (0,0,1), (0,0,1)] (
+            interpolation = "faceVarying"
+        )
+    }
+
+    # F: double-precision UVs under yet another name.
+    def Mesh "F_double2_uv"
+    {
+        point3f[] points = [(0,0,0), (1,0,0), (1,1,0), (0,1,0)]
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        double2[] primvars:uv = [(0,0), (1,0), (1,1), (0,1)] (
+            interpolation = "vertex"
+        )
+    }
+
+    # G: indexed but vertex-interpolated -- resolvable per point, so no split.
+    def Mesh "G_vertex_indexed" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        rel material:binding = </Fixture/Looks/BlendMat>
+        point3f[] points = [(0,0,0), (1,0,0), (1,1,0), (0,1,0)]
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        texCoord2f[] primvars:st = [(0,0), (1,1)] (
+            interpolation = "vertex"
+        )
+        int[] primvars:st:indices = [0, 1, 1, 0]
+    }
+
+    # H: no UVs at all -- must stay empty, not crash.
+    def Mesh "H_no_uv" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        rel material:binding = </Fixture/Looks/BadConnectionMat>
+        point3f[] points = [(0,0,0), (1,0,0), (1,1,0), (0,1,0)]
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+    }
+
+    def Scope "Looks"
+    {
+        # opacityThreshold > 0: alpha cutout at that value (foliage, rails, ...).
+        def Material "CutoutMat"
+        {
+            token outputs:surface.connect = </Fixture/Looks/CutoutMat/PreviewSurface.outputs:surface>
+
+            def Shader "PreviewSurface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (1, 1, 1)
+                color3f inputs:diffuseColor.connect = </Fixture/Looks/CutoutMat/tex.outputs:rgb>
+                float inputs:opacity = 1
+                float inputs:opacity.connect = </Fixture/Looks/CutoutMat/tex.outputs:a>
+                float inputs:opacityThreshold = 0.5
+                token outputs:surface
+            }
+
+            def Shader "tex"
+            {
+                uniform token info:id = "UsdUVTexture"
+                asset inputs:file = @./fixture_cutout.png@
+                float3 outputs:rgb
+                float outputs:a
+            }
+        }
+
+        # diffuseColor connected to a non-UsdUVTexture: must be reported, not silently dropped.
+        def Material "BadConnectionMat"
+        {
+            token outputs:surface.connect = </Fixture/Looks/BadConnectionMat/PreviewSurface.outputs:surface>
+
+            def Shader "PreviewSurface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (1, 0, 0)
+                color3f inputs:diffuseColor.connect = </Fixture/Looks/BadConnectionMat/not_a_texture.outputs:result>
+                token outputs:surface
+            }
+
+            def Shader "not_a_texture"
+            {
+                uniform token info:id = "UsdPrimvarReader_float3"
+                token inputs:varname = "displayColor"
+                float3 outputs:result
+            }
+        }
+
+        # opacityThreshold == 0: real alpha blending (glass, water, ...).
+        def Material "BlendMat"
+        {
+            token outputs:surface.connect = </Fixture/Looks/BlendMat/PreviewSurface.outputs:surface>
+
+            def Shader "PreviewSurface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (1, 1, 1)
+                color3f inputs:diffuseColor.connect = </Fixture/Looks/BlendMat/tex.outputs:rgb>
+                float inputs:opacity = 1
+                float inputs:opacity.connect = </Fixture/Looks/BlendMat/tex.outputs:a>
+                float inputs:opacityThreshold = 0
+                token outputs:surface
+            }
+
+            def Shader "tex"
+            {
+                uniform token info:id = "UsdUVTexture"
+                asset inputs:file = @./fixture_blend.png@
+                float3 outputs:rgb
+                float outputs:a
+            }
+        }
+    }
+}

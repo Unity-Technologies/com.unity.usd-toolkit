@@ -1,0 +1,16 @@
+﻿{
+    "name": "Unity.USDToolkit.Samples",
+    "rootNamespace": "Unity.USDToolkit.Samples",
+    "references": [
+        "GUID:71fa65d963c37aa448e37e287c77298b"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

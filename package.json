@@ -1,0 +1,18 @@
+{
+  "name": "com.unity.usd-toolkit",
+  "displayName": "Unity USD Toolkit",
+  "version": "0.7.2-exp.1",
+  "unity": "2023.1",
+  "description": "Runtime USD toolkit for Unity applications using a custom native OpenUSD wrapper. A C# integration layer for connecting Unity to NVIDIA's Omniverse/OpenUSD ecosystem. Wraps Pixar's OpenUSD 26.05 native binaries via P/Invoke so Unity can read, write, and round-trip USD stages.",
+  "license": "SEE LICENSE.md",
+  "keywords": [
+    "usd",
+    "openusd",
+    "runtime",
+    "export",
+    "import"
+  ],
+  "author": {
+    "name": "Unity"
+  }
+}
