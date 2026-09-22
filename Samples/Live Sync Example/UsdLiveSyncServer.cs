@@ -1,0 +1,1144 @@
+using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Globalization;
+using System.IO;
+using System.Net;
+using System.Net.Sockets;
+using System.Text;
+using System.Threading;
+using UnityEngine;
+
+namespace Unity.USDToolkit.Samples
+{
+    /// <summary>
+    /// Bidirectional, near-real-time transform sync between this Unity scene and external clients
+    /// (<c>Tools~/usd_live_sync.py</c>, the Isaac Sim extension in <c>Tools~/isaacsim</c>, or a DCC tool),
+    /// using USD as the on-disk record.
+    ///
+    /// Topology: Unity is the host, external tools are clients, and the transport is newline-delimited JSON
+    /// over loopback TCP. A single connection carries both a broadcast direction (Unity streams transform
+    /// changes out) and a command direction (clients push edits in).
+    ///
+    /// Responsibilities:
+    ///   * Phase 0 — assign a USD prim path to every tracked GameObject under <see cref="syncRoot"/>, using
+    ///     the same rules the package exporter uses (<c>SanitizePrimName</c> + unique-path suffixing +
+    ///     <c>GetComponentsInChildren&lt;Transform&gt;</c> order), so paths agree with what
+    ///     <see cref="UsdExporter"/> actually writes.
+    ///   * Phase 1 — write <c>base_stage.usda</c> once via <see cref="UsdExporter"/> (PreserveHierarchy) and
+    ///     capture the in-memory baseline transform of every tracked node.
+    ///   * Phase 2 — TCP server: accept thread + per-client read thread + a sender thread that broadcasts.
+    ///   * Phase 3 — throttled per-frame dirty-diff: prims whose local transform changed beyond an epsilon are
+    ///     batched into one <c>delta</c> broadcast per tick.
+    ///   * Phase 4 — inbound <c>set_transform</c> (filtered by <see cref="UsdSyncNode.AcceptsRemoteWrites"/>),
+    ///     <c>reset</c> (restore baseline + fire <see cref="SceneReset"/> + broadcast snapshot), and
+    ///     <c>get_snapshot</c> (reply full state to the requesting client).
+    ///
+    /// The live transform channel is built entirely outside <see cref="UsdImporter"/>/<see cref="UsdExporter"/>;
+    /// the package is used exactly once per session for the baseline geometry snapshot. Wire values are RAW
+    /// Unity local-space transforms (translate float[3], rotation quaternion [x,y,z,w], scale float[3]); the
+    /// Unity→USD basis flip is applied by the Python side when it authors <c>live_overrides.usda</c>.
+    /// </summary>
+    public sealed class UsdLiveSyncServer : MonoBehaviour
+    {
+        [Header("Binding (localhost dev tool — do not expose beyond loopback)")]
+        [SerializeField] private string bindAddress = "127.0.0.1";
+        [Tooltip("TCP port the sample listens on. Must match the client's --port (default 10000).")]
+        [SerializeField] private int port = 10000;
+        [SerializeField] private int backlog = 8;
+
+        [Header("Sync scope")]
+        [Tooltip("Root of the subtree to sync. If null, this GameObject is used.")]
+        [SerializeField] private Transform syncRoot;
+        [Tooltip("AllDescendants: every Transform under the root is tracked (good for a scene of static props). " +
+                 "ExplicitNodesOnly: only Transforms carrying a UsdSyncNode are tracked — use this to sync a " +
+                 "character's root transform without dragging in its animated skeleton bones, the camera, etc.")]
+        [SerializeField] private TrackMode trackMode = TrackMode.AllDescendants;
+
+        public enum TrackMode { AllDescendants, ExplicitNodesOnly }
+
+        [Header("Baseline export")]
+        [Tooltip("Write base_stage.usda on start via the USD Toolkit exporter. If the native plugin is " +
+                 "unavailable the live channel still runs; only the on-disk baseline is skipped.")]
+        [SerializeField] private bool exportBaselineOnStart = true;
+        [Tooltip("Output folder for base_stage.usda (and where the Python client writes live_overrides.usda). " +
+                 "Empty = '<project>/UsdSync' in the Editor, or '<persistentDataPath>/UsdSync' in a player.")]
+        [SerializeField] private string outputDirectory = "";
+        [SerializeField] private string baseStageFileName = "base_stage.usda";
+        [Tooltip("Bake SkinnedMeshRenderers (characters) into temporary static meshes for the baseline export, " +
+                 "so the avatar's geometry appears in base_stage.usda. The exporter otherwise only writes " +
+                 "MeshFilter+MeshRenderer geometry and skips skinned meshes. Bind-pose snapshot; the live " +
+                 "channel still only drives the tracked root transform.")]
+        [SerializeField] private bool bakeSkinnedMeshes = true;
+
+        [Header("Broadcast throttle")]
+        [Tooltip("Run the dirty-diff every Nth frame (1 = every frame). Keeps large hierarchies cheap.")]
+        [SerializeField] private int broadcastEveryNFrames = 3;
+        [Tooltip("Position/scale change (squared magnitude) below this is treated as float noise and not sent.")]
+        [SerializeField] private float translateEpsilon = 1e-4f;
+        [Tooltip("Rotation change (degrees) below this is treated as float noise and not sent.")]
+        [SerializeField] private float rotationEpsilonDegrees = 0.05f;
+
+        [Header("Startup")]
+        [SerializeField] private bool autoStart = true;
+
+        /// <summary>
+        /// Raised on the main thread when a client sends <c>{"cmd":"reset"}</c>, after every tracked transform
+        /// has been restored to its captured baseline. Subscribe to restart your own simulation state alongside
+        /// the transform restore (a nav run, a spawner, a score) without this server needing to know anything
+        /// about that logic. Guarded so a faulty subscriber cannot break the reset.
+        /// </summary>
+        public static event Action SceneReset;
+
+        // ---- Tracked node -------------------------------------------------------------------------
+
+        private sealed class Node
+        {
+            public Transform Tr;
+            public string Path;
+            public UsdSyncNode Sync;         // may be null -> observe-only
+            public Rigidbody Rb;             // may be null -> not a physics body
+            public Vector3 BaseT, BaseS;
+            public Quaternion BaseR;
+            public Vector3 LastT, LastS;     // last value broadcast (or applied) — the echo-suppression state
+            public Quaternion LastR;
+
+            public bool AcceptsRemoteWrites => Sync != null && Sync.AcceptsRemoteWrites;
+
+            // Per-channel toggles (a node with no UsdSyncNode syncs all three, for AllDescendants mode).
+            public bool SyncPos => Sync == null || Sync.SyncPosition;
+            public bool SyncRot => Sync == null || Sync.SyncRotation;
+            public bool SyncScl => Sync == null || Sync.SyncScale;
+        }
+
+        private readonly List<Node> _nodes = new();
+        private readonly Dictionary<string, Node> _byPath = new(StringComparer.Ordinal);
+
+        // ---- Networking (accept + per-client read threads; one sender thread) ---------------------
+
+        private TcpListener _listener;
+        private Thread _acceptThread;
+        private Thread _senderThread;
+        private volatile bool _running;
+
+        private readonly object _clientsLock = new();
+        private readonly List<TcpClient> _clients = new();
+
+        private readonly ConcurrentQueue<Inbound> _inbox = new();     // socket threads -> main thread
+        private readonly ConcurrentQueue<string> _outbox = new();     // main thread -> sender thread (broadcast)
+        private readonly AutoResetEvent _outboxSignal = new(false);
+
+        private long _seq;
+        private int _frameCounter;
+
+        private enum InboundKind { Command, Join }
+
+        private sealed class Inbound
+        {
+            public InboundKind Kind;
+            public TcpClient Client;
+            public string Json;
+        }
+
+        // Mirror of the package exporter's prim-name sanitizer (UsdExporter.InvalidPrimNameChars) so the paths
+        // this server assigns are identical to the ones base_stage.usda is written with.
+        private static readonly char[] InvalidPrimNameChars =
+        {
+            ' ', '-', '.', ':', '/', '\\', '(', ')', '[', ']', '{', '}', ',', ';', '\'', '"'
+        };
+
+        // ==========================================================================================
+        // Lifecycle
+        // ==========================================================================================
+
+        private void OnEnable()
+        {
+            if (autoStart)
+                StartServer();
+        }
+
+        private void OnDisable()
+        {
+            StopServer();
+        }
+
+        // ---- Read-only status (for the sample UI / your own HUD) ----------------------------------
+
+        /// <summary>Whether the listener and its worker threads are currently running.</summary>
+        public bool IsRunning => _running;
+
+        /// <summary>Number of tracked prims resolved by the last <see cref="StartServer"/>.</summary>
+        public int TrackedNodeCount => _nodes.Count;
+
+        /// <summary>Number of connected clients.</summary>
+        public int ClientCount
+        {
+            get { lock (_clientsLock) return _clients.Count; }
+        }
+
+        /// <summary>Address the listener is bound to.</summary>
+        public string BindAddress => bindAddress;
+
+        /// <summary>Port the listener is bound to.</summary>
+        public int Port => port;
+
+        /// <summary>Folder holding <c>base_stage.usda</c> (and where a client writes its override layer).</summary>
+        public string OutputDirectory => ResolveOutputDir();
+
+        /// <summary>Total messages broadcast or replied since start (the monotonic wire sequence number).</summary>
+        public long SequenceNumber => Interlocked.Read(ref _seq);
+
+        /// <summary>Read-only view of one tracked node, for a HUD or an inspector.</summary>
+        public readonly struct TrackedPrim
+        {
+            public TrackedPrim(string primPath, Transform transform, bool acceptsRemoteWrites)
+            {
+                PrimPath = primPath;
+                Transform = transform;
+                AcceptsRemoteWrites = acceptsRemoteWrites;
+            }
+
+            /// <summary>USD prim path this transform is streamed as, e.g. <c>/SyncRoot/PropCube</c>.</summary>
+            public string PrimPath { get; }
+
+            /// <summary>The tracked transform.</summary>
+            public Transform Transform { get; }
+
+            /// <summary>Whether inbound <c>set_transform</c> writes are applied to it.</summary>
+            public bool AcceptsRemoteWrites { get; }
+        }
+
+        /// <summary>Every tracked node, in the order the exporter walks the hierarchy.</summary>
+        public IEnumerable<TrackedPrim> TrackedPrims
+        {
+            get
+            {
+                foreach (var n in _nodes)
+                    yield return new TrackedPrim(n.Path, n.Tr, n.AcceptsRemoteWrites);
+            }
+        }
+
+        /// <summary>
+        /// Root of the subtree to sync. Assign before <see cref="StartServer"/> (the prim table and the
+        /// baseline are built from it at start); <c>null</c> means this GameObject's own transform.
+        /// </summary>
+        public Transform SyncRoot
+        {
+            get => syncRoot;
+            set => syncRoot = value;
+        }
+
+        public void StartServer()
+        {
+            if (_running)
+                return;
+
+            Transform root = syncRoot != null ? syncRoot : transform;
+
+            // Phase 0 + baseline dict: assign prim paths and capture the starting local transform of every node.
+            BuildPrimTable(root);
+            if (_nodes.Count == 0)
+                Debug.LogWarning($"[UsdLiveSyncServer] No tracked transforms under '{root.name}'. Sync will be idle.");
+
+            // Phase 1: one-shot baseline geometry snapshot (best-effort; the live channel does not depend on it).
+            if (exportBaselineOnStart)
+                ExportBaseline(root);
+
+            // Phase 2: bind and start the socket threads.
+            IPAddress ip = ResolveBindAddress(bindAddress);
+            try
+            {
+                _listener = new TcpListener(ip, port);
+                _listener.Server.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+                _listener.Start(backlog);
+            }
+            catch (Exception e)
+            {
+                Debug.LogError($"[UsdLiveSyncServer] Failed to bind {ip}:{port} — {e.Message}");
+                _listener = null;
+                return;
+            }
+
+            _running = true;
+            _acceptThread = new Thread(AcceptLoop) { IsBackground = true, Name = "UsdLiveSync-Accept" };
+            _senderThread = new Thread(SenderLoop) { IsBackground = true, Name = "UsdLiveSync-Sender" };
+            _acceptThread.Start();
+            _senderThread.Start();
+
+            Debug.Log($"[UsdLiveSyncServer] Listening on {ip}:{port} — {_nodes.Count} tracked prim(s) under '{root.name}'.");
+        }
+
+        public void StopServer()
+        {
+            if (!_running)
+                return;
+            _running = false;
+
+            try { _listener?.Stop(); } catch { /* ignore */ }
+            _listener = null;
+
+            _outboxSignal.Set(); // wake sender so it can exit
+
+            lock (_clientsLock)
+            {
+                foreach (var c in _clients) SafeClose(c);
+                _clients.Clear();
+            }
+
+            _acceptThread?.Join(200);
+            _senderThread?.Join(200);
+            _acceptThread = null;
+            _senderThread = null;
+        }
+
+        private static IPAddress ResolveBindAddress(string addr)
+        {
+            if (string.IsNullOrWhiteSpace(addr) || addr == "localhost") return IPAddress.Loopback;
+            return IPAddress.TryParse(addr, out var ip) ? ip : IPAddress.Loopback;
+        }
+
+        // ==========================================================================================
+        // Phase 0 — prim-path table (mirrors UsdExporter.ExportXforms exactly)
+        // ==========================================================================================
+
+        private void BuildPrimTable(Transform root)
+        {
+            _nodes.Clear();
+            _byPath.Clear();
+
+            // Root prim name: the exporter uses options.RootPrimName ?? root.name, sanitized. We pass root.name
+            // as RootPrimName at export time, so both sides agree on "/<rootPrimName>".
+            string rootPrimName = SanitizePrimName(root.name);
+            var usedPaths = new HashSet<string>(StringComparer.Ordinal) { "/" + rootPrimName };
+            var pathByTransform = new Dictionary<Transform, string> { { root, "/" + rootPrimName } };
+
+            // Paths are computed for EVERY transform (so the unique-path suffixing matches the exporter, and a
+            // tracked node's path is correct regardless of untracked siblings). A transform only becomes a
+            // tracked Node if it qualifies for the current TrackMode.
+            if (Qualifies(root))
+                AddNode(root, "/" + rootPrimName);
+
+            // GetComponentsInChildren returns hierarchical (parent-before-child) order, so a parent's path is
+            // always resolved before its children — identical to the exporter's enumeration.
+            Transform[] transforms = root.GetComponentsInChildren<Transform>(true);
+            foreach (Transform t in transforms)
+            {
+                if (t == root)
+                    continue;
+
+                string parentPath = t.parent != null && pathByTransform.TryGetValue(t.parent, out string p)
+                    ? p
+                    : "/" + rootPrimName;
+                string primPath = MakeUniquePath(parentPath + "/" + SanitizePrimName(t.name), usedPaths);
+                pathByTransform[t] = primPath;
+                if (Qualifies(t))
+                    AddNode(t, primPath);
+            }
+        }
+
+        /// <summary>Whether a transform is live-tracked under the current <see cref="trackMode"/>.</summary>
+        private bool Qualifies(Transform t)
+        {
+            if (trackMode == TrackMode.ExplicitNodesOnly)
+                return t.GetComponent<UsdSyncNode>() != null;
+            return true; // AllDescendants
+        }
+
+        private void AddNode(Transform t, string primPath)
+        {
+            var node = new Node
+            {
+                Tr = t,
+                Path = primPath,
+                Sync = t.GetComponent<UsdSyncNode>(),
+                Rb = t.GetComponent<Rigidbody>(),
+                BaseT = t.localPosition,
+                BaseR = t.localRotation,
+                BaseS = t.localScale,
+                LastT = t.localPosition,
+                LastR = t.localRotation,
+                LastS = t.localScale,
+            };
+            _nodes.Add(node);
+            _byPath[primPath] = node;
+        }
+
+        // ==========================================================================================
+        // Phase 1 — baseline export
+        // ==========================================================================================
+
+        private void ExportBaseline(Transform root)
+        {
+            string dir = ResolveOutputDir();
+            string basePath = Path.Combine(dir, baseStageFileName);
+
+            // Skinned meshes (characters) are invisible to the exporter (it only walks MeshFilter+MeshRenderer).
+            // Bake each SkinnedMeshRenderer into a temporary static MeshFilter+MeshRenderer so it lands in
+            // base_stage.usda, then tear the temporaries down in the finally block. These temps are created
+            // AFTER BuildPrimTable, so they are never live-tracked — they only exist for this one export.
+            var tempObjects = new List<GameObject>();
+            var tempMeshes = new List<Mesh>();
+            try
+            {
+                Directory.CreateDirectory(dir);
+
+                if (bakeSkinnedMeshes)
+                    BakeSkinnedMeshes(root, tempObjects, tempMeshes);
+
+                UsdExportResult result = UsdExporter.ExportGameObjectWithResult(root.gameObject, basePath,
+                    new UsdExportOptions
+                    {
+                        RootPrimName = root.name, // keep the root prim name aligned with the Phase 0 table
+                        TransformPolicy = UsdTransformPolicy.PreserveHierarchy,
+                        IncludeInactive = false,
+                        // Do NOT require Read/Write-enabled meshes: many imported FBX assets ship
+                        // non-readable. With this false the exporter GPU-reads them back instead of throwing
+                        // on the first one and aborting the whole baseline (which left an empty stub).
+                        RequireReadableMeshes = false,
+                        ExportTextures = true,
+                    });
+
+                Debug.Log($"[UsdLiveSyncServer] Baseline export: {result} (root prim '/{SanitizePrimName(root.name)}')" +
+                          (tempObjects.Count > 0 ? $"; baked {tempObjects.Count} skinned mesh(es)." : "."));
+                CrossCheckPrimPaths(result);
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning($"[UsdLiveSyncServer] Baseline export skipped ({e.GetType().Name}: {e.Message}). " +
+                                 "Live sync continues without an on-disk base_stage.usda.");
+            }
+            finally
+            {
+                foreach (var go in tempObjects)
+                    if (go != null) DestroyImmediate(go);
+                foreach (var m in tempMeshes)
+                    if (m != null) DestroyImmediate(m);
+            }
+        }
+
+        /// <summary>
+        /// For every active <see cref="SkinnedMeshRenderer"/> under <paramref name="root"/>, bake the current
+        /// (bind) pose into a fresh static <see cref="Mesh"/> and hang it on a temporary child GameObject with
+        /// an identity local transform + a normal MeshFilter/MeshRenderer, so the package exporter picks it up.
+        /// Vertices from <see cref="SkinnedMeshRenderer.BakeMesh(Mesh)"/> are in the renderer's local space, so
+        /// parenting the temp under the renderer (world placement via the parent chain, scale included by the
+        /// renderer's own xform) reproduces the character at the correct location. Temps are collected for
+        /// teardown by the caller. Best-effort per renderer: a failure is logged and skipped, never fatal.
+        /// </summary>
+        private void BakeSkinnedMeshes(Transform root, List<GameObject> tempObjects, List<Mesh> tempMeshes)
+        {
+            foreach (var smr in root.GetComponentsInChildren<SkinnedMeshRenderer>(false))
+            {
+                try
+                {
+                    if (smr.sharedMesh == null) continue;
+
+                    var baked = new Mesh { name = smr.name + "_baked" };
+                    smr.BakeMesh(baked);
+                    tempMeshes.Add(baked);
+
+                    var go = new GameObject(smr.name + "_BakedStatic");
+                    go.transform.SetParent(smr.transform, worldPositionStays: false); // identity local
+                    var mf = go.AddComponent<MeshFilter>();
+                    mf.sharedMesh = baked;
+                    var mr = go.AddComponent<MeshRenderer>();
+                    mr.sharedMaterials = smr.sharedMaterials;
+                    tempObjects.Add(go);
+                }
+                catch (Exception e)
+                {
+                    Debug.LogWarning($"[UsdLiveSyncServer] Skinned-mesh bake skipped for '{smr.name}': {e.Message}");
+                }
+            }
+        }
+
+        /// <summary>
+        /// Phase 0 self-check: for each exported mesh, the exporter writes it at
+        /// &lt;xform prim path&gt;/&lt;Sanitize(leaf)&gt;_Mesh. Confirm the mesh's owning transform resolves to
+        /// the same prim path in our table. A mismatch means our walker diverged from the exporter and the
+        /// Python 'over' statements would silently fail to bind — so it is logged loudly.
+        /// </summary>
+        private void CrossCheckPrimPaths(UsdExportResult result)
+        {
+            if (result?.Meshes == null || result.Meshes.Count == 0)
+                return;
+
+            int checkedCount = 0, mismatches = 0;
+            foreach (var mesh in result.Meshes)
+            {
+                string meshPrim = mesh.PrimPath;
+                int slash = meshPrim.LastIndexOf('/');
+                if (slash <= 0)
+                    continue;
+                string xformPrim = meshPrim.Substring(0, slash); // strip the "/<leaf>_Mesh" leaf
+
+                checkedCount++;
+                if (!_byPath.ContainsKey(xformPrim))
+                {
+                    mismatches++;
+                    if (mismatches <= 5)
+                        Debug.LogWarning($"[UsdLiveSyncServer] Prim-path cross-check: exporter mesh '{meshPrim}' " +
+                                         $"maps to xform '{xformPrim}' which is NOT in the sync table.");
+                }
+            }
+
+            if (mismatches == 0)
+                Debug.Log($"[UsdLiveSyncServer] Prim-path cross-check passed ({checkedCount} mesh prim(s) agree).");
+            else
+                Debug.LogWarning($"[UsdLiveSyncServer] Prim-path cross-check: {mismatches}/{checkedCount} mesh prim(s) " +
+                                 "did not match the sync table — override binding may fail. Investigate SanitizePrimName parity.");
+        }
+
+        private string ResolveOutputDir()
+        {
+            if (!string.IsNullOrWhiteSpace(outputDirectory))
+                return Path.GetFullPath(outputDirectory);
+
+            // In the Editor, '<project>/UsdSync' sits next to Assets/ where the Python client looks for it by
+            // default. A built player's dataPath is inside the app bundle (read-only on macOS), so fall back to
+            // the platform's writable persistent location and let the client point at it with --output-dir.
+            if (Application.isEditor)
+            {
+                string projectRoot = Directory.GetParent(Application.dataPath)?.FullName ?? Application.dataPath;
+                return Path.Combine(projectRoot, "UsdSync");
+            }
+
+            return Path.Combine(Application.persistentDataPath, "UsdSync");
+        }
+
+        // ==========================================================================================
+        // Phase 2 — accept + per-client read (background threads)
+        // ==========================================================================================
+
+        private void AcceptLoop()
+        {
+            while (_running)
+            {
+                TcpClient client;
+                try
+                {
+                    client = _listener.AcceptTcpClient();
+                }
+                catch (Exception)
+                {
+                    if (!_running) break;
+                    continue;
+                }
+
+                client.NoDelay = true;
+                lock (_clientsLock) _clients.Add(client);
+
+                // A joining client needs a full snapshot, but that reads Transforms -> must happen on the main
+                // thread. Enqueue a Join request; Update() will send the snapshot to just this client.
+                _inbox.Enqueue(new Inbound { Kind = InboundKind.Join, Client = client });
+
+                var t = new Thread(() => ReadClient(client)) { IsBackground = true, Name = "UsdLiveSync-Client" };
+                t.Start();
+                Debug.Log($"[UsdLiveSyncServer] Client connected ({client.Client.RemoteEndPoint}). Clients: {_clients.Count}");
+            }
+        }
+
+        private void ReadClient(TcpClient client)
+        {
+            try
+            {
+                var stream = client.GetStream();
+                var buffer = new byte[4096];
+                var acc = new StringBuilder();
+
+                while (_running)
+                {
+                    int read = stream.Read(buffer, 0, buffer.Length);
+                    if (read <= 0) break; // client closed
+
+                    acc.Append(Encoding.UTF8.GetString(buffer, 0, read));
+
+                    int nl;
+                    while ((nl = IndexOf(acc, '\n')) >= 0)
+                    {
+                        string line = acc.ToString(0, nl).Trim();
+                        acc.Remove(0, nl + 1);
+                        if (line.Length > 0)
+                            _inbox.Enqueue(new Inbound { Kind = InboundKind.Command, Client = client, Json = line });
+                    }
+                }
+            }
+            catch (Exception)
+            {
+                // fall through to cleanup
+            }
+            finally
+            {
+                lock (_clientsLock) _clients.Remove(client);
+                SafeClose(client);
+            }
+        }
+
+        private static int IndexOf(StringBuilder sb, char c)
+        {
+            for (int i = 0; i < sb.Length; i++)
+                if (sb[i] == c) return i;
+            return -1;
+        }
+
+        // ==========================================================================================
+        // Phase 2 — sender thread (broadcast)
+        // ==========================================================================================
+
+        private void SenderLoop()
+        {
+            while (_running)
+            {
+                _outboxSignal.WaitOne(250);
+                while (_outbox.TryDequeue(out var line))
+                    Broadcast(line);
+            }
+        }
+
+        private void Broadcast(string line)
+        {
+            byte[] bytes = Encoding.UTF8.GetBytes(line);
+            List<TcpClient> dead = null;
+
+            lock (_clientsLock)
+            {
+                foreach (var c in _clients)
+                {
+                    try
+                    {
+                        c.GetStream().Write(bytes, 0, bytes.Length);
+                    }
+                    catch (Exception)
+                    {
+                        (dead ??= new List<TcpClient>()).Add(c);
+                    }
+                }
+
+                if (dead != null)
+                    foreach (var c in dead) { _clients.Remove(c); SafeClose(c); }
+            }
+        }
+
+        private void Enqueue(string line)
+        {
+            _outbox.Enqueue(line);
+            _outboxSignal.Set();
+        }
+
+        // ==========================================================================================
+        // Main-thread processing (Update)
+        // ==========================================================================================
+
+        private void Update()
+        {
+            if (!_running)
+                return;
+
+            // 1) Drain inbound commands / joins (applies transforms on the main thread).
+            while (_inbox.TryDequeue(out var msg))
+            {
+                if (msg.Kind == InboundKind.Join)
+                    SendSnapshotTo(msg.Client, "join");
+                else
+                    ProcessCommand(msg);
+            }
+
+            // 2) Throttled dirty-diff broadcast.
+            if (broadcastEveryNFrames < 1) broadcastEveryNFrames = 1;
+            if (++_frameCounter >= broadcastEveryNFrames)
+            {
+                _frameCounter = 0;
+                BroadcastDeltas();
+            }
+        }
+
+        // ---- Phase 3: dirty-diff --------------------------------------------------------------------
+
+        private void BroadcastDeltas()
+        {
+            if (ClientCount == 0)
+                return; // no listeners — still cheap to skip building the message
+
+            StringBuilder sb = null;
+            int changed = 0;
+
+            foreach (var n in _nodes)
+            {
+                if (n.Tr == null)
+                    continue;
+
+                Vector3 t = n.Tr.localPosition;
+                Quaternion r = n.Tr.localRotation;
+                Vector3 s = n.Tr.localScale;
+
+                if (!Changed(n, t, r, s))
+                    continue;
+
+                n.LastT = t; n.LastR = r; n.LastS = s;
+
+                if (sb == null)
+                {
+                    sb = new StringBuilder(256);
+                    sb.Append("{\"type\":\"delta\",\"seq\":").Append(NextSeq())
+                      .Append(",\"t\":").Append(NowMillis())
+                      .Append(",\"prims\":{");
+                }
+                if (changed > 0) sb.Append(',');
+                AppendPrim(sb, n.Path, t, r, s);
+                changed++;
+            }
+
+            if (sb != null)
+            {
+                sb.Append("}}\n");
+                Enqueue(sb.ToString());
+            }
+        }
+
+        private bool Changed(Node n, Vector3 t, Quaternion r, Vector3 s)
+        {
+            if (n.SyncPos && (t - n.LastT).sqrMagnitude > translateEpsilon * translateEpsilon) return true;
+            if (n.SyncScl && (s - n.LastS).sqrMagnitude > translateEpsilon * translateEpsilon) return true;
+            if (n.SyncRot && Quaternion.Angle(n.LastR, r) > rotationEpsilonDegrees) return true;
+            return false;
+        }
+
+        // ---- Phase 4: inbound commands --------------------------------------------------------------
+
+        private void ProcessCommand(Inbound msg)
+        {
+            object parsed;
+            try
+            {
+                parsed = Json.Parse(msg.Json);
+            }
+            catch (Exception e)
+            {
+                SendAck(msg.Client, "?", false, "malformed JSON: " + e.Message);
+                return;
+            }
+
+            if (parsed is not Dictionary<string, object> obj || !obj.TryGetValue("cmd", out object cmdObj))
+            {
+                SendAck(msg.Client, "?", false, "missing 'cmd'");
+                return;
+            }
+
+            string cmd = cmdObj as string ?? "";
+            switch (cmd)
+            {
+                case "set_transform":
+                    HandleSetTransform(msg.Client, obj);
+                    break;
+                case "reset":
+                    HandleReset(msg.Client);
+                    break;
+                case "get_snapshot":
+                    SendSnapshotTo(msg.Client, "request");
+                    SendAck(msg.Client, cmd, true, null);
+                    break;
+                default:
+                    SendAck(msg.Client, cmd, false, $"unsupported command '{cmd}'");
+                    break;
+            }
+        }
+
+        private void HandleSetTransform(TcpClient client, Dictionary<string, object> obj)
+        {
+            if (!obj.TryGetValue("prims", out object primsObj) || primsObj is not Dictionary<string, object> prims)
+            {
+                SendAck(client, "set_transform", false, "missing 'prims' map");
+                return;
+            }
+
+            int applied = 0, ignored = 0, unknown = 0;
+            foreach (var kv in prims)
+            {
+                if (!_byPath.TryGetValue(kv.Key, out Node n) || n.Tr == null)
+                {
+                    unknown++;
+                    continue;
+                }
+                if (!n.AcceptsRemoteWrites)
+                {
+                    ignored++; // Unity-authoritative: observe-only, never fight the client
+                    continue;
+                }
+                if (kv.Value is not Dictionary<string, object> trs)
+                    continue;
+
+                if (n.SyncPos && TryVec3(trs, "t", out Vector3 t)) n.Tr.localPosition = t;
+                if (n.SyncRot && TryQuat(trs, "r", out Quaternion r)) n.Tr.localRotation = r;
+                if (n.SyncScl && TryVec3(trs, "s", out Vector3 s)) n.Tr.localScale = s;
+
+                // Physics bodies own their pose: poking the Transform alone is ignored (and, for a dynamic
+                // body, gravity/velocity pull it back next step). Teleport the Rigidbody to the new world pose
+                // and clear velocities so the remote write actually takes effect. A dynamic body will still
+                // fall afterwards unless it is kinematic — a continuous external stream re-teleports it each
+                // tick, which visually holds it; a one-shot edit places it and lets physics resume.
+                if (n.Rb != null)
+                {
+                    n.Rb.position = n.Tr.position;
+                    n.Rb.rotation = n.Tr.rotation;
+                    if (!n.Rb.isKinematic)
+                    {
+#if UNITY_6000_0_OR_NEWER
+                        n.Rb.linearVelocity = Vector3.zero;
+#else
+                        n.Rb.velocity = Vector3.zero;
+#endif
+                        n.Rb.angularVelocity = Vector3.zero;
+                    }
+                }
+
+                // Echo suppression: record the just-applied value as "last sent" so the next dirty-diff pass
+                // does not immediately re-broadcast this remote edit back to the clients.
+                n.LastT = n.Tr.localPosition;
+                n.LastR = n.Tr.localRotation;
+                n.LastS = n.Tr.localScale;
+                applied++;
+            }
+
+            SendAck(client, "set_transform", true,
+                applied == 0 && (ignored > 0 || unknown > 0)
+                    ? $"applied 0 (ignored {ignored} observe-only, {unknown} unknown)"
+                    : null,
+                applied, ignored, unknown);
+        }
+
+        private void HandleReset(TcpClient client)
+        {
+            ResetToBaseline();
+
+            // Broadcast the restored baseline to everyone so all clients converge without inferring from deltas.
+            Enqueue(BuildSnapshot("reset"));
+            SendAck(client, "reset", true, null);
+        }
+
+        /// <summary>
+        /// Restore every tracked transform to the baseline captured at <see cref="StartServer"/> and fire
+        /// <see cref="SceneReset"/>. Call this from your own UI to reset without a client round-trip; the
+        /// inbound <c>reset</c> command runs this and additionally broadcasts a snapshot so connected clients
+        /// converge immediately. Main thread only.
+        /// </summary>
+        public void ResetToBaseline()
+        {
+            foreach (var n in _nodes)
+            {
+                if (n.Tr == null) continue;
+                n.Tr.localPosition = n.BaseT;
+                n.Tr.localRotation = n.BaseR;
+                n.Tr.localScale = n.BaseS;
+                n.LastT = n.BaseT; n.LastR = n.BaseR; n.LastS = n.BaseS;
+
+                // A physics body owns its pose: move the Rigidbody too, or it snaps the Transform back.
+                if (n.Rb != null)
+                {
+                    n.Rb.position = n.Tr.position;
+                    n.Rb.rotation = n.Tr.rotation;
+                    if (!n.Rb.isKinematic)
+                    {
+#if UNITY_6000_0_OR_NEWER
+                        n.Rb.linearVelocity = Vector3.zero;
+#else
+                        n.Rb.velocity = Vector3.zero;
+#endif
+                        n.Rb.angularVelocity = Vector3.zero;
+                    }
+                }
+            }
+
+            try { SceneReset?.Invoke(); }
+            catch (Exception e) { Debug.LogError($"[UsdLiveSyncServer] SceneReset subscriber threw: {e}"); }
+
+            Debug.Log("[UsdLiveSyncServer] Reset: restored baseline for all tracked prims.");
+        }
+
+        // ==========================================================================================
+        // Outbound message builders
+        // ==========================================================================================
+
+        private string BuildSnapshot(string reason)
+        {
+            var sb = new StringBuilder(512);
+            sb.Append("{\"type\":\"snapshot\",\"reason\":\"").Append(reason)
+              .Append("\",\"seq\":").Append(NextSeq())
+              .Append(",\"t\":").Append(NowMillis())
+              .Append(",\"prims\":{");
+            bool first = true;
+            foreach (var n in _nodes)
+            {
+                if (n.Tr == null) continue;
+                if (!first) sb.Append(',');
+                AppendPrim(sb, n.Path, n.Tr.localPosition, n.Tr.localRotation, n.Tr.localScale);
+                first = false;
+            }
+            sb.Append("}}\n");
+            return sb.ToString();
+        }
+
+        private void SendSnapshotTo(TcpClient client, string reason)
+        {
+            SendDirect(client, BuildSnapshot(reason));
+        }
+
+        private void SendAck(TcpClient client, string cmd, bool ok, string error,
+            int applied = -1, int ignored = -1, int unknown = -1)
+        {
+            var sb = new StringBuilder(128);
+            sb.Append("{\"type\":\"ack\",\"cmd\":");
+            AppendEscaped(sb, cmd);
+            sb.Append(",\"ok\":").Append(ok ? "true" : "false");
+            if (applied >= 0) sb.Append(",\"applied\":").Append(applied);
+            if (ignored >= 0) sb.Append(",\"ignored\":").Append(ignored);
+            if (unknown >= 0) sb.Append(",\"unknown\":").Append(unknown);
+            if (!string.IsNullOrEmpty(error)) { sb.Append(",\"error\":"); AppendEscaped(sb, error); }
+            sb.Append("}\n");
+            SendDirect(client, sb.ToString());
+        }
+
+        /// <summary>Write one message to a single client from the main thread (small, targeted replies).</summary>
+        private void SendDirect(TcpClient client, string line)
+        {
+            try
+            {
+                byte[] bytes = Encoding.UTF8.GetBytes(line);
+                client.GetStream().Write(bytes, 0, bytes.Length);
+            }
+            catch (Exception)
+            {
+                lock (_clientsLock) _clients.Remove(client);
+                SafeClose(client);
+            }
+        }
+
+        private long NextSeq() => Interlocked.Increment(ref _seq);
+        private static long NowMillis() => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+        // ==========================================================================================
+        // JSON helpers (output) — hand-rolled StringBuilder, because JsonUtility cannot serialize the
+        // Dictionary-shaped "prims" map.
+        // ==========================================================================================
+
+        private static void AppendPrim(StringBuilder sb, string path, Vector3 t, Quaternion r, Vector3 s)
+        {
+            AppendEscaped(sb, path);
+            sb.Append(":{\"t\":[").Append(F(t.x)).Append(',').Append(F(t.y)).Append(',').Append(F(t.z))
+              .Append("],\"r\":[").Append(F(r.x)).Append(',').Append(F(r.y)).Append(',').Append(F(r.z)).Append(',').Append(F(r.w))
+              .Append("],\"s\":[").Append(F(s.x)).Append(',').Append(F(s.y)).Append(',').Append(F(s.z)).Append("]}");
+        }
+
+        private static string F(float v) => v.ToString("0.######", CultureInfo.InvariantCulture);
+
+        private static void AppendEscaped(StringBuilder sb, string s)
+        {
+            sb.Append('"');
+            if (s != null)
+            {
+                foreach (char c in s)
+                {
+                    switch (c)
+                    {
+                        case '"': sb.Append("\\\""); break;
+                        case '\\': sb.Append("\\\\"); break;
+                        case '\n': sb.Append("\\n"); break;
+                        case '\r': sb.Append("\\r"); break;
+                        case '\t': sb.Append("\\t"); break;
+                        default:
+                            if (c < 0x20) sb.Append("\\u").Append(((int)c).ToString("x4", CultureInfo.InvariantCulture));
+                            else sb.Append(c);
+                            break;
+                    }
+                }
+            }
+            sb.Append('"');
+        }
+
+        // ---- Inbound value extraction ---------------------------------------------------------------
+
+        private static bool TryVec3(Dictionary<string, object> d, string key, out Vector3 v)
+        {
+            v = default;
+            if (!d.TryGetValue(key, out object o) || o is not List<object> a || a.Count < 3) return false;
+            v = new Vector3(ToF(a[0]), ToF(a[1]), ToF(a[2]));
+            return true;
+        }
+
+        private static bool TryQuat(Dictionary<string, object> d, string key, out Quaternion q)
+        {
+            q = Quaternion.identity;
+            if (!d.TryGetValue(key, out object o) || o is not List<object> a || a.Count < 4) return false;
+            q = new Quaternion(ToF(a[0]), ToF(a[1]), ToF(a[2]), ToF(a[3]));
+            return true;
+        }
+
+        private static float ToF(object o) => o is double d ? (float)d : 0f;
+
+        // ==========================================================================================
+        // Prim-name sanitizer + unique-path suffixing (verbatim copies of the package exporter's private
+        // helpers, so our prim paths match base_stage.usda byte-for-byte).
+        // ==========================================================================================
+
+        private static string SanitizePrimName(string name)
+        {
+            if (string.IsNullOrWhiteSpace(name))
+                return "Prim";
+
+            string sanitized = name.Trim();
+            foreach (char invalid in InvalidPrimNameChars)
+                sanitized = sanitized.Replace(invalid, '_');
+
+            if (char.IsDigit(sanitized[0]))
+                sanitized = "_" + sanitized;
+
+            return sanitized;
+        }
+
+        private static string MakeUniquePath(string path, HashSet<string> usedPaths)
+        {
+            string uniquePath = path;
+            int suffix = 1;
+            while (!usedPaths.Add(uniquePath))
+                uniquePath = path + "_" + suffix++;
+            return uniquePath;
+        }
+
+        private static void SafeClose(TcpClient c)
+        {
+            try { c?.Close(); } catch { /* ignore */ }
+        }
+
+        // ==========================================================================================
+        // Minimal JSON parser (inbound). Recursive-descent; supports object/array/string/number/bool/null,
+        // sufficient for the fixed command schema. Numbers surface as double, objects as
+        // Dictionary<string,object>, arrays as List<object>.
+        // ==========================================================================================
+
+        private static class Json
+        {
+            public static object Parse(string s)
+            {
+                int i = 0;
+                object v = ParseValue(s, ref i);
+                SkipWs(s, ref i);
+                if (i != s.Length)
+                    throw new FormatException($"trailing characters at {i}");
+                return v;
+            }
+
+            private static object ParseValue(string s, ref int i)
+            {
+                SkipWs(s, ref i);
+                if (i >= s.Length) throw new FormatException("unexpected end");
+                char c = s[i];
+                switch (c)
+                {
+                    case '{': return ParseObject(s, ref i);
+                    case '[': return ParseArray(s, ref i);
+                    case '"': return ParseString(s, ref i);
+                    case 't': Expect(s, ref i, "true"); return true;
+                    case 'f': Expect(s, ref i, "false"); return false;
+                    case 'n': Expect(s, ref i, "null"); return null;
+                    default: return ParseNumber(s, ref i);
+                }
+            }
+
+            private static Dictionary<string, object> ParseObject(string s, ref int i)
+            {
+                var d = new Dictionary<string, object>(StringComparer.Ordinal);
+                i++; // {
+                SkipWs(s, ref i);
+                if (i < s.Length && s[i] == '}') { i++; return d; }
+                while (true)
+                {
+                    SkipWs(s, ref i);
+                    string key = ParseString(s, ref i);
+                    SkipWs(s, ref i);
+                    if (i >= s.Length || s[i] != ':') throw new FormatException($"expected ':' at {i}");
+                    i++;
+                    d[key] = ParseValue(s, ref i);
+                    SkipWs(s, ref i);
+                    if (i >= s.Length) throw new FormatException("unterminated object");
+                    if (s[i] == ',') { i++; continue; }
+                    if (s[i] == '}') { i++; break; }
+                    throw new FormatException($"expected ',' or '}}' at {i}");
+                }
+                return d;
+            }
+
+            private static List<object> ParseArray(string s, ref int i)
+            {
+                var list = new List<object>();
+                i++; // [
+                SkipWs(s, ref i);
+                if (i < s.Length && s[i] == ']') { i++; return list; }
+                while (true)
+                {
+                    list.Add(ParseValue(s, ref i));
+                    SkipWs(s, ref i);
+                    if (i >= s.Length) throw new FormatException("unterminated array");
+                    if (s[i] == ',') { i++; continue; }
+                    if (s[i] == ']') { i++; break; }
+                    throw new FormatException($"expected ',' or ']' at {i}");
+                }
+                return list;
+            }
+
+            private static string ParseString(string s, ref int i)
+            {
+                if (i >= s.Length || s[i] != '"') throw new FormatException($"expected string at {i}");
+                i++;
+                var sb = new StringBuilder();
+                while (i < s.Length)
+                {
+                    char c = s[i++];
+                    if (c == '"') return sb.ToString();
+                    if (c == '\\')
+                    {
+                        if (i >= s.Length) break;
+                        char e = s[i++];
+                        switch (e)
+                        {
+                            case '"': sb.Append('"'); break;
+                            case '\\': sb.Append('\\'); break;
+                            case '/': sb.Append('/'); break;
+                            case 'b': sb.Append('\b'); break;
+                            case 'f': sb.Append('\f'); break;
+                            case 'n': sb.Append('\n'); break;
+                            case 'r': sb.Append('\r'); break;
+                            case 't': sb.Append('\t'); break;
+                            case 'u':
+                                if (i + 4 > s.Length) throw new FormatException("bad \\u escape");
+                                sb.Append((char)Convert.ToInt32(s.Substring(i, 4), 16));
+                                i += 4;
+                                break;
+                            default: throw new FormatException($"bad escape '\\{e}'");
+                        }
+                    }
+                    else sb.Append(c);
+                }
+                throw new FormatException("unterminated string");
+            }
+
+            private static double ParseNumber(string s, ref int i)
+            {
+                int start = i;
+                while (i < s.Length && "+-0123456789.eE".IndexOf(s[i]) >= 0) i++;
+                if (i == start) throw new FormatException($"invalid value at {start}");
+                return double.Parse(s.Substring(start, i - start), CultureInfo.InvariantCulture);
+            }
+
+            private static void Expect(string s, ref int i, string literal)
+            {
+                if (i + literal.Length > s.Length || s.Substring(i, literal.Length) != literal)
+                    throw new FormatException($"expected '{literal}' at {i}");
+                i += literal.Length;
+            }
+
+            private static void SkipWs(string s, ref int i)
+            {
+                while (i < s.Length && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r')) i++;
+            }
+        }
+    }
+}

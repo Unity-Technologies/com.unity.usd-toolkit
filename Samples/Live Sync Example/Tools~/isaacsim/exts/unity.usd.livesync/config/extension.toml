@@ -1,0 +1,27 @@
+[package]
+version = "0.1.0"
+category = "Simulation"
+title = "Unity USD Live Sync"
+description = """Live transform bridge between a Unity scene running UsdLiveSyncServer (TCP :10000, \
+newline-delimited JSON) and the Isaac Sim stage. Mounts Unity's base_stage.usda, applies streamed \
+per-prim transforms every frame, and can push Isaac-side poses back to Unity."""
+authors = ["Unity Technologies"]
+repository = ""
+keywords = ["unity", "usd", "live", "sync", "transform", "bridge"]
+readme = "docs/Overview.md"
+changelog = "docs/CHANGELOG.md"
+
+# Proprietary Unity software; ships as part of the com.unity.usd-toolkit package.
+# No NVIDIA software is redistributed — the omni.* / isaacsim APIs are resolved at
+# run time from the user's own Isaac Sim installation. Full notice in LICENSE.md.
+license = "SEE LICENSE.md"
+
+[dependencies]
+"omni.usd" = {}
+"omni.ui" = {}
+
+[[python.module]]
+name = "unity.usd.livesync"
+
+[documentation]
+pages = ["docs/Overview.md", "docs/CHANGELOG.md", "LICENSE.md"]
