@@ -24,6 +24,7 @@ import json
 import math
 import os
 import re
+import secrets
 import socket
 import sys
 import threading
@@ -94,6 +95,8 @@ class MockServer:
         self.baseline = json.loads(json.dumps(self.state))
 
         self.clients = []
+        self.authenticated = set()      # mirrors the real server: nothing is served before the token
+        self.token = args.token
         self.lock = threading.Lock()
         self.seq = 0
         self.running = True
@@ -120,12 +123,15 @@ class MockServer:
         with self.lock:
             dead = []
             for c in self.clients:
+                if c not in self.authenticated:
+                    continue
                 try:
                     c.sendall(line)
                 except OSError:
                     dead.append(c)
             for c in dead:
                 self.clients.remove(c)
+                self.authenticated.discard(c)
                 try:
                     c.close()
                 except OSError:
@@ -169,8 +175,7 @@ class MockServer:
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                 with self.lock:
                     self.clients.append(sock)
-                print("[mock-unity] client connected {}".format(addr), flush=True)
-                self._send(sock, self._snapshot("join"))
+                print("[mock-unity] client connected {} — awaiting auth".format(addr), flush=True)
                 threading.Thread(target=self._read_client, args=(sock, addr),
                                  name="mock-client", daemon=True).start()
         except KeyboardInterrupt:
@@ -201,6 +206,7 @@ class MockServer:
             with self.lock:
                 if sock in self.clients:
                     self.clients.remove(sock)
+                self.authenticated.discard(sock)
             try:
                 sock.close()
             except OSError:
@@ -215,6 +221,30 @@ class MockServer:
             return
 
         cmd = msg.get("cmd")
+
+        if cmd == "auth":
+            if secrets.compare_digest(str(msg.get("token") or ""), self.token):
+                with self.lock:
+                    self.authenticated.add(sock)
+                self._send(sock, {"type": "ack", "cmd": "auth", "ok": True})
+                self._send(sock, self._snapshot("join"))
+                print("[mock-unity] client authenticated", flush=True)
+            else:
+                print("[mock-unity] rejected client: invalid token", flush=True)
+                self._send(sock, {"type": "ack", "cmd": "auth", "ok": False, "error": "invalid token"})
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+            return
+
+        with self.lock:
+            is_authenticated = sock in self.authenticated
+        if not is_authenticated:
+            self._send(sock, {"type": "ack", "cmd": str(cmd), "ok": False,
+                              "error": "authentication required"})
+            return
+
         if cmd == "set_transform":
             prims = msg.get("prims", {}) or {}
             applied = unknown = 0
@@ -273,6 +303,9 @@ def main(argv=None):
                                 formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=10000)
+    p.add_argument("--token", default=None,
+                   help="Shared secret clients must present. Default: $USD_LIVE_SYNC_TOKEN, else a "
+                        "generated one written to live_sync_token.txt beside --base-stage.")
     p.add_argument("--base-stage", default=DEFAULT_BASE_STAGE,
                    help="Read prim paths from this .usda.")
     p.add_argument("--prims", default="",
@@ -293,6 +326,20 @@ def main(argv=None):
         paths = read_prim_paths(args.base_stage)
         if not paths:
             print("[mock-unity] no prims parsed from {}".format(args.base_stage), file=sys.stderr)
+            return 2
+
+    # Mirror the Unity server's token resolution so the same clients work against either.
+    args.token = args.token or os.environ.get("USD_LIVE_SYNC_TOKEN")
+    if not args.token:
+        args.token = secrets.token_hex(32)
+        token_path = os.path.join(os.path.dirname(os.path.abspath(args.base_stage)), "live_sync_token.txt")
+        try:
+            with open(token_path, "w", encoding="utf-8") as f:
+                f.write(args.token)
+            print("[mock-unity] generated auth token -> {}".format(token_path), flush=True)
+        except OSError as e:
+            print("[mock-unity] could not write {} ({}); pass --token instead".format(token_path, e),
+                  file=sys.stderr)
             return 2
 
     MockServer(args, paths).serve()

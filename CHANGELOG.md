@@ -5,6 +5,138 @@ All notable changes to the Unity USD Toolkit are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **The user manual is current again, and there is an English edition.**
+  `Documentation~/Unity USD Toolkit User Manual.md` still described version 0.1.0 — export only,
+  Windows only, no textures, no import — and is now rewritten against 0.7.2-exp.1 and split into
+  `Unity USD Toolkit User Manual KR.md` (the same file, renamed) and a new
+  `Unity USD Toolkit User Manual EN.md` with the same structure. New sections cover the runtime
+  import API, how untrusted USD files are handled (asset-path confinement, topology checks, PNG
+  dimension caps, plugin-path confinement, and the opt-in for each), the Live Sync sample's auth
+  handshake, and payload integrity verification. The superseded
+  `Unity USD Toolkit User Manual.docx`, which described 0.1.0 as a Windows-only export plugin,
+  was removed rather than left to contradict the manual; it remains in git history.
+- **Korean comments translated to English** across the package — most importantly the XML doc
+  comments on `UsdExportOptions`, which surface in IntelliSense for every consumer of the public
+  API. Comments only: no behaviour change, and the native payload was not rebuilt, so the digest
+  manifest still matches.
+
+### Security
+
+Fixes for the importer/exporter findings of security review SECURITY-282834. Version number
+still to be decided.
+
+- **Imported texture paths are confined to the stage folder** (SECURITY-282834 / CWE-22). A USD
+  stage authors its own `UsdUVTexture` `inputs:file` paths, so an imported file is untrusted
+  input — and the importer read whatever those paths named. An absolute path, or one that climbed
+  out with `../`, was passed straight to `File.Exists`/`File.ReadAllBytes`, so a crafted `.usd`
+  or `.usdz` could make the importer read an arbitrary local file, load its bytes as a texture,
+  and echo its absolute path back in a warning. `ResolveTexturePath` now canonicalizes the
+  authored path and refuses anything that resolves outside the stage's own directory, *before*
+  either read path is taken — the native resolver fallback is a second, independent sink, so a
+  guard in front of the file read alone would have been walked around. The byte read re-checks at
+  the sink, and a rejected path is reported by its authored spelling only, so a blocked attempt no
+  longer discloses where files sit on the machine. Textures packaged inside a `.usdz` are
+  unaffected: their authored paths are relative and stay inside the package.
+  `UsdImportOptions.AllowExternalAssetPaths` (default `false`) re-enables reads outside the stage
+  folder for stages you trust that deliberately reference a shared texture library.
+- **The managed PNG decoder no longer trusts IHDR dimensions** (SECURITY-282834 / CWE-190,
+  CWE-789). `UsdPngDecoder.TryDecode` checked only that width and height were positive, then sized
+  every allocation from them: a few-hundred-byte PNG claiming 20000x25000 drove a ~2 GB
+  `MemoryStream` reservation, and 65536x65536 wrapped the 32-bit `stride` negative — which also
+  dragged the `raw.Length` guard negative and let a negative array size through, throwing an
+  uncaught `OverflowException` out of the import. Dimensions are now capped (16384 per side,
+  64M pixels) before anything is allocated, every derived size is computed in 64-bit against a
+  byte budget, the inflate output stream is no longer pre-sized from the header, and the inflate
+  is capped at what the dimensions can legitimately produce so a small IDAT cannot expand without
+  bound. Oversized or malformed PNGs keep the decoder's existing `false` return and fall back to
+  `Texture2D.LoadImage`. The chunk-length guard is also computed in 64-bit: a length near
+  `int.MaxValue` used to overflow it and then throw out of `idat.Write`.
+- **The native ABI gate requires an exact match with the source, and now guards the import path
+  too** (SECURITY-282834 / CWE-494 remediation 4). `UsdNative.MinimumApiVersion` accepted anything
+  from API 2 upward, a tolerance that existed so payloads lagging the source kept working while
+  Windows and Linux were rebuilt. All three desktop payloads reached API 5, and the tolerance had
+  become a hole: fixes that are *not* gated on the ABI version — the topology and asset-path fixes
+  above among them — are simply absent from an older binary, with nothing in the version number to
+  say so. An older plugin is now refused with a message that says as much. Separately, the gate
+  was only ever called from the export path, so an import ran against whatever plugin happened to
+  be loaded — backwards, since the import path is where untrusted file content is parsed. Both
+  `UsdImporter.Import`/`ImportAsync`/`GetPreviewInfo` now validate it.
+- **The native payload is verified against recorded digests before the first P/Invoke**
+  (SECURITY-282834 / CWE-494). `ValidateNativeRuntimeFiles` only asked whether a file of the right
+  name existed, which cannot tell a genuine binary from a substituted one — and the native code is
+  loaded and executed in-process. `Runtime/Native/NativeRuntimeHashes.g.cs` now records the
+  SHA-256 of every shipped `.dll`/`.dylib`/`.so`, and the loader compares each binary it finds
+  against that digest once per process, refusing the payload on a mismatch with a message naming
+  the file and how to regenerate the manifest. A file the manifest has no entry for is reported as
+  unverified rather than failing the load. Regenerate after any native rebuild with
+  `python3 Native~/generate_native_hashes.py` — which now refuses to run when any payload file is
+  an unfetched Git LFS pointer, since the manifest covers every platform and would otherwise
+  record the pointers' digests and break those platforms at load time;
+  `UsdExportOptions.VerifyNativeRuntimeIntegrity`
+  (default `true`) turns the check off. The digests are compiled into the assembly rather than
+  shipped as a data file next to the binaries, since a manifest sitting beside the payload is
+  editable by anyone who can edit the payload. This is not a defence against someone who already
+  has write access to the package — it catches substitution or corruption in distribution, and it
+  makes the payload auditable: anyone can hash the shipped files and compare.
+- **Untrusted mesh topology is rejected instead of triangulated** (SECURITY-282834 / CWE-190,
+  native). `BuildImportedSubmeshes` accumulated each face's start offset in a signed 32-bit int,
+  so a stage whose `faceVertexCounts` summed past `INT_MAX` wrapped that accumulator, and the
+  corrupted offset then defeated `TriangulateFace`'s own bounds check — which added two
+  file-controlled values and so overflowed in turn. `cornerVertices` was then read far outside
+  its buffer: an unrecoverable native crash, with out-of-bounds values handed back to managed
+  code. The offsets are now accumulated in 64-bit, every offset is kept inside the real corner
+  buffer, and a mesh whose face counts do not sum to exactly the `faceVertexIndices` length is
+  reported and skipped rather than trusted. `TriangulateFace`'s guard was rewritten to subtract
+  from the known-good buffer length instead of adding two untrusted values.
+- **Asset reads through the native resolver are confined to the stage's folders**
+  (SECURITY-282834 / CWE-22, native). `RUsd_ReadImportAsset` resolves through OpenUSD, which
+  honours absolute paths and `..` climbs, so it was a second read path independent of the managed
+  guard above. The resolved path is now confined to the directory of any layer that composes the
+  stage — not just the root layer's, so a sublayer or reference keeping textures next to itself
+  still works — and a texture packaged inside a `.usdz` is judged by the package file that
+  contains it. Refusals and read errors name the authored path instead of the resolved location,
+  so a blocked attempt no longer discloses local filesystem layout.
+- **`UsdExportOptions.PluginSearchPath` is confined to the package's own native folders**
+  (SECURITY-282834 / CWE-427). The value was written verbatim into `PXR_PLUGINPATH_NAME`, and
+  OpenUSD's plugin registry loads and executes any library a `plugInfo.json` under that path
+  names, in-process. A path outside the package's native runtime folders is now rejected before
+  the variable is written — the previous order set the variable first and validated afterwards,
+  leaving the process already pointed at the untrusted directory. The escape hatch,
+  `UsdExporter.AllowExternalPluginSearchPath`, is a static code-only switch rather than a field on
+  `UsdExportOptions`, because that type is `[Serializable]` and an options object arriving from a
+  scene or prefab would otherwise carry both a hostile path and its own permission to use it.
+  `ValidatePluginSearchPath`'s `plugInfo.json` check stays, but only as a layout diagnostic: a
+  manifest being present says nothing about a directory being trustworthy.
+- **The Live Sync sample's control channel is authenticated, and stays on this machine**
+  (SECURITY-282834 / CWE-306, CWE-284). `UsdLiveSyncServer` accepted commands from anyone who could
+  open its port. The only access control in the channel was the per-object
+  `UsdSyncNode.AcceptsRemoteWrites` flag, which does not cover `get_snapshot` — the command that
+  returns every tracked prim path and transform — nor `reset`, nor the parser that runs before any
+  of them. Every connection now sends `{"cmd":"auth","token":"…"}` first; until it succeeds nothing
+  is answered and no broadcast is delivered, an invalid token closes the connection, and a client
+  that never authenticates is dropped after `authTimeoutSeconds`. The join snapshot moved from the
+  accept loop to the point just after a successful handshake, so connecting no longer discloses the
+  scene. The token comes from the `authToken` field, else `USD_LIVE_SYNC_TOKEN`, else a random
+  per-session value written to `live_sync_token.txt` beside `base_stage.usda`, which the bundled
+  clients find on their own; comparison is constant-time. `AcceptsRemoteWrites` is unchanged and
+  still scopes which objects accept writes — it is layered on authentication, not a substitute.
+- **The Live Sync listener refuses to bind past loopback, and bounds what a client can spend**
+  (SECURITY-282834 / CWE-284, CWE-400). `ResolveBindAddress` passed any parseable address through,
+  so `0.0.0.0` silently published the channel to the network. A non-loopback bind now requires both
+  `allowNonLoopbackBind` and an explicit `authToken` — the generated token is shared through a local
+  file and so is not a credential a remote client could hold — and the server refuses to start
+  otherwise, logging why. The port is taken with `ExclusiveAddressUse` instead of `ReuseAddress`, so
+  a co-located process can no longer rebind it and intercept clients. Three unbounded resources
+  driven by unauthenticated input were capped: the hand-rolled JSON parser rejects nesting past 32
+  levels (unbounded recursion on the main thread was an *uncatchable* `StackOverflowException`, so
+  the existing `try`/`catch` around `Json.Parse` could not have contained it), the per-client line
+  accumulator is capped at `maxCommandBytes` (64 KB) instead of growing until a newline arrives, and
+  the pending-command queue and connection count are bounded by `maxClients`.
+
 ## [0.7.2] - 2026-09-17
 
 ### Added

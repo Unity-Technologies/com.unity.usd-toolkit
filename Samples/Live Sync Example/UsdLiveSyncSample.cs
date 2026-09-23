@@ -358,7 +358,8 @@ namespace Unity.USDToolkit.Samples
             GUILayout.Label(server.IsRunning
                 ? $"Listening on {server.BindAddress}:{server.Port}"
                 : "Stopped", bodyStyle, GUILayout.Width(inner));
-            GUILayout.Label($"Clients: {server.ClientCount}          Tracked prims: {server.TrackedNodeCount}", bodyStyle, GUILayout.Width(inner));
+            GUILayout.Label($"Clients: {server.AuthenticatedClientCount} authenticated / {server.ClientCount} connected" +
+                            $"          Tracked prims: {server.TrackedNodeCount}", bodyStyle, GUILayout.Width(inner));
             GUILayout.Label($"Messages sent: {server.SequenceNumber}", smallStyle, GUILayout.Width(inner));
 
             GUILayout.Space(10.0f);

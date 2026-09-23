@@ -102,11 +102,11 @@ Linux:
 git clone https://github.cds.internal.unity3d.com/unity/com.unity.usd-toolkit.git
 cd com.unity.usd-toolkit
 git lfs install
-git checkout fix/openstage-init-guard     # or the branch/tag carrying 0.7.2
+git checkout security_fix                 # or the branch/tag carrying the SECURITY-282834 fixes
 git lfs pull
 ```
 
-**Gate 1 — you have the right source.** All six must be true:
+**Gate 1 — you have the right source.** All nine must be true:
 
 ```bash
 grep -c 'kApiVersion = 5'            Native~/src/UsdExporter.cpp   # 1
@@ -114,10 +114,22 @@ grep -c 'RUSD_MAX_UV_SETS'           Native~/include/unity_usd_toolkit_native.h 
 grep -c 'RUsd_GetImportMaterialOpacity' Native~/include/unity_usd_toolkit_native.h  # >= 1
 grep -c 'RUsd_CreateUsdzPackage'     Native~/include/unity_usd_toolkit_native.h  # >= 1
 grep -c 'VtValueHoldsType'           Native~/src/UsdExporter.cpp   # >= 3
-grep -c 'IsHolding<'                 Native~/src/UsdExporter.cpp   # must be 0
+# DSO-unsafe only for OpenUSD value types: their typeid does not match across the
+# plugin/monolithic boundary (hidden visibility). IsHolding<float>/<double> is fine, and
+# two comments mention the pattern -- a bare grep for 'IsHolding<' returns 4 on good source.
+grep -cE 'IsHolding<(Sdf|Gf|Vt|Tf|Usd)'  Native~/src/UsdExporter.cpp   # must be 0
+
+# SECURITY-282834 — the fixes are internal, so nothing in the ABI version reveals
+# their absence. A payload built without these is vulnerable and passes every other gate.
+grep -c 'int64_t cursor'                   Native~/src/UsdExporter.cpp   # 1  (topology overflow)
+grep -c 'IsResolvedAssetInsideStageRoot'   Native~/src/UsdExporter.cpp   # >= 2 (asset confinement)
+grep -c 'MinimumApiVersion = 5'            Runtime/Native/UsdNative.cs   # 1  (ABI gate tightened)
 ```
 
-If `IsHolding<` is non-zero, **stop**: you are on the wrong revision (see §2).
+If the `IsHolding<(Sdf|Gf|Vt|Tf|Usd)` count is non-zero, **stop**: you are on the wrong revision
+(see §2). If any of the
+three SECURITY-282834 lines is 0, **stop** — you would ship a payload missing the security
+fixes, and Gate 9's `security_test` is the only thing that would catch it, after the build.
 
 ## 5. Build OpenUSD (once per machine)
 
@@ -320,6 +332,15 @@ PASS
 with *"Failed to find the plugInfo.json file that declares the plugin for ArDefaultResolver"*.
 Unity sets it itself at runtime, so this is a harness-only requirement.
 
+> **`security_test` may be run from anywhere, including a `run\` copy of the fixture.** Its
+> out-of-folder check needs an *existing* file one level above the stage — to prove an asset is
+> refused on its **location** and not merely for being absent — and it creates and deletes that
+> probe file itself, next to the fixture's parent. It used to read `../CMakeLists.txt`, which only
+> existed while the fixture sat in `Native~/Tests~`; running from a copied directory then failed
+> with `FAIL the refusal is reported as an out-of-folder rejection` on a perfectly healthy
+> payload. If the probe cannot be created (read-only parent directory) the check reports `skip`
+> rather than failing.
+
 ## 8. Gate 7 — verification in the Unity Editor
 
 1. Point a project at this package (embedded or `file:` reference) and open it.
@@ -399,6 +420,36 @@ Only your platform's payload may appear. Specifically:
 - `git lfs status` must list the rebuilt binary under "Objects to be committed" — the payloads are
   LFS-tracked via `.gitattributes`. A plain (non-LFS) binary commit is a mistake; re-run
   `git lfs install` and re-add.
+
+## 9b. Gate 9 — regenerate the native digest manifest
+
+The managed loader compares every shipped native binary against the SHA-256 digest recorded in
+`Runtime/Native/NativeRuntimeHashes.g.cs` before the first P/Invoke (SECURITY-282834, CWE-494).
+A rebuild produces a new binary with a new digest, so a stale manifest makes the package refuse
+its own payload:
+
+```bash
+python3 Native~/generate_native_hashes.py   # Windows: usually `python` — `python3` is often absent
+git diff --stat Runtime/Native/NativeRuntimeHashes.g.cs   # your platform's entries only
+```
+
+The generator hashes **every** platform's binaries, not just the one you rebuilt, so make sure the
+other platforms' payloads are real content and not unfetched Git LFS pointer files before you run
+it — it cannot tell the difference and would record the pointers' digests, breaking those
+platforms at load time. `git lfs fsck --pointers` and a size check are enough. A single-platform
+rebuild should change **only that platform's entries**; anything else in the diff means the LFS
+working copy was incomplete.
+
+The regenerated file goes in the **same commit** as the payload. Then confirm the check passes in
+the Editor (Gate 7's project works): `Unity.USDToolkit.UsdExporter.GetRuntimeInfo()` must return
+without throwing — a digest mismatch throws `UsdExportException` naming the offending file.
+
+Also re-run the security regression test against the new payload:
+
+```bash
+cd Native~/Tests~   # build per the header comment in security_test.cpp
+./security_test security_fixture.usda        # must print PASS (9 checks)
+```
 
 ## 10. Commit and push
 

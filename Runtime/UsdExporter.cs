@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 using Unity.USDToolkit.Native;
@@ -11,6 +12,20 @@ namespace Unity.USDToolkit
 {
     public static class UsdExporter
     {
+        /// <summary>
+        /// Allows <see cref="UsdExportOptions.PluginSearchPath"/> to point outside the package's
+        /// own native runtime folders. Off by default: OpenUSD's plugin registry loads and
+        /// executes any library named by a plugInfo.json under that path, in-process, so an
+        /// unvetted directory is arbitrary code execution. Set this from code only when you
+        /// deliberately run against a custom OpenUSD install.
+        ///
+        /// Deliberately a static, non-serialized switch rather than a field on
+        /// <see cref="UsdExportOptions"/>: that type is [Serializable], so an options object
+        /// arriving from a scene, prefab or asset could otherwise carry both a hostile search
+        /// path and its own permission to use it.
+        /// </summary>
+        public static bool AllowExternalPluginSearchPath { get; set; }
+
         private static readonly char[] InvalidPrimNameChars =
         {
             ' ', '-', '.', ':', '/', '\\', '(', ')', '[', ']', '{', '}', ',', ';', '\'', '"'
@@ -247,16 +262,26 @@ namespace Unity.USDToolkit
             }
         }
 
-        private static void ValidateNativeApiVersion()
+        // Called by both the export and the import entry points. Newer-than-expected plugins are
+        // still accepted (added entry points are additive), but an *older* one is refused rather
+        // than degraded: beyond the features it cannot deliver, any fix that is not gated on the
+        // ABI version is simply absent from it with nothing in the version number to say so --
+        // the SECURITY-282834 topology and asset-path fixes are exactly that shape.
+        internal static void ValidateNativeApiVersion()
         {
-            // Newer-than-expected plugins are fine (the added entry points are additive); older
-            // ones simply lose the features gated on UsdNative.LoadedApiVersion.
             int apiVersion = UsdNative.LoadedApiVersion;
-            if (apiVersion < UsdNative.MinimumApiVersion)
+            if (apiVersion >= UsdNative.MinimumApiVersion)
             {
-                throw new UsdExportException(
-                    $"Unity USD Toolkit native API version mismatch. Expected {UsdNative.MinimumApiVersion} or newer, loaded {apiVersion}. Rebuild {UsdNative.NativeDllName} from this package.");
+                return;
             }
+
+            throw new UsdExportException(
+                $"Unity USD Toolkit native API version mismatch. This package's source is API " +
+                $"{UsdNative.LatestApiVersion} and requires at least API {UsdNative.MinimumApiVersion}, " +
+                $"but the loaded plugin reports API {apiVersion}. A plugin older than the source is " +
+                $"missing entry points *and* any fix made since it was built, including the " +
+                $"SECURITY-282834 import hardening. Rebuild {UsdNative.NativeDllName} from this " +
+                $"package's Native~ sources (see Native~/REBUILD_WINDOWS_LINUX.md).");
         }
 
         private static void ExportMeshes(
@@ -289,8 +314,9 @@ namespace Unity.USDToolkit
                     continue;
                 }
 
-                // readable=false 메시는 Play 모드에서 CPU 접근(mesh.vertices 등)이 막힌다.
-                // GPU 정점/인덱스 버퍼를 readback해 임시 readable 사본을 만들어 사용하고, export 후 폐기한다.
+                // A mesh with readable=false blocks CPU access (mesh.vertices and friends) in
+                // Play mode. Read the GPU vertex/index buffers back into a temporary readable
+                // copy, use that, and discard it after the export.
                 Mesh workMesh = mesh;
                 bool tempMesh = false;
                 if (!mesh.isReadable)
@@ -305,7 +331,7 @@ namespace Unity.USDToolkit
                     workMesh = TryCreateReadableCopyFromGpu(mesh);
                     if (workMesh == null)
                     {
-                        // GPU 버퍼 접근 불가(정점/인덱스 데이터 없음) → skip
+                        // The GPU buffers are unreachable (no vertex/index data) -> skip.
                         continue;
                     }
 
@@ -354,8 +380,8 @@ namespace Unity.USDToolkit
             }
         }
 
-        // GPU 정점/인덱스 버퍼를 readback해 readable Mesh 사본을 생성한다.
-        // (Play 모드 + isReadable=false 메시 대응: GPU 메모리엔 버퍼가 남아 있으므로 읽어온다.)
+        // Builds a readable Mesh copy by reading the GPU vertex/index buffers back.
+        // (For isReadable=false meshes in Play mode: the buffers are still in GPU memory.)
         private static Mesh TryCreateReadableCopyFromGpu(Mesh src)
         {
             int vcount = src.vertexCount;
@@ -364,7 +390,8 @@ namespace Unity.USDToolkit
                 return null;
             }
 
-            // 정점 attribute별 stream / stream 내 byte offset / format / dimension 파악
+            // Work out each vertex attribute's stream, byte offset within it, format and
+            // dimension.
             VertexAttributeDescriptor[] attrs = src.GetVertexAttributes();
             var streamCursor = new Dictionary<int, int>();
             int posStream = -1, posOffset = 0; VertexAttributeFormat posFmt = VertexAttributeFormat.Float32;
@@ -384,7 +411,7 @@ namespace Unity.USDToolkit
                 return null;
             }
 
-            // 사용 stream 버퍼 readback
+            // Read back the streams actually in use.
             src.vertexBufferTarget |= GraphicsBuffer.Target.Raw;
             int streamCount = src.vertexBufferCount;
             var streamBytes = new Dictionary<int, byte[]>();
@@ -428,7 +455,7 @@ namespace Unity.USDToolkit
                 if (uvs != null) { uvs[i] = ReadVector2(streamBytes[uvStream], i * streamStride[uvStream] + uvOffset, uvFmt); }
             }
 
-            // 인덱스 버퍼 readback
+            // Read back the index buffer.
             src.indexBufferTarget |= GraphicsBuffer.Target.Raw;
             GraphicsBuffer ib = src.GetIndexBuffer();
             if (ib == null)
@@ -789,21 +816,28 @@ namespace Unity.USDToolkit
                     roughness = Mathf.Clamp01(1.0f - material.GetFloat("_Smoothness"));
                 }
 
-                // PBR 텍스처(albedo/normal/metallic+smoothness)를 PNG로 USD 옆에 저장하고 상대경로를 받아온다.
-                // textureContext가 비활성(Mesh Only 모드)이면 빈 문자열 → native는 단색만 사용.
+                // Write the PBR textures (albedo / normal / metallic+smoothness) as PNGs beside
+                // the USD file and take back their relative paths. When textureContext is
+                // inactive (Mesh Only mode) these come back empty and the native side uses flat
+                // colours only.
                 if (textureContext != null)
                 {
                     albedoPath = textureContext.ExportAlbedo(material);
                     normalPath = textureContext.ExportNormal(material);
                     metallicPath = textureContext.ExportMetallic(material);
 
-                    // metallic 슬롯에 albedo와 '같은 텍스처'가 꽂힌 흔한 오배치 보정(옵션, 기본 on).
-                    // (예: MetalFrame은 _MetallicGlossMap에 basecolor 텍스처가 들어가 있음)
-                    // 그 텍스처의 .r을 metallic로 쓰면 표면이 거의 거울(metallic≈0.7, roughness 0)이 되어,
-                    // 환경 반사를 안 해주는 렌더러(예: Isaac 실시간 뷰포트)에서 검은 배경만 비쳐 새까맣게 보인다.
-                    // 오배치로 판단해 metallic 텍스처를 버리고 스칼라 _Metallic/_Smoothness만 쓴다(diffuse 회색으로 보임).
-                    // albedo/metallic은 같은 Texture면 동일 캐시 경로가 나오므로 경로 비교로 감지한다.
-                    // 의도적으로 같은 텍스처를 공유하는 경우 IgnoreAlbedoInMetallicSlot=false로 끌 수 있다.
+                    // Corrects a common misassignment: the *same texture* plugged into both the
+                    // albedo and the metallic slot (optional, on by default). MetalFrame, for
+                    // instance, has its base colour texture in _MetallicGlossMap.
+                    // Using that texture's .r as metallic makes the surface a near mirror
+                    // (metallic around 0.7, roughness 0), so a renderer without environment
+                    // reflection -- the Isaac real-time viewport, say -- shows only the black
+                    // background and the object reads as pitch black.
+                    // Treating it as misassigned drops the metallic texture and keeps the scalar
+                    // _Metallic/_Smoothness instead, which renders as a diffuse grey.
+                    // The same Texture yields the same cache path, so comparing paths detects it.
+                    // Set IgnoreAlbedoInMetallicSlot=false when the two share a texture on
+                    // purpose.
                     if (textureContext.IgnoreAlbedoInMetallicSlot &&
                         !string.IsNullOrEmpty(metallicPath) && metallicPath == albedoPath)
                     {
@@ -817,7 +851,8 @@ namespace Unity.USDToolkit
                     }
                 }
 
-                // emission(발광): _EMISSION 키워드가 켜진 material만 (창문/발광 패널 등)
+                // Emission: only for materials with the _EMISSION keyword enabled (windows,
+                // glowing panels and the like).
                 if (material.IsKeywordEnabled("_EMISSION"))
                 {
                     if (material.HasProperty("_EmissionColor"))
@@ -854,8 +889,9 @@ namespace Unity.USDToolkit
             };
         }
 
-        // material의 albedo 텍스처를 USD 파일 옆 "<usd이름>_textures/" 폴더에 PNG로 저장하고,
-        // USD 기준 상대경로를 돌려준다. 텍스처는 한 번만 저장하고 캐시한다.
+        // Writes a material's albedo texture as a PNG into the "<usd-name>_textures/" folder
+        // beside the USD file and returns the path relative to the USD file. Each texture is
+        // written once and cached.
         private sealed class TextureExportContext
         {
             private static readonly string[] AlbedoProperties = { "_BaseMap", "_MainTex", "_BaseColorMap" };
@@ -868,7 +904,8 @@ namespace Unity.USDToolkit
             private readonly string directoryRelative;
             private readonly Dictionary<Texture, string> cache = new Dictionary<Texture, string>();
 
-            // metallic 슬롯에 albedo와 같은 텍스처가 꽂힌 오배치를 자동 보정할지 여부.
+            // Whether to auto-correct the misassignment of the albedo texture into the
+            // metallic slot.
             public bool IgnoreAlbedoInMetallicSlot { get; }
 
             public TextureExportContext(string usdOutputPath, bool enabled, bool ignoreAlbedoInMetallicSlot)
@@ -885,8 +922,9 @@ namespace Unity.USDToolkit
             public string ExportMetallic(Material material) => ExportSlot(material, MetallicProperties, sRGB: false);
             public string ExportEmissive(Material material) => ExportSlot(material, EmissiveProperties, sRGB: true);
 
-            // properties 중 첫 유효 텍스처를 PNG로 저장하고 USD 기준 상대경로를 돌려준다.
-            // sRGB=true(albedo)면 sRGB로, false(normal/metallic)면 linear로 readback.
+            // Writes the first valid texture among `properties` as a PNG and returns its path
+            // relative to the USD file. sRGB=true (albedo) reads back as sRGB; false
+            // (normal/metallic) reads back as linear.
             private string ExportSlot(Material material, string[] properties, bool sRGB, bool decodeNormal = false)
             {
                 if (!enabled || material == null)
@@ -933,7 +971,7 @@ namespace Unity.USDToolkit
                         Directory.CreateDirectory(directoryAbsolute);
                         string fileName = SanitizeFileName(string.IsNullOrEmpty(texture.name) ? "texture" : texture.name) + ".png";
                         File.WriteAllBytes(Path.Combine(directoryAbsolute, fileName), png);
-                        relativePath = directoryRelative + "/" + fileName; // USD가 상대경로로 참조
+                        relativePath = directoryRelative + "/" + fileName; // referenced relatively from the USD
                     }
                 }
                 catch (Exception exception)
@@ -952,7 +990,8 @@ namespace Unity.USDToolkit
                 return relativePath;
             }
 
-            // Unity normal map(DXT5nm: x=A·y=G, R≈255 / 비압축·BC5: x=R·y=G)을 USD 표준 RGB normal(xyz)로 복원한다.
+            // Decodes a Unity normal map (DXT5nm: x=A, y=G, R close to 255; uncompressed/BC5:
+            // x=R, y=G) back into a standard USD RGB normal (xyz).
             private static void DecodeUnityNormalMap(Texture2D normalTex)
             {
                 Color32[] pixels = normalTex.GetPixels32();
@@ -961,7 +1000,8 @@ namespace Unity.USDToolkit
                     return;
                 }
 
-                // 중앙 픽셀로 인코딩 방식 판정 (DXT5nm이면 R이 거의 255이고 alpha에 데이터가 있음)
+                // Decide the encoding from the centre pixel: DXT5nm has R close to 255 and
+                // carries data in alpha.
                 Color32 probe = pixels[pixels.Length / 2];
                 bool dxt5nm = probe.r >= 250 && probe.a < 250;
 
@@ -982,7 +1022,8 @@ namespace Unity.USDToolkit
                 normalTex.Apply();
             }
 
-            // 압축/비-readable 텍스처도 GPU Blit으로 RGBA32 readable 사본을 만든다.
+            // Produces an RGBA32 readable copy via a GPU Blit, which also works for compressed
+            // and non-readable textures.
             private static Texture2D ToReadableTexture2D(Texture source, bool sRGB)
             {
                 int width = source.width;
@@ -1175,10 +1216,29 @@ namespace Unity.USDToolkit
                 ValidateNativeRuntimeFiles(info);
             }
 
+            if (options.VerifyNativeRuntimeIntegrity)
+            {
+                VerifyNativeRuntimeIntegrity(info);
+            }
+
             string pluginSearchPath = options.PluginSearchPath;
             if (string.IsNullOrWhiteSpace(pluginSearchPath))
             {
                 pluginSearchPath = TryGetDefaultPluginSearchPath();
+            }
+            else if (!AllowExternalPluginSearchPath &&
+                !IsTrustedPluginSearchPath(pluginSearchPath, out string untrustedEntry))
+            {
+                // Rejected *before* PXR_PLUGINPATH_NAME is written: the variable is read lazily
+                // by OpenUSD's plugin registry, so setting it first and validating afterwards
+                // (which is what ValidateOpenUsdPluginPath used to do) leaves the process
+                // already pointed at the untrusted directory.
+                throw new UsdExportException(
+                    "UsdExportOptions.PluginSearchPath points outside the package's own native runtime " +
+                    "folders: " + untrustedEntry + ". OpenUSD loads and executes any library named by a " +
+                    "plugInfo.json under this path, so an unvetted directory is refused. Set " +
+                    "UsdExporter.AllowExternalPluginSearchPath from code to use a custom OpenUSD install.",
+                    info.ToDiagnosticString());
             }
 
             info.PluginSearchPath = pluginSearchPath;
@@ -1252,6 +1312,143 @@ namespace Unity.USDToolkit
                 info.ToDiagnosticString());
         }
 
+        // 0 until the payload has been checked, 1 afterwards. ConfigureNativeRuntime runs on
+        // every export and import entry point, and hashing ~90 MB of dylib each time would be a
+        // real cost, so the check runs once per process -- the binaries cannot change under a
+        // loaded process without it being restarted anyway.
+        private static int integrityVerified;
+
+        // Compares every native binary in the payload against the digest recorded in
+        // NativeRuntimeHashes at build time. ValidateNativeRuntimeFiles above only asks whether a
+        // file of the right name exists, which cannot tell a genuine binary from a substituted
+        // one; this reads the contents. It is not a defence against someone who already has write
+        // access to the payload (they could rebuild the package too) -- it catches a binary that
+        // was swapped or corrupted in distribution, and it makes the payload auditable: anyone can
+        // hash the shipped files and compare.
+        private static void VerifyNativeRuntimeIntegrity(NativeRuntimeInfo info)
+        {
+            if (!UsdNative.IsSupportedPlatform || Volatile.Read(ref integrityVerified) != 0)
+            {
+                return;
+            }
+
+            var mismatches = new List<string>();
+            var unverified = new List<string>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            int verified = 0;
+
+            foreach (string basePath in info.BasePaths)
+            {
+                if (string.IsNullOrEmpty(basePath) || !Directory.Exists(basePath))
+                {
+                    continue;
+                }
+
+                foreach (string file in Directory.GetFiles(basePath))
+                {
+                    string name = Path.GetFileName(file);
+                    if (!IsNativeBinaryName(name) || !seen.Add(name))
+                    {
+                        // Base paths overlap on some platforms, so each name is checked once.
+                        continue;
+                    }
+
+                    if (!NativeRuntimeHashes.Expected.TryGetValue(name, out string expected))
+                    {
+                        unverified.Add(name);
+                        continue;
+                    }
+
+                    string actual;
+                    try
+                    {
+                        actual = ComputeSha256(file);
+                    }
+                    catch (Exception exception)
+                    {
+                        mismatches.Add(name + " (could not be read: " + exception.Message + ")");
+                        continue;
+                    }
+
+                    if (string.Equals(actual, expected, StringComparison.OrdinalIgnoreCase))
+                    {
+                        ++verified;
+                    }
+                    else
+                    {
+                        mismatches.Add(name + " (expected " + expected + ", found " + actual + ")");
+                    }
+                }
+            }
+
+            if (mismatches.Count > 0)
+            {
+                throw new UsdExportException(
+                    "Unity USD Toolkit native runtime files do not match the digests recorded for " +
+                    "this package: " + string.Join("; ", mismatches) +
+                    ". The native code is loaded and executed in-process, so a payload that does " +
+                    "not match its manifest is refused. If you rebuilt the native plugin " +
+                    "yourself, regenerate the manifest with " +
+                    "'python3 Native~/generate_native_hashes.py'; otherwise re-acquire the " +
+                    "package. Set UsdExportOptions.VerifyNativeRuntimeIntegrity to false to skip " +
+                    "this check.",
+                    info.ToDiagnosticString());
+            }
+
+            if (unverified.Count > 0)
+            {
+                // Not fatal: a payload may legitimately carry a file the manifest predates.
+                Debug.LogWarning(
+                    "Unity USD Toolkit: no recorded digest for native file(s) " +
+                    string.Join(", ", unverified) +
+                    "; their contents were not verified. Regenerate the manifest with " +
+                    "'python3 Native~/generate_native_hashes.py'.");
+            }
+
+            if (verified == 0 && unverified.Count == 0)
+            {
+                // Nothing was found to check, which means the payload is missing entirely.
+                // ValidateNativeRuntimeFiles reports that properly when it is enabled.
+                return;
+            }
+
+            Volatile.Write(ref integrityVerified, 1);
+        }
+
+        private static bool IsNativeBinaryName(string name)
+        {
+            if (string.IsNullOrEmpty(name) || name.EndsWith(".meta", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            return name.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) ||
+                name.EndsWith(".dylib", StringComparison.OrdinalIgnoreCase) ||
+                name.EndsWith(".so", StringComparison.OrdinalIgnoreCase) ||
+                // libtbb.so.2 and friends: a version suffix after .so
+                name.IndexOf(".so.", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private static string ComputeSha256(string path)
+        {
+            using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+            using (var sha = SHA256.Create())
+            {
+                byte[] hash = sha.ComputeHash(stream);
+                var builder = new StringBuilder(hash.Length * 2);
+                foreach (byte value in hash)
+                {
+                    builder.Append(value.ToString("x2"));
+                }
+
+                return builder.ToString();
+            }
+        }
+
+        // Layout diagnostic only: reports a plugin path that exists but has no plugInfo.json
+        // under it, so schema/shader discovery would fail. Whether the path may be used at all
+        // is decided earlier, by IsTrustedPluginSearchPath in ConfigureNativeRuntime — a
+        // manifest being present says nothing about the directory being trustworthy.
         private static void ValidatePluginSearchPath(NativeRuntimeInfo info)
         {
             if (!UsdNative.IsSupportedPlatform)
@@ -1299,6 +1496,84 @@ namespace Unity.USDToolkit
             }
         }
 
+        // True when every entry of `searchPath` canonicalizes to one of the package's own native
+        // runtime folders, or a directory beneath one. This is a check on the *location*: the
+        // plugInfo.json presence test in ValidatePluginSearchPath cannot distinguish the
+        // package's plugin tree from an attacker's folder, because a malicious folder contains
+        // exactly that file too.
+        private static bool IsTrustedPluginSearchPath(string searchPath, out string rejectedEntry)
+        {
+            rejectedEntry = null;
+
+            var roots = new List<string>();
+            foreach (string basePath in GetDefaultNativeBasePaths())
+            {
+                try
+                {
+                    roots.Add(Path.GetFullPath(basePath)
+                        .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+                }
+                catch (Exception)
+                {
+                    // An unusable base path cannot serve as a trust root.
+                }
+            }
+
+            if (roots.Count == 0)
+            {
+                // No known-good root to compare against (unsupported platform): trust nothing.
+                rejectedEntry = searchPath;
+                return false;
+            }
+
+            foreach (string entry in searchPath.Split(Path.PathSeparator))
+            {
+                if (string.IsNullOrWhiteSpace(entry))
+                {
+                    continue;
+                }
+
+                string candidate;
+                try
+                {
+                    candidate = Path.GetFullPath(entry)
+                        .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                }
+                catch (Exception)
+                {
+                    rejectedEntry = entry;
+                    return false;
+                }
+
+                bool inside = false;
+                foreach (string root in roots)
+                {
+                    if (candidate.Equals(root, PathComparison) ||
+                        candidate.StartsWith(root + Path.DirectorySeparatorChar, PathComparison))
+                    {
+                        inside = true;
+                        break;
+                    }
+                }
+
+                if (!inside)
+                {
+                    rejectedEntry = entry;
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        // Linux filesystems are case-sensitive, so comparing case-insensitively there would
+        // accept a sibling directory differing only in case as being inside the trusted root.
+#if UNITY_EDITOR_LINUX || UNITY_STANDALONE_LINUX
+        private const StringComparison PathComparison = StringComparison.Ordinal;
+#else
+        private const StringComparison PathComparison = StringComparison.OrdinalIgnoreCase;
+#endif
+
         private static string TryGetDefaultPluginSearchPath()
         {
             var paths = new List<string>();
@@ -1340,7 +1615,8 @@ namespace Unity.USDToolkit
             yield return Path.Combine(Application.dataPath, "Plugins");
             yield return Path.Combine(Application.dataPath, "Plugins", "macOS");
 #elif UNITY_EDITOR_LINUX
-            // self-contained 레이아웃: toolkit .so는 Linux/, 의존 .so·schema는 Linux/lib/(lib/usd)
+            // Self-contained layout: the toolkit .so sits in Linux/, its dependent .so files and
+            // the schema tree in Linux/lib/ (lib/usd).
             yield return Path.GetFullPath("Packages/com.unity.usd-toolkit/Runtime/Plugins/x86_64/Linux");
             yield return Path.GetFullPath("Packages/com.unity.usd-toolkit/Runtime/Plugins/x86_64/Linux/lib");
 #elif UNITY_STANDALONE_LINUX
@@ -1377,13 +1653,15 @@ namespace Unity.USDToolkit
 
         private static string[] GetOpenUsdNativeFileNames()
         {
-            // usd_rt: OpenUSD monolithic 을 고유 이름으로 rename 해 다른 패키지(예:
-            // com.unity.pixyz.sdk-plus)가 번들하는 usd_ms 와의 base 이름 충돌을 피한다.
-            // (구 usd_ms 이름은 하위호환 fallback 으로 유지)
+            // usd_rt: the OpenUSD monolithic library renamed to something unique, to avoid a
+            // base-name collision with the usd_ms bundled by another package (for example
+            // com.unity.pixyz.sdk-plus). The old usd_ms name is kept as a compatibility
+            // fallback.
 #if UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX
             return new[] { "libusd_rt.dylib", "libusd_ms.dylib", "libusd_m.dylib" };
 #elif UNITY_EDITOR_LINUX || UNITY_STANDALONE_LINUX
-            // Linux는 component 빌드(monolithic 없음) — 대표 파일명, 실제 검출은 패턴으로
+            // Linux uses a component build (no monolithic library): these are representative
+            // names, and the actual detection is done by pattern.
             return new[] { "libusd_rt.so", "libusd_usd.so", "libusd_ms.so" };
 #else
             return new[] { "usd_rt.dll", "usd_ms.dll", "usd_m.dll" };

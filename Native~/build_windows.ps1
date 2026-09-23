@@ -117,12 +117,14 @@ if (-not (Test-Path $ToolkitDll)) {
 
 Get-ChildItem $InstallDir -Recurse -Include "*.lib", "*.exp", "*.pdb" -File -ErrorAction SilentlyContinue | Remove-Item -Force
 
-# --- OpenUSD monolithic 을 고유 이름으로 rename (base-name 충돌 회피) ---
-# OpenUSD 의 monolithic DLL 은 'usd_ms.dll' 로, 다른 패키지(예: com.unity.pixyz.sdk-plus)가
-# 번들하는 OpenUSD 와 base 이름이 같다. 한 프로세스에 둘이 있으면 먼저 로드된 쪽에 바인딩돼
-# UnityUSDToolkitNative 가 필요한 export 를 못 찾아 DllNotFound(PROC_NOT_FOUND) 가 난다.
-# payload 의 usd_ms.dll 을 고유한 usd_rt.dll 로 rename 하고, wrapper 의 import 문자열도 동일하게
-# 패치한다. (PE import 이름은 길이를 못 늘리므로 'usd_ms.dll'(10) 과 같은 길이의 'usd_rt.dll' 사용)
+# --- Rename the OpenUSD monolithic library to something unique (avoids a base-name clash) ---
+# OpenUSD's monolithic DLL is called 'usd_ms.dll', the same base name as the OpenUSD bundled by
+# other packages (com.unity.pixyz.sdk-plus, for one). With both in a process, whichever loads
+# first wins the binding, UnityUSDToolkitNative cannot find the exports it needs, and the result
+# is DllNotFound (PROC_NOT_FOUND).
+# So the payload's usd_ms.dll is renamed to a unique usd_rt.dll and the wrapper's import string
+# is patched to match. (A PE import name cannot grow, hence 'usd_rt.dll' -- the same length as
+# 'usd_ms.dll'.)
 function Replace-AsciiInFile {
     param([string] $Path, [string] $From, [string] $To)
     if ($From.Length -ne $To.Length) { throw "rename length mismatch: '$From'($($From.Length)) vs '$To'($($To.Length))" }
@@ -141,7 +143,7 @@ function Replace-AsciiInFile {
 
 $UsdMonolithic = Join-Path $InstallDir "usd_ms.dll"
 if (Test-Path $UsdMonolithic) {
-    $RenamedName = "usd_rt.dll"   # 'usd_ms.dll' 과 동일 길이여야 in-place import 패치 가능
+    $RenamedName = "usd_rt.dll"   # must match the length of 'usd_ms.dll' for the in-place patch
     [void](Replace-AsciiInFile -Path $ToolkitDll -From "usd_ms.dll" -To $RenamedName)
     [void](Replace-AsciiInFile -Path $UsdMonolithic -From "usd_ms.dll" -To $RenamedName)
     Move-Item -LiteralPath $UsdMonolithic -Destination (Join-Path $InstallDir $RenamedName) -Force

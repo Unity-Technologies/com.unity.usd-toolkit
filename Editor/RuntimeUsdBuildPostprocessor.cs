@@ -41,7 +41,8 @@ namespace Unity.USDToolkit.Editor
                 return;
             }
 
-            // Windows만 평탄 레이아웃이라 형제 파일 정리. Linux/macOS는 self-contained 트리 그대로 복사.
+            // Only Windows uses the flat layout, so its sibling files need tidying up. Linux
+            // and macOS ship a self-contained tree that is copied across as-is.
             if (!isMacOS && !isLinux)
             {
                 string windowsPluginParent = Path.GetDirectoryName(destinationRoot);

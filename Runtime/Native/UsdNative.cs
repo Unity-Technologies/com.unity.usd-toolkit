@@ -8,10 +8,13 @@ namespace Unity.USDToolkit.Native
     {
         private const string DllName = "UnityUSDToolkitNative";
         private const int ErrorBufferSize = 4096;
-        // API 3 added the extra UV sets. They are additive entry points, so a plugin still
-        // reporting 2 keeps working (uv0 only) instead of failing the version gate outright —
-        // which matters while the Windows/Linux payloads are rebuilt.
-        internal const int MinimumApiVersion = 2;
+        // Exact match with the source, deliberately. This used to accept anything >= 2 so that
+        // payloads lagging the source (uv0 only, no usdz) kept working while Windows and Linux
+        // were rebuilt. All three desktop payloads are API 5 as of 2026-09-22, and the tolerance
+        // had become a hole: fixes that are not gated on the ABI version — the SECURITY-282834
+        // topology and asset-path fixes among them — are simply absent from an older binary, and
+        // nothing in the version number says so. An older plugin is now refused outright.
+        internal const int MinimumApiVersion = 5;
         internal const int LatestApiVersion = 5;
         // usdz packaging and resolver-backed asset reads (textures inside a .usdz).
         internal const int UsdzApiVersion = 5;

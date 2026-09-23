@@ -22,6 +22,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -137,8 +138,12 @@ int main()
 {
     const std::string directory = TempDirectory();
     const std::string textureDirectory = directory + "/textures";
-    std::string command = "rm -rf '" + directory + "' && mkdir -p '" + textureDirectory + "'";
-    if (std::system(command.c_str()) != 0)
+    // std::filesystem rather than a shelled-out `rm -rf` / `mkdir -p`: on Windows `mkdir` is
+    // a cmd.exe builtin that rejects the POSIX flag, so the shell form could not run there.
+    std::error_code ec;
+    std::filesystem::remove_all(directory, ec);
+    std::filesystem::create_directories(textureDirectory, ec);
+    if (!std::filesystem::is_directory(textureDirectory))
     {
         std::printf("could not prepare %s\n", directory.c_str());
         return 1;

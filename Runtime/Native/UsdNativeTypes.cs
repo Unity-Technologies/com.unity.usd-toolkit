@@ -40,7 +40,8 @@ namespace Unity.USDToolkit.Native
         public float Metallic;
         public float Roughness;
 
-        // 비어 있으면 단색, 채워지면 native가 UsdUVTexture로 연결한다 (모두 USD 기준 상대경로).
+        // Empty means a flat colour; when set, the native side wires it up as a UsdUVTexture
+        // (all paths are relative to the USD file).
         [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 512)]
         public string AlbedoTexturePath;
 
@@ -50,13 +51,15 @@ namespace Unity.USDToolkit.Native
         [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 512)]
         public string MetallicTexturePath;
 
-        // 텍스처 UV 타일링/오프셋. (1,1,0,0)이 아니면 native가 UsdTransform2d로 적용한다.
+        // Texture UV tiling/offset. Anything other than (1,1,0,0) is applied by the native
+        // side as a UsdTransform2d.
         public float UvScaleX;
         public float UvScaleY;
         public float UvOffsetX;
         public float UvOffsetY;
 
-        // emissiveColor (기본 0). 0이 아니거나 텍스처가 있으면 native가 emissiveColor를 출력한다.
+        // emissiveColor (0 by default). The native side authors emissiveColor when this is
+        // non-zero or an emission texture is present.
         public float EmissiveR;
         public float EmissiveG;
         public float EmissiveB;

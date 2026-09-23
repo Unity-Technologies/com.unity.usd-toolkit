@@ -109,6 +109,7 @@ namespace Unity.USDToolkit
                 {
                     InputPath = fullInputPath,
                     BaseDirectory = Path.GetDirectoryName(fullInputPath),
+                    AllowExternalAssetPaths = options.AllowExternalAssetPaths,
                     DefaultPrimPath = info.DefaultPrimPath,
                     MetersPerUnit = info.MetersPerUnit,
                     UpAxis = info.UpAxis
@@ -584,9 +585,18 @@ namespace Unity.USDToolkit
                 return;
             }
 
+            // Re-checked at the sink: every path reaching here was validated in
+            // ResolveTexturePath, and this keeps that true if another caller is ever added.
+            if (!IsAssetPathAllowed(data, path, out string readPath))
+            {
+                data.TextureBytes[path] = null;
+                Debug.LogWarning("USD import: refused to read a texture outside the stage folder.");
+                return;
+            }
+
             try
             {
-                data.TextureBytes[path] = File.ReadAllBytes(path);
+                data.TextureBytes[path] = File.ReadAllBytes(readPath);
             }
             catch (Exception exception)
             {
@@ -838,9 +848,23 @@ namespace Unity.USDToolkit
                 ? relativePath
                 : Path.Combine(stage.BaseDirectory ?? string.Empty, relativePath);
 
-            if (File.Exists(fullPath))
+            // The authored path comes out of the file being imported, so it is untrusted: a
+            // rooted path or a `../` climb used to be read straight off disk. Confinement is
+            // decided on the canonicalized path and *before* either read path is taken — the
+            // native resolver below is a second, independent sink, so a guard placed only in
+            // front of File.Exists would simply be walked around.
+            if (!IsAssetPathAllowed(stage, fullPath, out string canonicalPath))
             {
-                return fullPath;
+                // Only the authored path is echoed. Reporting the resolved location would tell
+                // the author of a hostile stage where files sit on this machine.
+                Debug.LogWarning(
+                    $"USD import: texture path resolves outside the stage folder, skipping: {relativePath}");
+                return null;
+            }
+
+            if (File.Exists(canonicalPath))
+            {
+                return canonicalPath;
             }
 
             if (UsdNative.TryResolveImportAsset(context, relativePath, out string resolvedPath, out long byteCount) &&
@@ -850,8 +874,78 @@ namespace Unity.USDToolkit
                 return resolvedPath;
             }
 
-            Debug.LogWarning($"USD import: texture not found, skipping: {fullPath}");
+            Debug.LogWarning($"USD import: texture not found, skipping: {canonicalPath}");
             return null;
+        }
+
+        // Linux filesystems are case-sensitive, so a case-insensitive comparison there would
+        // accept a sibling directory that merely differs in case as being "inside" the stage
+        // folder. Windows and macOS default to case-insensitive, where the strict comparison
+        // would reject legitimate paths.
+#if UNITY_EDITOR_LINUX || UNITY_STANDALONE_LINUX
+        private const StringComparison PathComparison = StringComparison.Ordinal;
+#else
+        private const StringComparison PathComparison = StringComparison.OrdinalIgnoreCase;
+#endif
+
+        // True when `candidate` canonicalizes to a location inside the stage's own folder, which
+        // is the only place an untrusted stage may pull assets from unless the caller opted in
+        // with UsdImportOptions.AllowExternalAssetPaths. Canonicalizing first is what makes this
+        // sound: scanning for the substring ".." would miss an absolute path, and would also
+        // miss a path that only escapes once it is normalized. `canonicalPath` is handed back so
+        // callers read exactly the path that was validated.
+        private static bool IsAssetPathAllowed(StageData stage, string candidate, out string canonicalPath)
+        {
+            canonicalPath = null;
+            if (string.IsNullOrEmpty(candidate))
+            {
+                return false;
+            }
+
+            // A packaged asset (inside a .usdz) is not a filesystem path and is read back through
+            // the stage's resolver, not File.ReadAllBytes. Its authored path was already confined
+            // before the resolver was consulted.
+            if (stage.PackageAssets.ContainsKey(candidate))
+            {
+                canonicalPath = candidate;
+                return true;
+            }
+
+            try
+            {
+                canonicalPath = Path.GetFullPath(candidate);
+            }
+            catch (Exception)
+            {
+                // Malformed path (invalid characters, too long, bad root): not readable anyway.
+                return false;
+            }
+
+            if (stage.AllowExternalAssetPaths)
+            {
+                return true;
+            }
+
+            if (string.IsNullOrEmpty(stage.BaseDirectory))
+            {
+                return false;
+            }
+
+            string root;
+            try
+            {
+                root = Path.GetFullPath(stage.BaseDirectory);
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+
+            // Trailing separator on the root so "/stage" does not also match "/stage-secrets".
+            root = root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) +
+                Path.DirectorySeparatorChar;
+
+            return canonicalPath.StartsWith(root, PathComparison);
         }
 
         // Uploads a texture to the GPU, reusing it across materials via the per-import cache.
@@ -1033,6 +1127,11 @@ namespace Unity.USDToolkit
         private static void ConfigureNativeRuntime()
         {
             UsdExporter.GetRuntimeInfo();
+
+            // The version gate used to live only in the export path, so an import ran against
+            // whatever plugin happened to be loaded. That was backwards: the import path is where
+            // untrusted file content is parsed, and the SECURITY-282834 fixes live there.
+            UsdExporter.ValidateNativeApiVersion();
         }
 
         private static UsdImportException CreateImportException(Exception exception)
@@ -1115,6 +1214,10 @@ namespace Unity.USDToolkit
         {
             public string InputPath;
             public string BaseDirectory;
+
+            // Copied from UsdImportOptions so the read pass can confine authored asset paths
+            // without threading the options through every texture helper.
+            public bool AllowExternalAssetPaths;
             public string DefaultPrimPath;
             public double MetersPerUnit;
             public int UpAxis;
@@ -1189,6 +1292,15 @@ namespace Unity.USDToolkit
     // typical PBR textures. Anything else returns false so the caller falls back to LoadImage.
     internal static class UsdPngDecoder
     {
+        // Hard caps on the attacker-controlled IHDR dimensions. A malicious .usd/.usdz can
+        // reference a few-hundred-byte PNG whose header claims an enormous image, and those
+        // numbers drive every allocation below. Anything past these bounds is refused before
+        // memory is reserved; the false return sends the file down the Texture2D.LoadImage
+        // fallback exactly like any other PNG this decoder declines.
+        private const int MaxDimension = 16384;
+        private const long MaxPixelCount = 64L * 1024 * 1024;
+        private const long MaxDecodedBytes = 512L * 1024 * 1024;
+
         // On success, rgba is width*height*4 bytes in Unity layout (row 0 = bottom), matching
         // the orientation produced by Texture2D.LoadImage.
         public static bool TryDecode(byte[] data, out int width, out int height, out byte[] rgba)
@@ -1217,7 +1329,9 @@ namespace Unity.USDToolkit
             {
                 int len = ReadBigEndianInt32(data, pos);
                 pos += 4;
-                if (len < 0 || pos + 4 + len + 4 > data.Length)
+                // 64-bit sum: a chunk length near int.MaxValue overflows this in 32-bit math,
+                // passes the guard, and then throws out of idat.Write below.
+                if (len < 0 || (long)pos + 4 + len + 4 > data.Length)
                 {
                     break;
                 }
@@ -1251,6 +1365,13 @@ namespace Unity.USDToolkit
                 return false;
             }
 
+            // Magnitude, not just sign: the positive check above still admits a header claiming
+            // 20000x25000, which is what drove the ~2 GB allocation.
+            if (w > MaxDimension || h > MaxDimension || (long)w * h > MaxPixelCount)
+            {
+                return false;
+            }
+
             int channels;
             switch (colorType)
             {
@@ -1267,15 +1388,44 @@ namespace Unity.USDToolkit
                 return false;
             }
 
+            // Every size below derives from the IHDR dimensions, so it is computed in 64-bit and
+            // checked before anything is allocated. In 32-bit math a 65536x65536 header wraps
+            // `stride` negative, which drags `expected` negative too and lets the raw.Length
+            // guard pass with a negative array size behind it.
+            int bpp = channels;
+            long stride64 = (long)w * bpp;
+            long expected = (long)h * (stride64 + 1);
+            long rgbaBytes = (long)w * h * 4;
+            if (stride64 > int.MaxValue || rgbaBytes > int.MaxValue || expected > MaxDecodedBytes)
+            {
+                return false;
+            }
+
             byte[] raw;
             try
             {
                 // IDAT is a zlib stream: skip the 2-byte header, inflate the raw DEFLATE payload.
+                // The output stream is deliberately not pre-sized from the header — that
+                // allocation was the denial of service — and the inflate is capped at what these
+                // dimensions can legitimately produce, so a tiny IDAT cannot expand without bound.
                 using (var input = new MemoryStream(compressed, 2, compressed.Length - 2))
                 using (var deflate = new DeflateStream(input, CompressionMode.Decompress))
-                using (var output = new MemoryStream(w * h * channels + h))
+                using (var output = new MemoryStream())
                 {
-                    deflate.CopyTo(output);
+                    var chunk = new byte[64 * 1024];
+                    long total = 0;
+                    int read;
+                    while ((read = deflate.Read(chunk, 0, chunk.Length)) > 0)
+                    {
+                        total += read;
+                        if (total > expected)
+                        {
+                            return false;
+                        }
+
+                        output.Write(chunk, 0, read);
+                    }
+
                     raw = output.ToArray();
                 }
             }
@@ -1284,17 +1434,15 @@ namespace Unity.USDToolkit
                 return false;
             }
 
-            int bpp = channels;
-            int stride = w * bpp;
-            long expected = (long)h * (stride + 1);
             if (raw.Length < expected)
             {
                 return false;
             }
 
+            int stride = (int)stride64;
             var cur = new byte[stride];
             var prev = new byte[stride];
-            var result = new byte[w * h * 4];
+            var result = new byte[(int)rgbaBytes];
             int rp = 0;
 
             for (int y = 0; y < h; y++)

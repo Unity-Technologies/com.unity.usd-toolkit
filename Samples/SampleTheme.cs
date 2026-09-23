@@ -2,12 +2,13 @@
 
 namespace Unity.USDToolkit.Samples
 {
-    // Export/Import 샘플 공용 다크/그린 테마.
-    // 모든 배경/아이콘을 코드로 생성한다(둥근 사각형 9-slice + 아이콘). 투명 알파가 깨끗하고
-    // 색이 정확하며 외부 에셋/네이티브 의존이 없어 Win/macOS/Linux·에디터·빌드 모두 동일하게 동작.
+    // The dark/green theme shared by the export and import samples.
+    // Every background and icon is generated in code (rounded-rectangle 9-slice plus icons):
+    // the alpha stays clean, the colours are exact, and with no external asset or native
+    // dependency it looks the same on Windows, macOS and Linux, in the Editor and in a build.
     internal static class SampleTheme
     {
-        // 목업 팔레트
+        // Mock-up palette
         public static readonly Color PageBg = Hex(0x0D0F12);
         public static readonly Color CardFill = Hex(0x16181C);
         public static readonly Color CardBorder = Hex(0x2A2D33);
@@ -23,9 +24,9 @@ namespace Unity.USDToolkit.Samples
         public static Texture2D FieldBg, CardTile, ButtonTile, AccentTile, CheckOn, CheckOff, Folder, Chevron, PageTex;
         public static GUIStyle Title, Subtitle, Section, FieldLabel, Body, Card, Field, PathField, Button, PrimaryButton, SegmentOn, SegmentOff, Segment, Dropdown;
 
-        private const int Tile = 40;        // 9-slice 타일 크기
-        private const int Radius = 10;      // 모서리 반경
-        private const int Slice = 12;       // GUIStyle.border (radius + border + 여유)
+        private const int Tile = 40;        // 9-slice tile size
+        private const int Radius = 10;      // corner radius
+        private const int Slice = 12;       // GUIStyle.border (radius + border + slack)
 
         private static bool built;
 
@@ -74,7 +75,8 @@ namespace Unity.USDToolkit.Samples
                 active = { background = FieldBg, textColor = TextPrimary }
             };
 
-            // 폴더 경로용 — 우측 정렬이라 긴 경로에서 끝(폴더명)이 보인다.
+            // For folder paths: right-aligned, so a long path still shows its tail (the
+            // folder name).
             PathField = new GUIStyle(Field) { alignment = TextAnchor.MiddleRight };
 
             Button = new GUIStyle
@@ -105,7 +107,8 @@ namespace Unity.USDToolkit.Samples
             };
             SegmentOff = new GUIStyle(Button);
 
-            // GUILayout.Toolbar 용 — 선택 세그먼트(onNormal)는 초록, 비선택은 버튼색. 균등 분할.
+            // For GUILayout.Toolbar: the selected segment (onNormal) is green, the rest use
+            // the button colour, split evenly.
             Segment = new GUIStyle(Button)
             {
                 fontStyle = FontStyle.Bold,
@@ -119,7 +122,7 @@ namespace Unity.USDToolkit.Samples
             built = true;
         }
 
-        // 초록 체크 on / 빈 박스 off, 행 전체 클릭으로 토글
+        // Green tick when on, empty box when off; the whole row toggles it.
         public static bool Checkbox(bool value, GUIContent content)
         {
             EnsureBuilt();
@@ -145,15 +148,16 @@ namespace Unity.USDToolkit.Samples
             return value;
         }
 
-        // HUD 가 3D 씬 위에 그려지는 샘플용 — 카드 배경만 반투명으로 만든 사본.
-        // 호출할 때마다 텍스처를 새로 만들므로 한 번만 만들어 캐시해서 쓴다.
+        // For samples whose HUD draws over the 3D scene: a copy with only the card background
+        // made translucent.
+        // Each call builds a new texture, so build once and cache.
         public static GUIStyle TranslucentCard(float alpha)
         {
             EnsureBuilt();
             return new GUIStyle(Card) { normal = { background = RoundedTile(CardFill, CardBorder, 1, alpha) } };
         }
 
-        // ---------- 텍스처 생성 ----------
+        // ---------- Texture generation ----------
 
         private static Color Hex(int rgb)
         {
@@ -177,7 +181,8 @@ namespace Unity.USDToolkit.Samples
             return t;
         }
 
-        // 둥근 사각형 타일(투명 코너) — 9-slice 로 늘려 씀. borderW>0 이면 가장자리에 보더색.
+        // Rounded-rectangle tile with transparent corners, stretched as a 9-slice. With
+        // borderW > 0 the edge takes the border colour.
         private static Texture2D RoundedTile(Color fill, Color border, int borderW, float alpha = 1f)
         {
             int s = Tile;
@@ -192,8 +197,8 @@ namespace Unity.USDToolkit.Samples
                     float dx = Mathf.Abs(fx - hw) - hw + Radius;
                     float dy = Mathf.Abs(fy - hw) - hw + Radius;
                     float outside = Mathf.Sqrt(Mathf.Max(dx, 0f) * Mathf.Max(dx, 0f) + Mathf.Max(dy, 0f) * Mathf.Max(dy, 0f));
-                    float d = outside + Mathf.Min(Mathf.Max(dx, dy), 0f) - Radius; // <0 내부
-                    float a = Mathf.Clamp01(0.5f - d);                            // 1px 안티앨리어싱
+                    float d = outside + Mathf.Min(Mathf.Max(dx, dy), 0f) - Radius; // < 0 is inside
+                    float a = Mathf.Clamp01(0.5f - d);                            // 1px antialiasing
                     Color c = (borderW > 0 && d > -borderW) ? border : fill;
                     px[y * s + x] = new Color(c.r, c.g, c.b, a * alpha);
                 }
@@ -231,7 +236,7 @@ namespace Unity.USDToolkit.Samples
 
             if (on)
             {
-                // 흰 체크표시
+                // White tick mark
                 DrawSeg(px, s, 0.24f, 0.52f, 0.43f, 0.70f, 2.4f, Color.white);
                 DrawSeg(px, s, 0.43f, 0.70f, 0.76f, 0.32f, 2.4f, Color.white);
             }
@@ -248,7 +253,7 @@ namespace Unity.USDToolkit.Samples
             int s = 32;
             var px = new Color[s * s];
             Color body = Hex(0xD7DCE4);
-            // 본체 + 좌상단 탭 (y는 아래가 0)
+            // Body plus the top-left tab (y = 0 is the bottom)
             FillRect(px, s, 4, 6, 28, 23, body);
             FillRect(px, s, 5, 22, 14, 26, body);
             FlipV(px, s);
@@ -263,7 +268,7 @@ namespace Unity.USDToolkit.Samples
             int s = 32;
             var px = new Color[s * s];
             Color g = Hex(0xAFB6C0);
-            // 아래 방향 ˅
+            // Downward chevron
             DrawSeg(px, s, 0.26f, 0.58f, 0.5f, 0.36f, 2.6f, g);
             DrawSeg(px, s, 0.5f, 0.36f, 0.74f, 0.58f, 2.6f, g);
             FlipV(px, s);
@@ -273,7 +278,8 @@ namespace Unity.USDToolkit.Samples
             return t;
         }
 
-        // GUI.DrawTexture 는 텍스처를 위아래 반대로 그리므로, 비대칭 아이콘은 수직 플립해 보정한다.
+        // GUI.DrawTexture draws a texture upside down, so asymmetric icons are flipped
+        // vertically to compensate.
         private static void FlipV(Color[] px, int s)
         {
             for (int y = 0; y < s / 2; y++)
@@ -303,7 +309,7 @@ namespace Unity.USDToolkit.Samples
             }
         }
 
-        // 정규화 좌표(0..1)로 두꺼운 선분 그리기(안티앨리어싱)
+        // Draws a thick, antialiased line segment in normalized (0..1) coordinates.
         private static void DrawSeg(Color[] px, int s, float ax, float ay, float bx, float by, float thick, Color c)
         {
             float x1 = ax * s, y1 = ay * s, x2 = bx * s, y2 = by * s;

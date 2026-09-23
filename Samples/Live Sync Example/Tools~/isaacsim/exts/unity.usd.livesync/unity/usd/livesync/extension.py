@@ -195,9 +195,12 @@ class UnityLiveSyncExtension(omni.ext.IExt):
             return
         self._ensure_bridge(stage, self._m_prefix.get_value_as_string().strip())
 
+        # The server requires a token; it writes the generated one next to base_stage.usda, so the
+        # folder the user already pointed at is where we look for it ($USD_LIVE_SYNC_TOKEN wins).
+        token_dir = os.path.dirname(self._m_base_stage.get_value_as_string().strip().strip('"')) or None
         self._client = SyncClient(host=self._m_host.get_value_as_string().strip() or DEFAULT_HOST,
                                   port=self._m_port.get_value_as_int() or DEFAULT_PORT,
-                                  reconnect=True, on_log=self._log)
+                                  reconnect=True, on_log=self._log, token_dir=token_dir)
         self._client.start()
         self._log("connecting…")
 

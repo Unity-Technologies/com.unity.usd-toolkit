@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cstdint>
 #include <cstring>
 #include <exception>
@@ -20,15 +21,18 @@
 #include <pxr/base/gf/vec4f.h>
 #include <pxr/base/gf/matrix4d.h>
 #include <pxr/base/tf/diagnosticMgr.h>
+#include <pxr/base/tf/pathUtils.h>
 #include <pxr/base/tf/error.h>
 #include <pxr/base/tf/status.h>
 #include <pxr/base/tf/token.h>
 #include <pxr/base/tf/warning.h>
 #include <pxr/base/vt/array.h>
 #include <pxr/usd/ar/asset.h>
+#include <pxr/usd/ar/packageUtils.h>
 #include <pxr/usd/ar/resolvedPath.h>
 #include <pxr/usd/ar/resolver.h>
 #include <pxr/usd/sdf/assetPath.h>
+#include <pxr/usd/sdf/layer.h>
 #include <pxr/usd/sdf/layerUtils.h>
 #include <pxr/usd/sdf/path.h>
 #include <pxr/usd/sdf/valueTypeName.h>
@@ -201,6 +205,103 @@ private:
 std::string SafeString(const char* value)
 {
     return value != nullptr ? std::string(value) : std::string();
+}
+
+// Path comparison for the asset confinement check below. OpenUSD normalizes to forward
+// slashes; Windows and macOS are case-insensitive by default, Linux is not.
+std::string NormalizeForCompare(const std::string& path)
+{
+    std::string normalized = TfNormPath(path);
+#if defined(_WIN32) || defined(__APPLE__)
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+#endif
+    return normalized;
+}
+
+// True when `resolvedPath` sits in a folder that belongs to this stage. An imported stage is
+// untrusted content: its authored asset paths may be absolute or climb out with `..`, and both
+// resolve perfectly well, so the decision has to be made on the final resolved location rather
+// than on the authored spelling — scanning for ".." would miss an absolute path entirely.
+//
+// The allowed set is the directory of every layer that composes the stage, not just the root
+// layer's: a sublayer or reference legitimately keeps its own textures next to itself, and
+// confining to the root layer alone would refuse those.
+bool IsResolvedAssetInsideStageRoot(RUsdContext* context, const std::string& resolvedPath)
+{
+    if (context == nullptr || !context->stage || resolvedPath.empty())
+    {
+        return false;
+    }
+
+    // Judge a packaged asset by the package file that contains it:
+    // "/a/b/scene.usdz[tex.png]" -> "/a/b/scene.usdz". A path inside a package cannot escape it.
+    std::string outer = resolvedPath;
+    for (int depth = 0; depth < 8 && ArIsPackageRelativePath(outer); ++depth)
+    {
+        outer = ArSplitPackageRelativePathOuter(outer).first;
+    }
+
+    const std::string real = TfRealPath(outer);
+    const std::string candidate = NormalizeForCompare(real.empty() ? outer : real);
+    if (candidate.empty())
+    {
+        return false;
+    }
+
+    for (const SdfLayerHandle& layer : context->stage->GetUsedLayers())
+    {
+        if (!layer)
+        {
+            continue;
+        }
+
+        // A layer inside a package (the `model.usda` of a .usdz) has no real path, and its
+        // identifier carries the package syntax: "/a/b/scene.usdz[model.usda]". Strip that to
+        // the package file so the folder holding the .usdz becomes the anchor — otherwise a
+        // packaged stage has no anchor at all and every one of its own textures is refused.
+        std::string layerPath = layer->GetRealPath();
+        if (layerPath.empty())
+        {
+            layerPath = layer->GetIdentifier();
+        }
+
+        for (int depth = 0; depth < 8 && ArIsPackageRelativePath(layerPath); ++depth)
+        {
+            layerPath = ArSplitPackageRelativePathOuter(layerPath).first;
+        }
+
+        if (layerPath.empty())
+        {
+            // An anonymous or in-memory layer has no folder to anchor against.
+            continue;
+        }
+
+        // Both sides go through TfRealPath, or neither: on macOS the resolved asset path comes
+        // back under /private/var while a layer path stays /var (the same directory through a
+        // symlink), and a prefix comparison between the two forms never matches.
+        const std::string layerDirectory = TfGetPathName(layerPath);
+        const std::string layerReal = TfRealPath(layerDirectory);
+        std::string root = NormalizeForCompare(layerReal.empty() ? layerDirectory : layerReal);
+        if (root.empty() || TfIsRelativePath(root))
+        {
+            // A relative anchor (a bare "./" from a layer with no directory part) would match
+            // almost anything, so it is no anchor at all.
+            continue;
+        }
+
+        if (root.back() != '/')
+        {
+            root += '/';
+        }
+
+        if (candidate.size() >= root.size() && candidate.compare(0, root.size(), root) == 0)
+        {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 void SetError(RUsdContext* context, const std::string& error)
@@ -936,7 +1037,12 @@ void TriangulateFace(
     int faceVertexCount,
     std::vector<int>* indices)
 {
-    if (faceVertexCount < 3 || faceStart + faceVertexCount > cornerCount)
+    // Subtraction, not addition. `faceStart + faceVertexCount` sums two values that come from
+    // the file, so the sum itself can overflow and then compare as if it were in range, which is
+    // exactly how a hostile stage got past this guard. Subtracting from a cornerCount that is
+    // known to be the real buffer length cannot overflow.
+    if (faceVertexCount < 3 || faceStart < 0 || cornerCount < faceVertexCount ||
+        faceStart > cornerCount - faceVertexCount)
     {
         return;
     }
@@ -964,12 +1070,36 @@ int BuildImportedSubmeshes(
 {
     const int numFaces = static_cast<int>(faceVertexCounts.size());
 
+    // Authored topology is untrusted input. A stage can declare face counts that sum past
+    // INT_MAX, which wrapped this accumulator when it was a 32-bit int and handed corrupted
+    // start offsets to TriangulateFace — whose bounds check then overflowed in turn. Accumulate
+    // in 64-bit, keep every offset inside the real corner buffer, and require the counts to
+    // describe exactly that buffer rather than trusting them to be consistent with it.
     std::vector<int> faceStart(static_cast<size_t>(numFaces));
-    int cursor = 0;
+    int64_t cursor = 0;
+    bool topologyValid = true;
     for (int f = 0; f < numFaces; ++f)
     {
-        faceStart[static_cast<size_t>(f)] = cursor;
-        cursor += std::max(0, faceVertexCounts[static_cast<size_t>(f)]);
+        const int faceVertexCount = faceVertexCounts[static_cast<size_t>(f)];
+        if (faceVertexCount < 0 || cursor > static_cast<int64_t>(cornerCount) - faceVertexCount)
+        {
+            topologyValid = false;
+            break;
+        }
+
+        faceStart[static_cast<size_t>(f)] = static_cast<int>(cursor);
+        cursor += faceVertexCount;
+    }
+
+    if (!topologyValid || cursor != static_cast<int64_t>(cornerCount))
+    {
+        // Leaves `indices` empty, so BuildImportedMesh reports the mesh as unusable and skips
+        // it instead of triangulating from offsets that do not describe this buffer.
+        AppendImportWarning(context,
+            "mesh '" + mesh.GetPath().GetString() +
+            "' has inconsistent topology (faceVertexCounts do not sum to the faceVertexIndices "
+            "length); mesh skipped.");
+        return -1;
     }
 
     UsdShadeMaterial meshMaterial = UsdShadeMaterialBindingAPI(mesh.GetPrim()).ComputeBoundMaterial();
@@ -1664,7 +1794,7 @@ UsdShadeMaterial CreateMaterial(
     const bool hasMetallic = source.metallicTexturePath[0] != '\0';
     const bool hasEmissiveTex = source.emissiveTexturePath[0] != '\0';
 
-    // 텍스처가 하나라도 있으면 공용 st(UV) reader 생성
+    // Create the shared st (UV) reader as soon as there is at least one texture.
     UsdShadeOutput stOutput;
     if (hasAlbedo || hasNormal || hasMetallic || hasEmissiveTex)
     {
@@ -1674,7 +1804,7 @@ UsdShadeMaterial CreateMaterial(
         stReader.CreateInput(TfToken("varname"), SdfValueTypeNames->Token).Set(TfToken("st"));
         stOutput = stReader.CreateOutput(TfToken("result"), SdfValueTypeNames->Float2);
 
-        // UV 타일링/오프셋이 (1,1,0,0)이 아니면 UsdTransform2d를 거쳐 텍스처 st로 사용
+        // When the UV tiling/offset is not (1,1,0,0), route st through a UsdTransform2d.
         bool hasUvTransform = source.uvScale[0] != 1.0f || source.uvScale[1] != 1.0f ||
                               source.uvOffset[0] != 0.0f || source.uvOffset[1] != 0.0f;
         if (hasUvTransform)
@@ -1728,7 +1858,7 @@ UsdShadeMaterial CreateMaterial(
         shader.CreateInput(TfToken("normal"), SdfValueTypeNames->Normal3f).ConnectToSource(rgb);
     }
 
-    // metallic+smoothness 합본 → metallic(.r), roughness(1 - .a)
+    // Packed metallic+smoothness -> metallic (.r), roughness (1 - .a)
     if (hasMetallic)
     {
         UsdShadeShader mTex = UsdShadeShader::Define(
@@ -1760,7 +1890,7 @@ UsdShadeMaterial CreateMaterial(
 
     shader.CreateInput(TfToken("opacity"), SdfValueTypeNames->Float).Set(source.a);
 
-    // emissiveColor (발광) — 텍스처가 있으면 UsdUVTexture, 없고 색이 있으면 단색
+    // emissiveColor: a UsdUVTexture when a texture is present, otherwise a flat colour.
     bool hasEmissiveColor = source.emissive[0] != 0.0f || source.emissive[1] != 0.0f || source.emissive[2] != 0.0f;
     if (hasEmissiveTex)
     {
@@ -2745,10 +2875,22 @@ int RUsd_ReadImportAsset(
             return kFailure;
         }
 
+        // Second, independent gate to the managed one in UsdImporter.ResolveTexturePath: this
+        // entry point resolves through OpenUSD, which honours absolute paths and `..` climbs, so
+        // without this a stage that failed the managed file check still reached a real read here.
+        if (!IsResolvedAssetInsideStageRoot(context, resolved.GetPathString()))
+        {
+            // Reports the authored spelling, which the stage's author already knows. Echoing the
+            // resolved path would tell them where files sit on this machine.
+            SetError(context,
+                "USD asset '" + authored + "' resolves outside the stage's own folders and was refused.");
+            return kFailure;
+        }
+
         std::shared_ptr<ArAsset> asset = resolver.OpenAsset(resolved);
         if (!asset)
         {
-            SetError(context, "USD asset '" + resolved.GetPathString() + "' could not be opened.");
+            SetError(context, "USD asset '" + authored + "' could not be opened.");
             return kFailure;
         }
 
@@ -2776,7 +2918,7 @@ int RUsd_ReadImportAsset(
 
         if (size > 0 && asset->Read(buffer, size, 0) != size)
         {
-            SetError(context, "USD asset '" + resolved.GetPathString() + "' could not be read in full.");
+            SetError(context, "USD asset '" + authored + "' could not be read in full.");
             return kFailure;
         }
 

@@ -20,6 +20,7 @@ from .core import (  # noqa: F401
     DEFAULT_HOST,
     DEFAULT_PORT,
     SyncClient,
+    resolve_token,
     unity_to_usd_quat,
     unity_to_usd_translate,
     usd_to_unity_quat,
