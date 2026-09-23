@@ -40,6 +40,11 @@ edits back, and can checkpoint the live state to a USD override layer that subla
    you see the sample's geometry posed at the transforms Unity was streaming.
 5. `python usd_live_sync.py --reset` restores every tracked prim to the baseline captured at start.
 
+> **Authentication is automatic here.** The server requires a token on every connection, and with its
+> `authToken` field left empty it writes a per-session one to `<project>/UsdSync/live_sync_token.txt`,
+> which `usd_live_sync.py` reads by itself. You only pass `--token` / `--token-file` when the server
+> uses an explicit token or writes elsewhere (`--output-dir`). See [Security](#security).
+
 > **Windows Git Bash:** an argument that looks like a POSIX path is rewritten by MSYS, so
 > `--set /SyncRoot/PropCube` arrives as `C:/Program Files/Git/SyncRoot/PropCube` and comes back
 > `unknown`. Prefix the command with `MSYS_NO_PATHCONV=1`, or use PowerShell or `cmd`.
@@ -72,7 +77,9 @@ node's "last sent" state, so the next dirty-diff pass does not bounce it straigh
 
 `UsdLiveSyncServer` inspector fields:
 
-- **Binding** — `bindAddress` (keep it on loopback), `port` (`10000`), `backlog`.
+- **Binding** — `bindAddress` (loopback; see Security), `port` (`10000`), `backlog`.
+- **Security** — `authToken`, `allowNonLoopbackBind`, `authTimeoutSeconds`, `maxClients`,
+  `maxCommandBytes`. See [Security](#security).
 - **Sync scope** — `syncRoot` (this GameObject when unset) and `trackMode`:
   - `AllDescendants` (default) — every Transform under the root is tracked. Good for a scene of props.
   - `ExplicitNodesOnly` — only Transforms carrying a `UsdSyncNode` are tracked. Use this to sync a
@@ -102,6 +109,7 @@ One JSON object per line.
 **Client to Unity**
 
 ```jsonc
+{"cmd": "auth", "token": "<shared secret>"}
 {"cmd": "set_transform", "prims": {
   "/SyncRoot/PropCube": {"t": [0.5, 2, -1], "r": [0,0,0,1], "s": [1,1,1]}
 }}
@@ -117,11 +125,15 @@ One JSON object per line.
 {"type": "ack", "cmd": "set_transform", "ok": true, "applied": 1, "ignored": 0, "unknown": 0}
 ```
 
+- `auth` must be the first command on every connection. Until it succeeds every other command — including
+  the read-only `get_snapshot` — is answered with `{"ok": false, "error": "authentication required…"}`,
+  and no broadcast is delivered. An invalid token is answered once and the connection is closed.
 - Rotation is always a quaternion `[x,y,z,w]` — never Euler, which would invite axis-order disagreements.
 - Translate and scale are `float[3]` in **raw Unity local space** (not basis-converted; see below).
-- A `snapshot` is sent on connect (`join`), on `reset`, and in reply to `get_snapshot` (`request`).
+- A `snapshot` is sent once the client authenticates (`join`), on `reset`, and in reply to
+  `get_snapshot` (`request`).
 - A `delta` carries only prims that changed beyond epsilon since the last tick.
-- Broadcast reaches every connected client, so the Python client and Isaac Sim can watch at once.
+- Broadcast reaches every *authenticated* client, so the Python client and Isaac Sim can watch at once.
 
 ## Coordinate conversion
 
@@ -176,11 +188,45 @@ python isaacsim/mock_unity_server.py --port 10099
 python usd_live_sync.py --port 10099 --watch
 ```
 
+It mirrors the real server's handshake, generating a token into `live_sync_token.txt` beside
+`--base-stage` (override with `--token` or `$USD_LIVE_SYNC_TOKEN`).
+
 ## Security
 
-This is a development tool. The server binds loopback by default — keep it there. It performs no
-authentication and applies transform writes from any connected client, so do not expose the port
-beyond `127.0.0.1`.
+This is a development tool, but the control channel is a real one: a client that reaches the port can
+read the whole tracked scene and move objects in it. The server therefore authenticates every
+connection and confines itself to this machine by default.
+
+**Authentication.** Every connection must send `{"cmd":"auth","token":"…"}` before anything else.
+Until it does, every command is refused and no scene data is sent — including `get_snapshot`, which
+would otherwise disclose every tracked prim path and transform. An invalid token closes the
+connection, and a client that never authenticates is dropped after `authTimeoutSeconds` (10s).
+
+The token is resolved in this order:
+
+1. the `authToken` inspector field;
+2. the `USD_LIVE_SYNC_TOKEN` environment variable;
+3. a random per-session token, written to `live_sync_token.txt` in the output folder (next to
+   `base_stage.usda`). The server logs the exact path when it starts.
+
+Option 3 is the default and needs no setup: `usd_live_sync.py` and the Isaac Sim client find that file
+on their own. Anyone who can read the file can drive the server, so keep the output folder private —
+or set an explicit `authToken` and pass it with `--token` / `$USD_LIVE_SYNC_TOKEN`.
+
+**Binding.** `bindAddress` is `127.0.0.1` and the server *refuses to start* on any other address unless
+you both tick `allowNonLoopbackBind` and set an explicit `authToken` — the generated token is shared
+through a local file, so it is not a credential a remote client can obtain. Traffic is not encrypted
+and the token crosses the wire in clear text, so a non-loopback bind belongs only on a trusted,
+isolated network.
+
+**Resource limits.** Inbound JSON is rejected past 32 levels of nesting (an unbounded recursive parse
+would be an uncatchable stack overflow, not a caught error), a command is capped at `maxCommandBytes`
+(64 KB) before a newline arrives, the pending-command queue is bounded, and `maxClients` (8) caps
+simultaneous connections. The listener takes the port exclusively rather than with `SO_REUSEADDR`, so
+another local process cannot rebind it and intercept clients.
+
+**Per-object writes.** `UsdSyncNode.AcceptsRemoteWrites` still decides which objects accept inbound
+transforms. It is a scope control layered on top of authentication, not a substitute for it.
 
 ## License and notices
 

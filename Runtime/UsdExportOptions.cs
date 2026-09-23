@@ -16,36 +16,56 @@ namespace Unity.USDToolkit
         public bool PreserveInactiveAndDisabledVisibility = true;
         public UsdTransformPolicy TransformPolicy = UsdTransformPolicy.BakedMesh;
         public bool ValidateNativeRuntime = true;
+
+        /// <summary>
+        /// When true (the default), the SHA-256 of every shipped native binary is compared
+        /// against the digest recorded in <c>NativeRuntimeHashes</c> before the first P/Invoke,
+        /// and a mismatch throws. Unlike <see cref="ValidateNativeRuntime"/>, which only asks
+        /// whether a file of the right name exists, this verifies the contents. If you rebuild
+        /// the native plugin yourself, regenerate the manifest with
+        /// <c>python3 Native~/generate_native_hashes.py</c>.
+        /// </summary>
+        public bool VerifyNativeRuntimeIntegrity = true;
         public bool ValidateOpenUsdPluginPath = true;
         public bool CaptureNativeDiagnostics;
         public bool LogExportSummary;
 
         /// <summary>
-        /// false면 mesh + 단색 material만 export(가벼움). true면 albedo/normal/metallic 텍스처를
-        /// PNG로 USD 파일 옆 "&lt;usd이름&gt;_textures/" 폴더에 저장하고 USD가 상대경로로 참조한다.
+        /// When false, only meshes and flat-colour materials are exported (the light path).
+        /// When true, albedo/normal/metallic textures are written as PNGs into a
+        /// "&lt;usd-name&gt;_textures/" folder beside the USD file and referenced relatively.
         /// </summary>
         public bool ExportTextures;
 
         /// <summary>
-        /// true(기본)면, material의 metallic 맵(_MetallicGlossMap/_MetallicMap)이 albedo 맵
-        /// (_BaseMap/_MainTex)과 '같은 텍스처'일 때 이를 슬롯 오배치로 보고 metallic 텍스처를
-        /// 무시한 채 스칼라 _Metallic 값만 export한다(트리거 시 경고 로그 출력).
-        /// metallic 마스크는 본래 linear 회색 마스크라 sRGB base color를 그대로 꽂는 건 거의
-        /// 임포트/복붙 실수이고, 그대로 두면 거울 금속(metallic≈texture.r, roughness≈0)이 되어
-        /// 환경 반사가 없는 뷰어(예: Isaac/Omniverse 실시간)에서 검게 렌더된다.
-        /// 의도적으로 같은 텍스처를 공유하는 경우라면 false로 두어 원본 동작을 유지한다.
+        /// When true (the default), a material whose metallic map (_MetallicGlossMap /
+        /// _MetallicMap) is the *same texture* as its albedo map (_BaseMap / _MainTex) is treated
+        /// as a misassigned slot: the metallic texture is dropped and only the scalar _Metallic
+        /// value is exported, with a warning when this triggers.
+        /// A metallic mask is meant to be a linear greyscale mask, so feeding it an sRGB base
+        /// colour is almost always an import or copy-paste mistake. Left alone it produces a
+        /// mirror metal (metallic approximately texture.r, roughness approximately 0), which
+        /// renders black in viewers without environment reflection, such as Isaac or Omniverse
+        /// real-time. Set this to false to keep the original behaviour when the two genuinely
+        /// share a texture on purpose.
         /// </summary>
         public bool IgnoreAlbedoInMetallicSlot = true;
 
         /// <summary>
-        /// .usdz로 export할 때만 의미가 있다. true면 ARKit(AR Quick Look) 제약에 맞춰 패키징하며,
-        /// 그 과정에서 variant set 같은 일부 기능이 빠질 수 있다. false(기본)면 일반 usdz.
+        /// Only meaningful when exporting to .usdz. When true, the package is written under
+        /// ARKit (AR Quick Look) constraints, which can drop features such as variant sets.
+        /// When false (the default), an ordinary usdz is written.
         /// </summary>
         public bool UsdzArkitCompatible;
 
         /// <summary>
         /// Optional override for OpenUSD plugin discovery. Leave empty when the package
         /// runtime plugin layout is preserved.
+        ///
+        /// Must resolve inside the package's own native runtime folders. OpenUSD loads and
+        /// executes any library a plugInfo.json under this path names, so a path outside those
+        /// folders is refused unless <see cref="UsdExporter.AllowExternalPluginSearchPath"/> is
+        /// set from code.
         /// </summary>
         public string PluginSearchPath;
 

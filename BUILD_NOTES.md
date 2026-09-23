@@ -4,29 +4,22 @@ Records the macOS development state and the exact steps to rebuild the native pl
 **Windows** and **Linux**. The managed (C#) code is platform-agnostic — only the native C++
 wrapper must be rebuilt per platform.
 
-## Current state (2026-09-11)
+## Current state (2026-09-22)
 
 - **Package version:** `0.7.2-exp.1`
-- **Native ABI version:** `5` (`RUsd_GetApiVersion()` in C++; C# checks
-  `UsdNative.MinimumApiVersion`, which is `2`). The managed check is a **minimum**, not an exact
-  match: ABI 3, 4 and 5 only *added* entry points (`RUsd_GetImportMeshUvSetInfo`,
-  `RUsd_CopyImportMeshUvSet`, `RUsd_GetImportMaterialOpacity`, `RUsd_CreateUsdzPackage`,
-  `RUsd_ReadImportAsset`), so a plugin reporting ABI 2 still loads and works — it just cannot
-  deliver UV sets 1–2, authored opacity, usdz packaging or textures read out of a package, all of
-  which C# skips based on `UsdNative.LoadedApiVersion`. ABI 1 is still rejected.
-- **⚠️ The Windows payload is one ABI behind as of 0.7.2** (ABI 4: rebuilt 2026-09-11 for the
-  import work in this release, before the usdz entry points existed). Everything it already does keeps
-  working; what it cannot do is package `.usdz` (an export to that extension throws, naming the
-  rebuild guide) or read a texture out of a package (such a stage imports geometry and flat
-  material colours). Rebuilding it is a small, isolated follow-up — same guide, same gates.
-- **⚠️ The Linux payload is stale as of 0.7.2** (still ABI 2, built before the UV
-  import fix). It loads and imports, but every mesh whose UVs are `faceVarying` or indexed —
-  most real DCC output — arrives with **no UVs**, `primvars:normals` is ignored, and authored
-  opacity (alpha cutout / transparency) is not applied. Rebuilding it from the current source
-  is the larger of the two open items: **`Native~/REBUILD_WINDOWS_LINUX.md`** is the step-by-step
-  guide with gates for both platforms (`Native~/WINDOWS_REBUILD.md` remains as the record of the
-  stale-DLL texture bug it supersedes). **Windows was rebuilt against the import work (ABI 4) on 2026-09-11**
-  — see the Windows payload entry below.
+- **Native ABI version:** `5` (`RUsd_GetApiVersion()` in C++), and `UsdNative.MinimumApiVersion`
+  is now **`5` as well** — an exact match with the source. It was `2` while the Windows and Linux
+  payloads lagged: ABI 3, 4 and 5 only *added* entry points, so an older plugin still loaded and
+  simply skipped UV sets 1–2, authored opacity, usdz packaging and packaged texture reads based on
+  `UsdNative.LoadedApiVersion`. All three desktop payloads reached API 5 on 2026-09-22, and the
+  tolerance was closed because it had become a hole: fixes that are **not** gated on the ABI
+  version — the SECURITY-282834 topology and asset-path fixes among them — are absent from an
+  older binary with nothing in the version number to say so. The gate now also runs on the
+  **import** path, which previously never checked the version at all.
+- **Linux was rebuilt on 2026-09-22 (API 5, SECURITY-282834 fixes included)** — see the Linux
+  payload entry below. All three desktop payloads are now API 5 and built from the current source.
+  `Native~/REBUILD_WINDOWS_LINUX.md` remains the step-by-step rebuild guide with gates for both
+  platforms (`Native~/WINDOWS_REBUILD.md` is the record of the stale-DLL texture bug it supersedes).
 - **Import UV/normal primvars (0.7.2, all platforms once rebuilt):** `BuildImportedMesh` resolves
   UVs and normals per face-corner (`constant`/`uniform`/`vertex`/`varying`/`faceVarying`, indexed
   or not) and splits vertices where corners disagree. Reading goes through `ReadVec2Array` /
@@ -45,39 +38,67 @@ wrapper must be rebuilt per platform.
   managed C# layer only validates the ABI version. The toolkit uses only stable OpenUSD APIs
   (mesh, xform, `UsdPreviewSurface`, `UsdGeomSubset`), so 26.05 and 26.08 behave the same here.
 - **macOS payload:** built against **26.08** (`PXR_VERSION 2608`, binary tag `pxrInternal_v0_26_8`),
-  ABI v2, **verified** (export/import round-trips, hierarchy + multi-material, async import of a
+  **API 5** (`RUsd_GetApiVersion()` -> 5, confirmed 2026-09-22 by `Native~/Tests~/import_uv_test`;
+  this line previously read "ABI v2", which the binary has not matched since the usdz work),
+  **verified** (export/import round-trips, hierarchy + multi-material, async import of a
   real 96-mesh / 251-material / 2K-texture scene). Universal (`x86_64` + `arm64`), under
-  `Runtime/Plugins/macOS/`.
+  `Runtime/Plugins/macOS/`. **Rebuilt 2026-09-22** with the SECURITY-282834 importer fixes
+  (topology consistency check, asset-path confinement). No ABI change — still API 5. Verified by
+  `Native~/Tests~/security_test.cpp` (9/9), plus `import_uv_test` and `usdz_test` re-run for
+  regressions (both PASS).
+
+- **Payload digest manifest:** `Runtime/Native/NativeRuntimeHashes.g.cs` records the SHA-256 of
+  every shipped `.dll`/`.dylib`/`.so`, and `UsdExporter.VerifyNativeRuntimeIntegrity` compares
+  them once per process before the first P/Invoke (SECURITY-282834, CWE-494). **Regenerate it in
+  the same commit as any payload rebuild** — `python3 Native~/generate_native_hashes.py` — or the
+  package refuses its own binaries. The digests live in a generated C# file rather than a data
+  file beside the payload on purpose: a manifest shipped next to the binaries is editable by
+  anyone who can edit the binaries. This does not defend against someone who already has write
+  access to the package; it catches substitution or corruption in distribution and makes the
+  payload auditable.
+
+> All three payloads (macOS, Windows, Linux — each rebuilt 2026-09-22) now carry the
+> SECURITY-282834 native fixes and pass `Native~/Tests~/security_test.cpp` (9/9).
 - **Windows payload:** rebuilt against **26.05** (`PXR_VERSION 2605`, binary tag
-  `pxrInternal_v0_26_5`), **ABI 4**, x64, under `Runtime/Plugins/x86_64/Windows/`. **Rebuilt and
-  verified on 2026-09-11** for 0.7.2 following `Native~/REBUILD_WINDOWS_LINUX.md` — all gates
-  pass: 23 `RUsd_*` exports incl. the five ABI 3/4 additions; the DSO-safe literals
-  (`SdfAssetPath`, `GfVec2f/3f/4f`) and the 0.7.2 primvar/diagnostic literals (`texCoord2f[]`,
-  `float2[]`, `normal3f[]`, `USD import: `) all present; `Native~/Tests~/import_uv_test.cpp`
-  reports `API 4` + `PASS`; in-Editor `GetRuntimeInfo()` → `API 4, OpenUSD 0.26.5`; and McUsd
-  (23 materials / 75 `UsdUVTexture` refs) imports 23 meshes / 1760 vertices / 880 triangles with
-  **23/23 meshes carrying UVs and normals**, 23/23 `_BaseMap` bound, 8 alpha-cutout materials
-  (`_Cutoff` 0.50, queue 2450), 1 alpha-blended (`purple_stained_glass`, queue 3000) and **no
-  console warnings**. Toolchain: VS Build Tools 2022 (MSVC 14.44) + Windows SDK 10.0.26100,
-  CMake 4.3.3. The earlier 2026-06-24 build was ABI v2 and additionally predated the
-  `VtValueHoldsType` texture fix. **Why 26.05, not 26.08:** OpenUSD has **no public `v26.08` tag** (latest public is
-  `v26.05`); the macOS 26.08 build came from a non-public source. 26.05 is used for Windows by
-  decision — functionally equivalent for this toolkit. To match exactly, rebuild against the same
-  26.08 source the macOS build used. **0.7.2 moved the ABI to 5** (usdz packaging and packaged
-  asset reads), so this payload now needs one more rebuild for those two features only —
-  everything verified above is unaffected.
+  `pxrInternal_v0_26_5`), **API 5**, x64, under `Runtime/Plugins/x86_64/Windows/`. **Rebuilt and
+  verified on 2026-09-22** with the SECURITY-282834 fixes, following
+  `Native~/REBUILD_WINDOWS_LINUX.md` — all gates pass: 25 `RUsd_*` exports incl. the seven added
+  after ABI 2 (`RUsd_CreateUsdzPackage` and `RUsd_ReadImportAsset` among them); the DSO-safe
+  literals (`SdfAssetPath`, `GfVec2f/3f/4f`) and the 0.7.2 primvar/diagnostic literals
+  (`texCoord2f[]`, `float2[]`, `normal3f[]`, `USD import: `, `Failed to write the usdz package`)
+  all present, plus the two new refusal literals (`has inconsistent topology`, `resolves outside
+  the stage's own folders and was refused`); `Native~/Tests~/import_uv_test` reports `API 5` +
+  `PASS`, `usdz_test` `PASS`, and `security_test` **9/9 PASS**; in-Editor `GetRuntimeInfo()` →
+  `API 5, OpenUSD 0.26.5` with the digest check passing, and a usdz export/re-import round trip
+  keeps its UVs. Toolchain: VS Build Tools 2022 (MSVC 14.44) + Windows SDK 10.0.26100,
+  CMake 4.3.3. This rebuild closed two gaps at once: the previous payload was **API 4**, so it
+  lagged the 0.7.2 usdz work and tripped the new stale-plugin report, *and* it predated the
+  security fixes. The 2026-06-24 build before it was ABI v2 and additionally predated the
+  `VtValueHoldsType` texture fix. McUsd was last measured on the 2026-09-11 ABI 4 payload
+  (23 meshes / 1760 vertices / 880 triangles, 23/23 UVs and normals, 23/23 `_BaseMap`, 8
+  alpha-cutout, 1 alpha-blended, no console warnings); nothing in this rebuild touches that path.
+  **Why 26.05, not 26.08:** OpenUSD has **no public `v26.08` tag** (latest public is `v26.05`);
+  the macOS 26.08 build came from a non-public source. 26.05 is used for Windows by decision —
+  functionally equivalent for this toolkit. To match exactly, rebuild against the same 26.08
+  source the macOS build used.
 - **Linux payload:** rebuilt against **26.05** (`PXR_VERSION 2605`, binary tag `pxrInternal_v0_26_5`),
-  ABI v2, x64, under `Runtime/Plugins/x86_64/Linux/`. **Verified** on 2026-06-24: `RUsd_GetApiVersion()`
-  → `2`, `RUsd_GetOpenUsdVersion()` → `0.26.5`, and a standalone native harness round-trips
-  export→import (incl. multi-material/`UsdGeomSubset`, Xform hierarchy with the v2 transform-node
-  table, and `usdchecker` "Success!" on the output). Built **monolithic + `--no-python`** (the
-  same minimal flag set as macOS/Windows) and assembled self-contained via `$ORIGIN`, so **no
-  packman / Python / boost closure is shipped** (unlike the `build_linux.sh` default path — see
-  below). **Why 26.05, not 26.08:** OpenUSD has no public `v26.08` tag; 26.05 is functionally
-  equivalent for this toolkit (identical decision to the Windows build).
-  **glibc baseline:** built on Ubuntu 24.04, so `libusd_ms.so` requires **GLIBC ≥ 2.38**
+  **API 5**, x64, under `Runtime/Plugins/x86_64/Linux/`. **Rebuilt and verified on 2026-09-22**
+  with the SECURITY-282834 fixes, following `Native~/REBUILD_WINDOWS_LINUX.md`. Only
+  `libUnityUSDToolkitNative.so` changed: `lib/libusd_ms.so` and `lib/libtbb.so.2` are the same
+  monolithic + `--no-python` OpenUSD 26.05 build as the 2026-06-24 payload (byte-identical after
+  strip), and the `lib/usd` / `plugin/usd` resource trees are unchanged, so the digest manifest
+  diff is the one wrapper entry. Gates: `ldd` resolves purely through `$ORIGIN`; 25 `RUsd_*`
+  exports incl. the seven added after ABI 2; all Gate 5 literals present plus the two refusal
+  literals (`has inconsistent topology`, `resolves outside the stage's own folders and was
+  refused`); `import_uv_test` → `API 5` + `PASS`, `usdz_test` `PASS`, `security_test` **9/9
+  PASS**. Toolchain: Ubuntu 24.04, g++ 13.3.0, CMake 3.28.3, patchelf 0.17 (venv). **Why 26.05,
+  not 26.08:** OpenUSD has no public `v26.08` tag; 26.05 is functionally equivalent for this
+  toolkit (identical decision to the Windows build). **glibc baseline:** the wrapper itself only
+  needs `GLIBC_2.32`, but `libusd_ms.so` was built on Ubuntu 24.04 and requires **GLIBC ≥ 2.38**
   (Ubuntu 23.10+). To run on older distros (e.g. Ubuntu 22.04 / glibc 2.35, the packman
-  manylinux_2_35 baseline) rebuild on an older toolchain or in a manylinux_2_35 container.
+  manylinux_2_35 baseline) rebuild OpenUSD and the wrapper on an older toolchain or in a
+  manylinux_2_35 container. The 2026-06-24 payload before this one was ABI v2 and predated the
+  UV/normal primvar, opacity, usdz and security work.
 
 ## What changed this cycle (already in the macOS build)
 

@@ -2,13 +2,18 @@
 set -euo pipefail
 
 # Unity USD Toolkit - Linux native build
-# libUnityUSDToolkitNative.so 를 OpenUSD(component) + Python3.11 로 빌드하고,
-# 의존 .so 와 USD schema 플러그인을 Runtime/Plugins/x86_64/Linux/ 에 self-contained 로 구성한다.
+# Builds libUnityUSDToolkitNative.so against OpenUSD (component build) + Python 3.11 and
+# assembles the dependent .so files and the USD schema plugins into
+# Runtime/Plugins/x86_64/Linux/ as a self-contained tree.
 #
 # Usage:
 #   Native~/build_linux.sh [--openusd-root PATH] [--python-root PATH]
 #
-# 기본값은 Isaac/Omniverse(packman)가 받아둔 OpenUSD/Python 을 가리킨다. 다른 환경이면 인자로 덮어쓴다.
+# The defaults point at the OpenUSD/Python that Isaac Sim / Omniverse downloaded through
+# packman. Override them with the arguments in any other environment.
+#
+# NOTE: this is NOT the path used to build the shipped Linux payload, which is a monolithic
+# --no-python 26.05 build. See Native~/REBUILD_WINDOWS_LINUX.md for that procedure.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PACKAGE_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"

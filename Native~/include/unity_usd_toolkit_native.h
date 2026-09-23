@@ -48,12 +48,12 @@ typedef struct RUsdMaterial
     float a;
     float metallic;
     float roughness;
-    char albedoTexturePath[512];   /* 비어 있으면 단색 diffuseColor, 채워지면 UsdUVTexture로 연결 (USD 기준 상대경로) */
+    char albedoTexturePath[512];   /* empty: flat diffuseColor; set: wired up as a UsdUVTexture (path relative to the USD) */
     char normalTexturePath[512];   /* normal map (raw) → inputs:normal */
-    char metallicTexturePath[512]; /* metallic+smoothness 합본 → metallic(.r), roughness(1-.a) */
-    float uvScale[2];              /* 텍스처 UV 타일링 (기본 1,1). 1,1이 아니면 UsdTransform2d로 적용 */
-    float uvOffset[2];             /* 텍스처 UV 오프셋 (기본 0,0) */
-    float emissive[3];             /* emissiveColor (기본 0,0,0). 0이 아니거나 텍스처가 있으면 emissiveColor 출력 */
+    char metallicTexturePath[512]; /* packed metallic+smoothness -> metallic (.r), roughness (1 - .a) */
+    float uvScale[2];              /* texture UV tiling (1,1 by default); anything else is applied as a UsdTransform2d */
+    float uvOffset[2];             /* texture UV offset (0,0 by default) */
+    float emissive[3];             /* emissiveColor (0,0,0 by default); authored when non-zero or a texture is present */
     char emissiveTexturePath[512]; /* emission map (sRGB) → emissiveColor */
 } RUsdMaterial;
 

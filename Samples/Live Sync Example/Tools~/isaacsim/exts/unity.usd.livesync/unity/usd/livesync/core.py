@@ -20,12 +20,37 @@ unchanged, so Isaac and `usd_live_sync.py` can be connected at the same time.
 from __future__ import annotations
 
 import json
+import os
 import socket
 import threading
 import time
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 10000
+
+# UsdLiveSyncServer requires a shared secret before it answers any command. When its Auth Token field is
+# left empty it generates one per session and writes it to this file next to base_stage.usda.
+TOKEN_FILE_NAME = "live_sync_token.txt"
+TOKEN_ENV_VAR = "USD_LIVE_SYNC_TOKEN"
+
+
+def resolve_token(token=None, token_dir=None):
+    """Explicit token, else $USD_LIVE_SYNC_TOKEN, else live_sync_token.txt in the Unity output folder."""
+    if token:
+        return token.strip()
+
+    from_environment = os.environ.get(TOKEN_ENV_VAR)
+    if from_environment:
+        return from_environment.strip()
+
+    if token_dir:
+        try:
+            with open(os.path.join(token_dir, TOKEN_FILE_NAME), "r", encoding="utf-8") as f:
+                return f.read().strip()
+        except OSError:
+            pass
+
+    return None
 
 
 # ==================================================================================================
@@ -88,9 +113,12 @@ class SyncClient:
     """
 
     def __init__(self, host=DEFAULT_HOST, port=DEFAULT_PORT, reconnect=True,
-                 reconnect_interval=2.0, connect_timeout=5.0, on_log=None):
+                 reconnect_interval=2.0, connect_timeout=5.0, on_log=None,
+                 token=None, token_dir=None):
         self.host = host
         self.port = int(port)
+        self.token = token
+        self.token_dir = token_dir
         self.reconnect = reconnect
         self.reconnect_interval = float(reconnect_interval)
         self.connect_timeout = float(connect_timeout)
@@ -173,12 +201,23 @@ class SyncClient:
                 continue
 
             self._sock = sock
+
+            # The server answers nothing until the token is accepted, so the handshake runs on the same
+            # record stream the reader loop then continues from.
+            records = self._records(sock)
+            if not self._authenticate(sock, records):
+                self._shutdown_socket()
+                if not self.reconnect or not self._running:
+                    break
+                time.sleep(self.reconnect_interval)
+                continue
+
             self.connected = True
             self.last_error = None
             self._log("[unity-live-sync] connected to {}:{}".format(self.host, self.port))
 
             try:
-                for rec in self._records(sock):
+                for rec in records:
                     self._ingest(rec)
             except Exception as e:      # noqa: BLE001 - a dropped socket must not kill the thread
                 # Only a genuine failure is an error. `stop()` closes the socket out from under this
@@ -209,6 +248,38 @@ class SyncClient:
         except OSError as e:
             self.last_error = str(e)
             return None
+
+    def _authenticate(self, sock, records):
+        """Send {"cmd":"auth"} and wait for its ack. Returns True only on an ok ack."""
+        token = resolve_token(self.token, self.token_dir)
+        if not token:
+            self.last_error = ("no auth token: set ${} or point token_dir at the folder holding {}"
+                               .format(TOKEN_ENV_VAR, TOKEN_FILE_NAME))
+            self._log("[unity-live-sync] " + self.last_error)
+            return False
+
+        try:
+            sock.settimeout(self.connect_timeout)
+            sock.sendall((json.dumps({"cmd": "auth", "token": token}) + "\n").encode("utf-8"))
+            for rec in records:
+                if rec.get("type") != "ack" or rec.get("cmd") != "auth":
+                    continue
+                if rec.get("ok"):
+                    return True
+                self.last_error = "authentication rejected: {}".format(rec.get("error", "invalid token"))
+                self._log("[unity-live-sync] " + self.last_error)
+                return False
+            self.last_error = "server closed the connection during authentication"
+        except OSError as e:
+            self.last_error = "authentication failed: {}".format(e)
+        finally:
+            try:
+                sock.settimeout(None)
+            except OSError:
+                pass
+
+        self._log("[unity-live-sync] " + str(self.last_error))
+        return False
 
     @staticmethod
     def _records(sock):

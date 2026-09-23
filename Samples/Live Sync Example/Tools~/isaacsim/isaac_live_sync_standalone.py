@@ -70,6 +70,9 @@ def parse_args(argv=None):
 
     p.add_argument("--host", default="127.0.0.1", help="UsdLiveSyncServer address.")
     p.add_argument("--port", type=int, default=10000, help="UsdLiveSyncServer port.")
+    p.add_argument("--token", default=None,
+                   help="Shared secret the server requires. Default: $USD_LIVE_SYNC_TOKEN, else "
+                        "live_sync_token.txt beside --base-stage.")
 
     p.add_argument("--base-stage", default=DEFAULT_BASE_STAGE,
                    help="Unity's baseline stage, written by UsdLiveSyncServer on Play.")
@@ -165,7 +168,8 @@ def main(argv=None):
         log("timeline playing — Isaac simulation runs alongside the Unity stream.")
 
     # ---- connect ---------------------------------------------------------------------------------
-    client = SyncClient(host=args.host, port=args.port, reconnect=True, on_log=log)
+    client = SyncClient(host=args.host, port=args.port, reconnect=True, on_log=log,
+                        token=args.token, token_dir=os.path.dirname(os.path.abspath(args.base_stage)))
     client.start()
     log("client started against {}:{} (Unity must be in Play mode)".format(args.host, args.port))
 

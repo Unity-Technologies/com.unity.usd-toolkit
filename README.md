@@ -74,6 +74,12 @@ This MVP intentionally supports a practical subset:
   plus UV tiling/offset from `UsdTransform2d`). Textures referenced by the `UsdUVTexture`
   `file` path are loaded relative to the imported USD file. Toggle with
   `UsdImportOptions.ImportTextures` (default `true`).
+- **authored texture paths are confined to the stage folder.** A USD file authors its own
+  `inputs:file` paths, so an imported stage is untrusted input: an absolute path, or one climbing
+  out with `../`, used to be read straight off disk. Anything resolving outside the imported
+  file's own directory (or, for a `.usdz`, outside the package) is now skipped with a warning.
+  Set `UsdImportOptions.AllowExternalAssetPaths` to `true` for stages you trust that deliberately
+  reference a shared texture library elsewhere on disk.
 - runtime `GameObject`, `Mesh`, `MeshRenderer`, optional `MeshCollider` creation
 - folder scanning through `UsdLibraryScanner.ScanFolder(...)`
 
@@ -394,11 +400,12 @@ are intentionally not kept as aliases.
 | `UsdzArkitCompatible` | `false` | `.usdz` output only: packages under ARKit (AR Quick Look) constraints, which may drop features such as variant sets. |
 | `IgnoreAlbedoInMetallicSlot` | `true` | Drops the metallic map (uses scalar `_Metallic`) when it is the same texture as the albedo map — a common misassignment that otherwise exports as a near-mirror metal (black in viewers without environment reflection). Logs a warning when triggered. |
 | `TransformPolicy` | `UsdTransformPolicy.BakedMesh` | Bakes transforms into mesh points unless set to `PreserveHierarchy`. |
-| `ValidateNativeRuntime` | `true` | Checks native plugin and OpenUSD runtime payload before export. |
+| `ValidateNativeRuntime` | `true` | Checks native plugin and OpenUSD runtime payload before export (presence only). |
+| `VerifyNativeRuntimeIntegrity` | `true` | Compares each shipped native binary against the SHA-256 digest recorded in `Runtime/Native/NativeRuntimeHashes.g.cs` before the first P/Invoke, and refuses a payload that does not match. Runs once per process. Regenerate the manifest with `python3 Native~/generate_native_hashes.py` after rebuilding the native plugin yourself. |
 | `ValidateOpenUsdPluginPath` | `true` | Checks OpenUSD plugin/resource discovery paths. |
 | `CaptureNativeDiagnostics` | `false` | Captures Pixar OpenUSD diagnostics when enabled. |
 | `LogExportSummary` | `false` | Logs `UsdExportResult.ToString()` after a successful export. |
-| `PluginSearchPath` | `null` | Optional override for OpenUSD plugin discovery. |
+| `PluginSearchPath` | `null` | Optional override for OpenUSD plugin discovery. Must resolve inside the package's own native runtime folders — OpenUSD loads and executes any library a `plugInfo.json` under this path names, so anything outside them is refused unless the static `UsdExporter.AllowExternalPluginSearchPath` is set from code. |
 | `NativeDiagnosticsLogPath` | `null` | Optional output path for captured diagnostics. |
 
 ## Geometry Policy

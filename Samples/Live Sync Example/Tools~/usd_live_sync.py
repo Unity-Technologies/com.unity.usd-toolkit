@@ -76,7 +76,53 @@ def make_overrides_path(path, timestamped):
 # Socket framing (newline-delimited JSON) — same conventions as the other clients here.
 # ================================================================================================
 
+TOKEN_FILE_NAME = "live_sync_token.txt"
+
+
+def resolve_token(args, color):
+    """
+    Find the shared secret UsdLiveSyncServer requires, in the order the server itself resolves it:
+    --token, --token-file, $USD_LIVE_SYNC_TOKEN, then live_sync_token.txt in the output folder (which is
+    where the server writes the token it generates when its Auth Token field is left empty).
+    """
+    if args.token:
+        return args.token
+
+    if args.token_file:
+        path = os.path.abspath(os.path.expanduser(args.token_file))
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return f.read().strip()
+        except OSError as e:
+            print(color("warning", f"[client] could not read --token-file '{path}' ({e})"))
+            return None
+
+    from_environment = os.environ.get("USD_LIVE_SYNC_TOKEN")
+    if from_environment:
+        return from_environment.strip()
+
+    out, _, _ = resolve_paths(args)
+    path = os.path.join(out, TOKEN_FILE_NAME)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        print(color("warning", f"[client] no auth token: not in --token/--token-file/$USD_LIVE_SYNC_TOKEN, "
+                               f"and '{path}' is not readable."))
+        print(color("dim", "[client] the server prints the token file's location when it starts; pass the "
+                           "folder with --output-dir, or the token itself with --token."))
+        return None
+
+
 def connect(args, color):
+    """
+    Connect and authenticate. Returns (sock, reader); (None, None) on failure. The reader is handed back
+    because the handshake may already have buffered the join snapshot that follows the auth ack.
+    """
+    token = resolve_token(args, color)
+    if not token:
+        return None, None
+
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.settimeout(args.connect_timeout)
     try:
@@ -85,9 +131,32 @@ def connect(args, color):
         print(color("dim", f"[client] could not connect to {args.host}:{args.port} ({e})"))
         print(color("dim", "[client] is Unity in Play mode with a UsdLiveSyncServer in the scene?"))
         sock.close()
-        return None
+        return None, None
     sock.settimeout(None)
-    return sock
+
+    # The server refuses every other command — including get_snapshot — until this succeeds, and hangs up
+    # on an invalid token, so a failure here is authoritative.
+    reader = LineReader(sock)
+    try:
+        send(sock, {"cmd": "auth", "token": token})
+        ack = reader.next_matching(lambda r: r.get("type") == "ack" and r.get("cmd") == "auth",
+                                   timeout=args.timeout)
+    except OSError as e:
+        print(color("warning", f"[client] authentication failed ({e})"))
+        sock.close()
+        return None, None
+
+    if ack is None:
+        print(color("warning", "[client] no reply to the auth handshake — is this an older server build?"))
+        sock.close()
+        return None, None
+
+    if not ack.get("ok"):
+        print(color("warning", f"[client] authentication rejected: {ack.get('error', 'invalid token')}"))
+        sock.close()
+        return None, None
+
+    return sock, reader
 
 
 class LineReader:
@@ -300,7 +369,7 @@ def parse_floats(text, n, name):
 
 
 def verb_set(args, color):
-    sock = connect(args, color)
+    sock, reader = connect(args, color)
     if sock is None:
         return 2
     trs = {}
@@ -316,7 +385,7 @@ def verb_set(args, color):
         return 1
     try:
         send(sock, {"cmd": "set_transform", "prims": {args.set: trs}})
-        ack = LineReader(sock).next_matching(
+        ack = reader.next_matching(
             lambda r: r.get("type") == "ack" and r.get("cmd") == "set_transform", timeout=args.timeout)
     finally:
         sock.close()
@@ -325,12 +394,12 @@ def verb_set(args, color):
 
 
 def verb_reset(args, color):
-    sock = connect(args, color)
+    sock, reader = connect(args, color)
     if sock is None:
         return 2
     try:
         send(sock, {"cmd": "reset"})
-        ack = LineReader(sock).next_matching(
+        ack = reader.next_matching(
             lambda r: r.get("type") == "ack" and r.get("cmd") == "reset", timeout=args.timeout)
     finally:
         sock.close()
@@ -340,13 +409,12 @@ def verb_reset(args, color):
 
 def verb_checkpoint(args, color):
     _, base, overrides = resolve_paths(args)
-    sock = connect(args, color)
+    sock, reader = connect(args, color)
     if sock is None:
         return 2
     state = SyncState()
     try:
         send(sock, {"cmd": "get_snapshot"})
-        reader = LineReader(sock)
         # Read until we get the snapshot (an ack may arrive too).
         deadline = time.time() + args.timeout
         while time.time() < deadline:
@@ -367,12 +435,11 @@ def verb_checkpoint(args, color):
 def verb_watch(args, color):
     _, base, overrides = resolve_paths(args)
     while True:
-        sock = connect(args, color)
+        sock, reader = connect(args, color)
         if sock is not None:
             print(color("hit", f"[client] connected to {args.host}:{args.port} — watching (Ctrl+C to quit)"))
             state = SyncState()
             last_checkpoint = time.time()
-            reader = LineReader(sock)
             try:
                 for rec in reader.records():
                     rtype = rec.get("type")
@@ -410,6 +477,9 @@ def main():
     p = argparse.ArgumentParser(description="External client for the Unity USD live transform sync.")
     p.add_argument("--host", default="127.0.0.1", help="Server address (default 127.0.0.1).")
     p.add_argument("--port", type=int, default=10000, help="Server port (UsdLiveSyncServer, default 10000).")
+    p.add_argument("--token", help="Shared secret the server requires. Default: $USD_LIVE_SYNC_TOKEN, else "
+                                   f"'{TOKEN_FILE_NAME}' in the output folder (see --output-dir).")
+    p.add_argument("--token-file", help="Read the shared secret from this file instead.")
 
     mode = p.add_mutually_exclusive_group()
     mode.add_argument("--watch", action="store_true", help="Stream deltas/snapshots and print live transforms.")

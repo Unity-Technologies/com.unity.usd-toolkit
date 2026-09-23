@@ -5,6 +5,7 @@ using System.Globalization;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
+using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 using UnityEngine;
@@ -46,6 +47,24 @@ namespace Unity.USDToolkit.Samples
         [Tooltip("TCP port the sample listens on. Must match the client's --port (default 10000).")]
         [SerializeField] private int port = 10000;
         [SerializeField] private int backlog = 8;
+
+        [Header("Security")]
+        [Tooltip("Shared secret every client must present — {\"cmd\":\"auth\",\"token\":\"...\"} — before any other " +
+                 "command is accepted. Leave empty and the server generates a random token at start and writes it " +
+                 "to '<outputDirectory>/live_sync_token.txt' for local clients to read. The " +
+                 "USD_LIVE_SYNC_TOKEN environment variable is used if this is empty and the variable is set.")]
+        [SerializeField] private string authToken = "";
+        [Tooltip("Required before the listener may bind anything other than loopback. Binding beyond 127.0.0.1 " +
+                 "exposes scene read AND write to every host that can reach the port — only enable it on a " +
+                 "trusted, isolated network, and only together with an explicit authToken above.")]
+        [SerializeField] private bool allowNonLoopbackBind = false;
+        [Tooltip("Seconds a newly connected client has to authenticate before it is disconnected.")]
+        [SerializeField] private float authTimeoutSeconds = 10f;
+        [Tooltip("Maximum simultaneous connections. Further connection attempts are refused.")]
+        [SerializeField] private int maxClients = 8;
+        [Tooltip("Maximum bytes a client may send without a newline before the connection is dropped. Raise it " +
+                 "only if a single set_transform command for your scene legitimately exceeds it.")]
+        [SerializeField] private int maxCommandBytes = 64 * 1024;
 
         [Header("Sync scope")]
         [Tooltip("Root of the subtree to sync. If null, this GameObject is used.")]
@@ -121,8 +140,27 @@ namespace Unity.USDToolkit.Samples
         private Thread _senderThread;
         private volatile bool _running;
 
+        // Hard limits on anything an unauthenticated peer can drive. Every one of these exists because the
+        // value it bounds is attacker-controlled: nesting depth, queue length, connection count.
+        private const int MaxJsonDepth = 32;
+        private const int MaxQueuedCommands = 1024;
+        private const string TokenFileName = "live_sync_token.txt";
+        private const string TokenEnvironmentVariable = "USD_LIVE_SYNC_TOKEN";
+
+        /// <summary>One connected client and its authentication state. Nothing is served before it authenticates.</summary>
+        private sealed class ClientSession
+        {
+            public TcpClient Client;
+            public DateTime ConnectedUtc;
+            public volatile bool Authenticated;
+        }
+
         private readonly object _clientsLock = new();
-        private readonly List<TcpClient> _clients = new();
+        private readonly List<ClientSession> _sessions = new();
+
+        // The secret clients must present. Resolved once per StartServer from authToken / env var / generated.
+        private string _resolvedToken;
+        private int _queuedCommands;
 
         private readonly ConcurrentQueue<Inbound> _inbox = new();     // socket threads -> main thread
         private readonly ConcurrentQueue<string> _outbox = new();     // main thread -> sender thread (broadcast)
@@ -131,11 +169,8 @@ namespace Unity.USDToolkit.Samples
         private long _seq;
         private int _frameCounter;
 
-        private enum InboundKind { Command, Join }
-
         private sealed class Inbound
         {
-            public InboundKind Kind;
             public TcpClient Client;
             public string Json;
         }
@@ -170,10 +205,25 @@ namespace Unity.USDToolkit.Samples
         /// <summary>Number of tracked prims resolved by the last <see cref="StartServer"/>.</summary>
         public int TrackedNodeCount => _nodes.Count;
 
-        /// <summary>Number of connected clients.</summary>
+        /// <summary>Number of connected clients, including those that have not authenticated yet.</summary>
         public int ClientCount
         {
-            get { lock (_clientsLock) return _clients.Count; }
+            get { lock (_clientsLock) return _sessions.Count; }
+        }
+
+        /// <summary>Number of clients that have presented a valid token. Only these are sent scene data.</summary>
+        public int AuthenticatedClientCount
+        {
+            get
+            {
+                lock (_clientsLock)
+                {
+                    int n = 0;
+                    foreach (var session in _sessions)
+                        if (session.Authenticated) n++;
+                    return n;
+                }
+            }
         }
 
         /// <summary>Address the listener is bound to.</summary>
@@ -244,12 +294,20 @@ namespace Unity.USDToolkit.Samples
             if (exportBaselineOnStart)
                 ExportBaseline(root);
 
-            // Phase 2: bind and start the socket threads.
-            IPAddress ip = ResolveBindAddress(bindAddress);
+            // Phase 2: resolve the shared secret, validate the bind address, then start the socket threads.
+            if (!TryResolveAuthToken(out _resolvedToken))
+                return;
+
+            if (!TryResolveBindAddress(bindAddress, out IPAddress ip))
+                return;
+
             try
             {
                 _listener = new TcpListener(ip, port);
-                _listener.Server.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+                // ExclusiveAddressUse (never ReuseAddress) so a co-located process cannot rebind this port and
+                // hijack client connections. Not supported on every platform — a failure here is not fatal.
+                try { _listener.ExclusiveAddressUse = true; }
+                catch (Exception e) { Debug.LogWarning($"[UsdLiveSyncServer] Exclusive port use unavailable — {e.Message}"); }
                 _listener.Start(backlog);
             }
             catch (Exception e)
@@ -281,9 +339,13 @@ namespace Unity.USDToolkit.Samples
 
             lock (_clientsLock)
             {
-                foreach (var c in _clients) SafeClose(c);
-                _clients.Clear();
+                foreach (var session in _sessions) SafeClose(session.Client);
+                _sessions.Clear();
             }
+
+            while (_inbox.TryDequeue(out _)) { }
+            Interlocked.Exchange(ref _queuedCommands, 0);
+            _resolvedToken = null;
 
             _acceptThread?.Join(200);
             _senderThread?.Join(200);
@@ -291,10 +353,160 @@ namespace Unity.USDToolkit.Samples
             _senderThread = null;
         }
 
-        private static IPAddress ResolveBindAddress(string addr)
+        /// <summary>
+        /// Resolve the listen address, refusing to bind past this machine unless that was asked for explicitly.
+        /// A non-loopback bind exposes scene read and write to every host that can reach the port, so it needs
+        /// both <c>allowNonLoopbackBind</c> and an operator-chosen <c>authToken</c> — never a generated one,
+        /// which is only discoverable by processes that can already read the local token file.
+        /// </summary>
+        private bool TryResolveBindAddress(string addr, out IPAddress ip)
         {
-            if (string.IsNullOrWhiteSpace(addr) || addr == "localhost") return IPAddress.Loopback;
-            return IPAddress.TryParse(addr, out var ip) ? ip : IPAddress.Loopback;
+            ip = IPAddress.Loopback;
+
+            if (string.IsNullOrWhiteSpace(addr) || addr == "localhost")
+                return true;
+
+            if (!IPAddress.TryParse(addr, out IPAddress parsed))
+            {
+                Debug.LogWarning($"[UsdLiveSyncServer] bindAddress '{addr}' is not a valid IP address — binding to loopback.");
+                return true;
+            }
+
+            if (IPAddress.IsLoopback(parsed))
+            {
+                ip = parsed;
+                return true;
+            }
+
+            if (!allowNonLoopbackBind)
+            {
+                Debug.LogError(
+                    $"[UsdLiveSyncServer] Refusing to bind '{addr}': it is reachable from outside this machine. " +
+                    "Use 127.0.0.1, or tick 'Allow Non Loopback Bind' and set an explicit 'Auth Token' if you " +
+                    "really intend to expose the live sync channel to the network. Server not started.");
+                return false;
+            }
+
+            if (string.IsNullOrEmpty(authToken))
+            {
+                Debug.LogError(
+                    $"[UsdLiveSyncServer] Refusing to bind '{addr}': a non-loopback bind requires an explicit " +
+                    "'Auth Token' — the auto-generated token is only shared through a local file, so it is not a " +
+                    "credential remote clients can obtain. Server not started.");
+                return false;
+            }
+
+            ip = parsed;
+            Debug.LogWarning(
+                $"[UsdLiveSyncServer] Binding {ip}:{port} — the live sync channel is reachable from OTHER MACHINES. " +
+                "Traffic is not encrypted and the token is sent in clear text; only do this on a trusted network.");
+            return true;
+        }
+
+        /// <summary>
+        /// Resolve the shared secret: the inspector field, else <c>USD_LIVE_SYNC_TOKEN</c>, else a freshly
+        /// generated one written next to <c>base_stage.usda</c> so local clients can pick it up.
+        /// </summary>
+        private bool TryResolveAuthToken(out string token)
+        {
+            token = null;
+
+            if (!string.IsNullOrEmpty(authToken))
+            {
+                token = authToken;
+                return true;
+            }
+
+            string fromEnvironment = null;
+            try { fromEnvironment = Environment.GetEnvironmentVariable(TokenEnvironmentVariable); }
+            catch (Exception) { /* some players disallow environment access */ }
+
+            if (!string.IsNullOrEmpty(fromEnvironment))
+            {
+                token = fromEnvironment;
+                Debug.Log($"[UsdLiveSyncServer] Using the auth token from ${TokenEnvironmentVariable}.");
+                return true;
+            }
+
+            token = GenerateToken();
+
+            string tokenPath = Path.Combine(ResolveOutputDir(), TokenFileName);
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(tokenPath) ?? ".");
+                File.WriteAllText(tokenPath, token);
+            }
+            catch (Exception e)
+            {
+                Debug.LogError(
+                    $"[UsdLiveSyncServer] Could not write the auth token to '{tokenPath}' — {e.Message}. " +
+                    "Set an explicit 'Auth Token' in the inspector instead. Server not started.");
+                token = null;
+                return false;
+            }
+
+            Debug.Log(
+                $"[UsdLiveSyncServer] Generated a session auth token at '{tokenPath}'. Clients on this machine " +
+                "read it from there (usd_live_sync.py finds it automatically); anyone who can read that file can " +
+                "drive this server, so keep the folder private.");
+            return true;
+        }
+
+        private static string GenerateToken()
+        {
+            var bytes = new byte[32];
+            using (var rng = RandomNumberGenerator.Create())
+                rng.GetBytes(bytes);
+
+            var sb = new StringBuilder(bytes.Length * 2);
+            foreach (byte b in bytes)
+                sb.Append(b.ToString("x2", CultureInfo.InvariantCulture));
+            return sb.ToString();
+        }
+
+        /// <summary>
+        /// Compare two tokens in time that does not depend on how many leading characters match, so a client
+        /// cannot recover the token one character at a time by measuring how long a rejection takes.
+        /// </summary>
+        private static bool TokensMatch(string a, string b)
+        {
+            if (a == null || b == null)
+                return false;
+
+            int difference = a.Length ^ b.Length;
+            for (int i = 0; i < a.Length; i++)
+                difference |= a[i] ^ b[i < b.Length ? i : 0];
+            return difference == 0;
+        }
+
+        // ---- Session bookkeeping ----------------------------------------------------------------
+
+        private ClientSession FindSession(TcpClient client)
+        {
+            lock (_clientsLock)
+            {
+                foreach (var session in _sessions)
+                    if (ReferenceEquals(session.Client, client))
+                        return session;
+                return null;
+            }
+        }
+
+        private void DropClient(TcpClient client)
+        {
+            lock (_clientsLock)
+            {
+                for (int i = _sessions.Count - 1; i >= 0; i--)
+                    if (ReferenceEquals(_sessions[i].Client, client))
+                        _sessions.RemoveAt(i);
+            }
+            SafeClose(client);
+        }
+
+        private static string Describe(TcpClient client)
+        {
+            try { return client?.Client?.RemoteEndPoint?.ToString() ?? "<unknown>"; }
+            catch (Exception) { return "<disconnected>"; }
         }
 
         // ==========================================================================================
@@ -526,15 +738,26 @@ namespace Unity.USDToolkit.Samples
                 }
 
                 client.NoDelay = true;
-                lock (_clientsLock) _clients.Add(client);
 
-                // A joining client needs a full snapshot, but that reads Transforms -> must happen on the main
-                // thread. Enqueue a Join request; Update() will send the snapshot to just this client.
-                _inbox.Enqueue(new Inbound { Kind = InboundKind.Join, Client = client });
+                int clientCount;
+                lock (_clientsLock)
+                {
+                    if (_sessions.Count >= Math.Max(1, maxClients))
+                    {
+                        Debug.LogWarning($"[UsdLiveSyncServer] Refused {Describe(client)}: already at maxClients ({maxClients}).");
+                        SafeClose(client);
+                        continue;
+                    }
 
+                    _sessions.Add(new ClientSession { Client = client, ConnectedUtc = DateTime.UtcNow });
+                    clientCount = _sessions.Count;
+                }
+
+                // No snapshot is queued here: a connection carries no entitlement to scene data. The join
+                // snapshot is sent from HandleAuth, once the client has presented a valid token.
                 var t = new Thread(() => ReadClient(client)) { IsBackground = true, Name = "UsdLiveSync-Client" };
                 t.Start();
-                Debug.Log($"[UsdLiveSyncServer] Client connected ({client.Client.RemoteEndPoint}). Clients: {_clients.Count}");
+                Debug.Log($"[UsdLiveSyncServer] Client connected ({Describe(client)}), awaiting auth. Clients: {clientCount}");
             }
         }
 
@@ -553,13 +776,34 @@ namespace Unity.USDToolkit.Samples
 
                     acc.Append(Encoding.UTF8.GetString(buffer, 0, read));
 
+                    // A client that never sends a newline would otherwise grow this buffer until the process
+                    // runs out of memory, so an over-long command costs the connection instead.
+                    if (acc.Length > Math.Max(1024, maxCommandBytes))
+                    {
+                        Debug.LogWarning(
+                            $"[UsdLiveSyncServer] Client {Describe(client)} exceeded the {maxCommandBytes}-byte " +
+                            "command limit without a newline — disconnecting.");
+                        break;
+                    }
+
                     int nl;
                     while ((nl = IndexOf(acc, '\n')) >= 0)
                     {
                         string line = acc.ToString(0, nl).Trim();
                         acc.Remove(0, nl + 1);
-                        if (line.Length > 0)
-                            _inbox.Enqueue(new Inbound { Kind = InboundKind.Command, Client = client, Json = line });
+                        if (line.Length == 0)
+                            continue;
+
+                        // Update() drains one frame's worth at a time; a client that outruns it does not get to
+                        // queue an unbounded backlog.
+                        if (Interlocked.Increment(ref _queuedCommands) > MaxQueuedCommands)
+                        {
+                            Interlocked.Decrement(ref _queuedCommands);
+                            Debug.LogWarning($"[UsdLiveSyncServer] Client {Describe(client)} flooded the command queue — disconnecting.");
+                            return;
+                        }
+
+                        _inbox.Enqueue(new Inbound { Client = client, Json = line });
                     }
                 }
             }
@@ -569,8 +813,7 @@ namespace Unity.USDToolkit.Samples
             }
             finally
             {
-                lock (_clientsLock) _clients.Remove(client);
-                SafeClose(client);
+                DropClient(client);
             }
         }
 
@@ -598,24 +841,28 @@ namespace Unity.USDToolkit.Samples
         private void Broadcast(string line)
         {
             byte[] bytes = Encoding.UTF8.GetBytes(line);
-            List<TcpClient> dead = null;
+            List<ClientSession> dead = null;
 
             lock (_clientsLock)
             {
-                foreach (var c in _clients)
+                foreach (var session in _sessions)
                 {
+                    // Scene state goes only to clients that proved they hold the token.
+                    if (!session.Authenticated)
+                        continue;
+
                     try
                     {
-                        c.GetStream().Write(bytes, 0, bytes.Length);
+                        session.Client.GetStream().Write(bytes, 0, bytes.Length);
                     }
                     catch (Exception)
                     {
-                        (dead ??= new List<TcpClient>()).Add(c);
+                        (dead ??= new List<ClientSession>()).Add(session);
                     }
                 }
 
                 if (dead != null)
-                    foreach (var c in dead) { _clients.Remove(c); SafeClose(c); }
+                    foreach (var session in dead) { _sessions.Remove(session); SafeClose(session.Client); }
             }
         }
 
@@ -634,14 +881,16 @@ namespace Unity.USDToolkit.Samples
             if (!_running)
                 return;
 
-            // 1) Drain inbound commands / joins (applies transforms on the main thread).
+            // 1) Drain inbound commands (applies transforms on the main thread).
             while (_inbox.TryDequeue(out var msg))
             {
-                if (msg.Kind == InboundKind.Join)
-                    SendSnapshotTo(msg.Client, "join");
-                else
-                    ProcessCommand(msg);
+                Interlocked.Decrement(ref _queuedCommands);
+                ProcessCommand(msg);
             }
+
+            // 1b) Hang up on anyone who connected but never authenticated, so idle sockets cannot be parked
+            //     against the connection limit.
+            DropTimedOutSessions();
 
             // 2) Throttled dirty-diff broadcast.
             if (broadcastEveryNFrames < 1) broadcastEveryNFrames = 1;
@@ -656,8 +905,8 @@ namespace Unity.USDToolkit.Samples
 
         private void BroadcastDeltas()
         {
-            if (ClientCount == 0)
-                return; // no listeners — still cheap to skip building the message
+            if (AuthenticatedClientCount == 0)
+                return; // no authenticated listeners — still cheap to skip building the message
 
             StringBuilder sb = null;
             int changed = 0;
@@ -705,8 +954,40 @@ namespace Unity.USDToolkit.Samples
 
         // ---- Phase 4: inbound commands --------------------------------------------------------------
 
+        private void DropTimedOutSessions()
+        {
+            List<TcpClient> expired = null;
+            DateTime cutoff = DateTime.UtcNow - TimeSpan.FromSeconds(Math.Max(1f, authTimeoutSeconds));
+
+            lock (_clientsLock)
+            {
+                for (int i = _sessions.Count - 1; i >= 0; i--)
+                {
+                    ClientSession session = _sessions[i];
+                    if (session.Authenticated || session.ConnectedUtc > cutoff)
+                        continue;
+
+                    _sessions.RemoveAt(i);
+                    (expired ??= new List<TcpClient>()).Add(session.Client);
+                }
+            }
+
+            if (expired == null)
+                return;
+
+            foreach (var client in expired)
+            {
+                Debug.LogWarning($"[UsdLiveSyncServer] Client {Describe(client)} did not authenticate within {authTimeoutSeconds:0.#}s — disconnecting.");
+                SafeClose(client);
+            }
+        }
+
         private void ProcessCommand(Inbound msg)
         {
+            ClientSession session = FindSession(msg.Client);
+            if (session == null)
+                return; // client went away while this command sat in the queue
+
             object parsed;
             try
             {
@@ -725,6 +1006,21 @@ namespace Unity.USDToolkit.Samples
             }
 
             string cmd = cmdObj as string ?? "";
+
+            if (cmd == "auth")
+            {
+                HandleAuth(session, obj);
+                return;
+            }
+
+            // Every other command — including the read-only get_snapshot, which discloses the whole scene —
+            // is refused until the client has presented the token.
+            if (!session.Authenticated)
+            {
+                SendAck(msg.Client, cmd, false, "authentication required: send {\"cmd\":\"auth\",\"token\":\"...\"} first");
+                return;
+            }
+
             switch (cmd)
             {
                 case "set_transform":
@@ -741,6 +1037,31 @@ namespace Unity.USDToolkit.Samples
                     SendAck(msg.Client, cmd, false, $"unsupported command '{cmd}'");
                     break;
             }
+        }
+
+        private void HandleAuth(ClientSession session, Dictionary<string, object> obj)
+        {
+            if (session.Authenticated)
+            {
+                SendAck(session.Client, "auth", true, null);
+                return;
+            }
+
+            string presented = obj.TryGetValue("token", out object tokenObj) ? tokenObj as string : null;
+            if (string.IsNullOrEmpty(presented) || !TokensMatch(_resolvedToken, presented))
+            {
+                Debug.LogWarning($"[UsdLiveSyncServer] Client {Describe(session.Client)} presented an invalid auth token — disconnecting.");
+                SendAck(session.Client, "auth", false, "invalid token");
+                DropClient(session.Client);
+                return;
+            }
+
+            session.Authenticated = true;
+            SendAck(session.Client, "auth", true, null);
+
+            // The join snapshot the accept loop used to send unconditionally: it belongs here, after the token.
+            SendSnapshotTo(session.Client, "join");
+            Debug.Log($"[UsdLiveSyncServer] Client {Describe(session.Client)} authenticated.");
         }
 
         private void HandleSetTransform(TcpClient client, Dictionary<string, object> obj)
@@ -907,7 +1228,12 @@ namespace Unity.USDToolkit.Samples
             }
             catch (Exception)
             {
-                lock (_clientsLock) _clients.Remove(client);
+                lock (_clientsLock)
+                {
+                    for (int i = _sessions.Count - 1; i >= 0; i--)
+                        if (ReferenceEquals(_sessions[i].Client, client))
+                            _sessions.RemoveAt(i);
+                }
                 SafeClose(client);
             }
         }
@@ -1012,6 +1338,11 @@ namespace Unity.USDToolkit.Samples
         // Minimal JSON parser (inbound). Recursive-descent; supports object/array/string/number/bool/null,
         // sufficient for the fixed command schema. Numbers surface as double, objects as
         // Dictionary<string,object>, arrays as List<object>.
+        //
+        // Nesting is capped at MaxJsonDepth. Without that cap a deeply nested payload recurses until the
+        // thread's stack is exhausted, and a .NET StackOverflowException cannot be caught — it would take the
+        // whole process down from ProcessCommand's try/catch. Exceeding the cap raises a FormatException
+        // instead, which that catch turns into an ordinary "malformed JSON" rejection.
         // ==========================================================================================
 
         private static class Json
@@ -1019,22 +1350,25 @@ namespace Unity.USDToolkit.Samples
             public static object Parse(string s)
             {
                 int i = 0;
-                object v = ParseValue(s, ref i);
+                object v = ParseValue(s, ref i, 0);
                 SkipWs(s, ref i);
                 if (i != s.Length)
                     throw new FormatException($"trailing characters at {i}");
                 return v;
             }
 
-            private static object ParseValue(string s, ref int i)
+            private static object ParseValue(string s, ref int i, int depth)
             {
+                if (depth > MaxJsonDepth)
+                    throw new FormatException($"nesting deeper than {MaxJsonDepth} levels at {i}");
+
                 SkipWs(s, ref i);
                 if (i >= s.Length) throw new FormatException("unexpected end");
                 char c = s[i];
                 switch (c)
                 {
-                    case '{': return ParseObject(s, ref i);
-                    case '[': return ParseArray(s, ref i);
+                    case '{': return ParseObject(s, ref i, depth + 1);
+                    case '[': return ParseArray(s, ref i, depth + 1);
                     case '"': return ParseString(s, ref i);
                     case 't': Expect(s, ref i, "true"); return true;
                     case 'f': Expect(s, ref i, "false"); return false;
@@ -1043,7 +1377,7 @@ namespace Unity.USDToolkit.Samples
                 }
             }
 
-            private static Dictionary<string, object> ParseObject(string s, ref int i)
+            private static Dictionary<string, object> ParseObject(string s, ref int i, int depth)
             {
                 var d = new Dictionary<string, object>(StringComparer.Ordinal);
                 i++; // {
@@ -1056,7 +1390,7 @@ namespace Unity.USDToolkit.Samples
                     SkipWs(s, ref i);
                     if (i >= s.Length || s[i] != ':') throw new FormatException($"expected ':' at {i}");
                     i++;
-                    d[key] = ParseValue(s, ref i);
+                    d[key] = ParseValue(s, ref i, depth);
                     SkipWs(s, ref i);
                     if (i >= s.Length) throw new FormatException("unterminated object");
                     if (s[i] == ',') { i++; continue; }
@@ -1066,7 +1400,7 @@ namespace Unity.USDToolkit.Samples
                 return d;
             }
 
-            private static List<object> ParseArray(string s, ref int i)
+            private static List<object> ParseArray(string s, ref int i, int depth)
             {
                 var list = new List<object>();
                 i++; // [
@@ -1074,7 +1408,7 @@ namespace Unity.USDToolkit.Samples
                 if (i < s.Length && s[i] == ']') { i++; return list; }
                 while (true)
                 {
-                    list.Add(ParseValue(s, ref i));
+                    list.Add(ParseValue(s, ref i, depth));
                     SkipWs(s, ref i);
                     if (i >= s.Length) throw new FormatException("unterminated array");
                     if (s[i] == ',') { i++; continue; }
