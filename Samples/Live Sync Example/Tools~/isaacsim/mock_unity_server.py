@@ -298,6 +298,36 @@ class MockServer:
                              "t": self._now_ms(), "prims": prims})
 
 
+def write_token_file(token_path, token):
+    """
+    Write the token so only the current user can read it, matching UsdLiveSyncServer.
+
+    A plain open(path, "w") creates the file under the umask -- 0644 on a typical macOS/Linux host --
+    which publishes the one secret guarding this server to every other account on the machine, and it
+    writes *through* a symlink anyone may have planted at the destination. So: create an unguessably
+    named file in the same directory with O_EXCL (never following a symlink, never clobbering) and
+    mode 0600, write into it, then os.replace() it into place. The rename is atomic and replaces a
+    symlink at the destination rather than following it. umask can only clear permission bits, so the
+    result is never more permissive than 0600.
+    """
+    directory = os.path.dirname(token_path) or "."
+    os.makedirs(directory, exist_ok=True)
+    staging = os.path.join(directory, ".{}.{}.tmp".format(
+        os.path.basename(token_path), secrets.token_hex(8)))
+
+    fd = os.open(staging, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(token)
+        os.replace(staging, token_path)
+    except BaseException:
+        try:
+            os.unlink(staging)
+        except OSError:
+            pass
+        raise
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description="Mock Unity UsdLiveSyncServer for Isaac-side testing.",
                                 formatter_class=argparse.ArgumentDefaultsHelpFormatter)
@@ -334,9 +364,9 @@ def main(argv=None):
         args.token = secrets.token_hex(32)
         token_path = os.path.join(os.path.dirname(os.path.abspath(args.base_stage)), "live_sync_token.txt")
         try:
-            with open(token_path, "w", encoding="utf-8") as f:
-                f.write(args.token)
-            print("[mock-unity] generated auth token -> {}".format(token_path), flush=True)
+            write_token_file(token_path, args.token)
+            print("[mock-unity] generated auth token -> {} (owner-readable only)".format(token_path),
+                  flush=True)
         except OSError as e:
             print("[mock-unity] could not write {} ({}); pass --token instead".format(token_path, e),
                   file=sys.stderr)
