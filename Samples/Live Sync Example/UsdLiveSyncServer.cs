@@ -54,10 +54,6 @@ namespace Unity.USDToolkit.Samples
                  "to '<outputDirectory>/live_sync_token.txt' for local clients to read. The " +
                  "USD_LIVE_SYNC_TOKEN environment variable is used if this is empty and the variable is set.")]
         [SerializeField] private string authToken = "";
-        [Tooltip("Required before the listener may bind anything other than loopback. Binding beyond 127.0.0.1 " +
-                 "exposes scene read AND write to every host that can reach the port — only enable it on a " +
-                 "trusted, isolated network, and only together with an explicit authToken above.")]
-        [SerializeField] private bool allowNonLoopbackBind = false;
         [Tooltip("Seconds a newly connected client has to authenticate before it is disconnected.")]
         [SerializeField] private float authTimeoutSeconds = 10f;
         [Tooltip("Maximum simultaneous connections. Further connection attempts are refused.")]
@@ -354,11 +350,14 @@ namespace Unity.USDToolkit.Samples
         }
 
         /// <summary>
-        /// Resolve the listen address, refusing to bind past this machine unless that was asked for explicitly.
-        /// A non-loopback bind exposes scene read and write to every host that can reach the port, so it needs
-        /// both <c>allowNonLoopbackBind</c> and an operator-chosen <c>authToken</c> — never a generated one,
-        /// which is only discoverable by processes that can already read the local token file.
+        /// Resolve the listen address. This channel is loopback-only, and there is no opt-in to widen it.
         /// </summary>
+        /// <remarks>
+        /// The transport is plain TCP: the auth token and the whole scene stream cross it in clear text. That
+        /// is acceptable over the loopback interface and nowhere else, so rather than warn about a non-loopback
+        /// bind and serve it anyway, the server refuses to start. Run the client on the same machine — or put
+        /// your own authenticated, encrypted transport in front of this sample if you need it across a network.
+        /// </remarks>
         private bool TryResolveBindAddress(string addr, out IPAddress ip)
         {
             ip = IPAddress.Loopback;
@@ -372,34 +371,17 @@ namespace Unity.USDToolkit.Samples
                 return true;
             }
 
-            if (IPAddress.IsLoopback(parsed))
-            {
-                ip = parsed;
-                return true;
-            }
-
-            if (!allowNonLoopbackBind)
+            if (!IPAddress.IsLoopback(parsed))
             {
                 Debug.LogError(
-                    $"[UsdLiveSyncServer] Refusing to bind '{addr}': it is reachable from outside this machine. " +
-                    "Use 127.0.0.1, or tick 'Allow Non Loopback Bind' and set an explicit 'Auth Token' if you " +
-                    "really intend to expose the live sync channel to the network. Server not started.");
-                return false;
-            }
-
-            if (string.IsNullOrEmpty(authToken))
-            {
-                Debug.LogError(
-                    $"[UsdLiveSyncServer] Refusing to bind '{addr}': a non-loopback bind requires an explicit " +
-                    "'Auth Token' — the auto-generated token is only shared through a local file, so it is not a " +
-                    "credential remote clients can obtain. Server not started.");
+                    $"[UsdLiveSyncServer] Refusing to bind '{addr}': this sample serves loopback only. Its traffic " +
+                    "is unencrypted, so a bind reachable from other machines would put the auth token and the " +
+                    "scene stream on the wire in clear text. Use 127.0.0.1 and run the client on this machine. " +
+                    "Server not started.");
                 return false;
             }
 
             ip = parsed;
-            Debug.LogWarning(
-                $"[UsdLiveSyncServer] Binding {ip}:{port} — the live sync channel is reachable from OTHER MACHINES. " +
-                "Traffic is not encrypted and the token is sent in clear text; only do this on a trusted network.");
             return true;
         }
 
@@ -428,29 +410,142 @@ namespace Unity.USDToolkit.Samples
                 return true;
             }
 
-            token = GenerateToken();
-
+            string generated = GenerateToken();
             string tokenPath = Path.Combine(ResolveOutputDir(), TokenFileName);
-            try
+
+            if (!TryWriteTokenFile(tokenPath, generated))
             {
-                Directory.CreateDirectory(Path.GetDirectoryName(tokenPath) ?? ".");
-                File.WriteAllText(tokenPath, token);
-            }
-            catch (Exception e)
-            {
-                Debug.LogError(
-                    $"[UsdLiveSyncServer] Could not write the auth token to '{tokenPath}' — {e.Message}. " +
-                    "Set an explicit 'Auth Token' in the inspector instead. Server not started.");
                 token = null;
                 return false;
             }
 
+            token = generated;
             Debug.Log(
-                $"[UsdLiveSyncServer] Generated a session auth token at '{tokenPath}'. Clients on this machine " +
-                "read it from there (usd_live_sync.py finds it automatically); anyone who can read that file can " +
-                "drive this server, so keep the folder private.");
+                $"[UsdLiveSyncServer] Generated a session auth token at '{tokenPath}' (owner-readable only). " +
+                "Clients running as you on this machine read it from there; usd_live_sync.py finds it automatically.");
             return true;
         }
+
+        /// <summary>
+        /// Write the generated token so that only the current user can read it.
+        /// </summary>
+        /// <remarks>
+        /// The secret is written to a randomly named file in the destination folder, restricted to the owner
+        /// while it is still empty, and only then filled in and renamed into place. Writing straight to
+        /// <see cref="TokenFileName"/> and restricting afterwards would publish the token under the process
+        /// umask (0644 on a typical macOS/Linux host) for the window in between, which is long enough for
+        /// another local account to read it — and an attacker who opened the file in that window keeps read
+        /// access through the open handle even after the permissions are tightened. An unguessable temporary
+        /// name closes that window: there is nothing to open until the rename, which is atomic.
+        ///
+        /// If the permissions cannot be restricted the token is NOT written at all and the server does not
+        /// start. A world-readable token file is the vulnerability, so failing closed is the only safe
+        /// outcome; the operator can set an explicit token instead.
+        /// </remarks>
+        private static bool TryWriteTokenFile(string tokenPath, string token)
+        {
+            string directory = Path.GetDirectoryName(tokenPath);
+            if (string.IsNullOrEmpty(directory))
+                directory = ".";
+
+            string stagingPath = Path.Combine(directory, TokenFileName + "." + GenerateToken().Substring(0, 16) + ".tmp");
+
+            try
+            {
+                Directory.CreateDirectory(directory);
+
+                using (File.Create(stagingPath)) { }
+
+                if (!TryRestrictToOwner(stagingPath, out string restrictionError))
+                {
+                    TryDelete(stagingPath);
+                    Debug.LogError(
+                        $"[UsdLiveSyncServer] Refusing to write the auth token to '{tokenPath}': its permissions " +
+                        $"could not be restricted to this user ({restrictionError}), which would leave the secret " +
+                        "readable by anyone else on this machine. Set an explicit 'Auth Token' in the inspector, " +
+                        $"or export ${TokenEnvironmentVariable}. Server not started.");
+                    return false;
+                }
+
+                File.WriteAllText(stagingPath, token);
+
+                // Replace any stale token from an earlier session. Renaming over the destination also
+                // replaces a symlink an attacker may have planted there, rather than writing through it.
+                TryDelete(tokenPath);
+                File.Move(stagingPath, tokenPath);
+                return true;
+            }
+            catch (Exception e)
+            {
+                TryDelete(stagingPath);
+                Debug.LogError(
+                    $"[UsdLiveSyncServer] Could not write the auth token to '{tokenPath}' — {e.Message}. " +
+                    "Set an explicit 'Auth Token' in the inspector instead. Server not started.");
+                return false;
+            }
+        }
+
+        private static void TryDelete(string path)
+        {
+            try { if (File.Exists(path)) File.Delete(path); }
+            catch (Exception) { /* best effort */ }
+        }
+
+#if UNITY_STANDALONE_WIN || UNITY_EDITOR_WIN || UNITY_WSA
+        /// <summary>Windows: replace the file's ACL with a single entry for the current user.</summary>
+        private static bool TryRestrictToOwner(string path, out string error)
+        {
+            error = null;
+            try
+            {
+                var identity = System.Security.Principal.WindowsIdentity.GetCurrent();
+                var security = new System.Security.AccessControl.FileSecurity();
+
+                // Protect from inheritance and drop the inherited entries, otherwise a permissive ACL on the
+                // parent folder (a shared drive, a world-readable project root) still grants other accounts.
+                security.SetAccessRuleProtection(true, false);
+                security.AddAccessRule(new System.Security.AccessControl.FileSystemAccessRule(
+                    identity.User,
+                    System.Security.AccessControl.FileSystemRights.FullControl,
+                    System.Security.AccessControl.AccessControlType.Allow));
+
+                new FileInfo(path).SetAccessControl(security);
+                return true;
+            }
+            catch (Exception e)
+            {
+                error = e.Message;
+                return false;
+            }
+        }
+#else
+        [System.Runtime.InteropServices.DllImport("libc", SetLastError = true)]
+        private static extern int chmod(string path, int mode);
+
+        /// <summary>
+        /// POSIX: chmod 0600. Unity's runtime predates <c>File.SetUnixFileMode</c> (.NET 7), and Mono.Posix
+        /// is not dependable under IL2CPP, so this goes straight to libc.
+        /// </summary>
+        private static bool TryRestrictToOwner(string path, out string error)
+        {
+            error = null;
+            try
+            {
+                const int ownerReadWrite = 0x180; // 0600
+                if (chmod(path, ownerReadWrite) == 0)
+                    return true;
+
+                error = "chmod failed with errno " +
+                        System.Runtime.InteropServices.Marshal.GetLastWin32Error();
+                return false;
+            }
+            catch (Exception e)
+            {
+                error = e.Message;
+                return false;
+            }
+        }
+#endif
 
         private static string GenerateToken()
         {

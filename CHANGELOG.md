@@ -111,6 +111,28 @@ still to be decided.
   scene or prefab would otherwise carry both a hostile path and its own permission to use it.
   `ValidatePluginSearchPath`'s `plugInfo.json` check stays, but only as a layout diagnostic: a
   manifest being present says nothing about a directory being trustworthy.
+- **The generated Live Sync token is written owner-readable, and the channel is loopback-only**
+  (SECURITY-282834 / CWE-312). The session token was persisted with `File.WriteAllText`, which
+  creates the file under the process umask — mode 0644 on a typical macOS or Linux host, so every
+  other account on a shared machine could read the one secret guarding full scene read and write.
+  The token is now written to an unguessably named file that is restricted to the current user
+  (`chmod` 0600 on POSIX, an inheritance-free single-user ACL on Windows) while it is still empty,
+  filled in only then, and renamed into place; writing first and restricting afterwards would have
+  published the secret for the window in between, and a reader who opened it in that window would
+  keep access through the open handle regardless. If the permissions cannot be applied the token is
+  not written and the server does not start, since a readable token file is the vulnerability itself.
+  `File.SetUnixFileMode` is .NET 7+ and unavailable here, hence the `chmod` P/Invoke.
+  `Tools~/isaacsim/mock_unity_server.py` got the same treatment, since it generates a real token of
+  its own: `os.open` with `O_EXCL` and mode 0600 into an unguessably named file, then `os.replace`.
+  Besides the permissions, the plain `open(path, "w")` it used before also wrote *through* a symlink
+  planted at the destination; the rename replaces the symlink instead of following it.
+  Separately, the transport is plain TCP, so the token and the scene stream crossed the wire in clear
+  text on any non-loopback bind. The `allowNonLoopbackBind` opt-in added alongside the
+  authentication work has been **removed**: the listener now serves loopback only, with no way to
+  widen it. Warning about cleartext while still serving it is not a defence, and a sample is the
+  wrong place to ship a certificate-provisioning story — front this listener with SSH, a VPN or a
+  TLS proxy if you need it across machines. **Breaking:** a scene that set `allowNonLoopbackBind`
+  loses the field, and a `bindAddress` outside `127.0.0.1`/`::1`/`localhost` now refuses to start.
 - **The Live Sync sample's control channel is authenticated, and stays on this machine**
   (SECURITY-282834 / CWE-306, CWE-284). `UsdLiveSyncServer` accepted commands from anyone who could
   open its port. The only access control in the channel was the per-object
@@ -121,15 +143,14 @@ still to be decided.
   that never authenticates is dropped after `authTimeoutSeconds`. The join snapshot moved from the
   accept loop to the point just after a successful handshake, so connecting no longer discloses the
   scene. The token comes from the `authToken` field, else `USD_LIVE_SYNC_TOKEN`, else a random
-  per-session value written to `live_sync_token.txt` beside `base_stage.usda`, which the bundled
-  clients find on their own; comparison is constant-time. `AcceptsRemoteWrites` is unchanged and
+  per-session value written owner-readable to `live_sync_token.txt` beside `base_stage.usda`, which
+  the bundled clients find on their own; comparison is constant-time. `AcceptsRemoteWrites` is unchanged and
   still scopes which objects accept writes — it is layered on authentication, not a substitute.
 - **The Live Sync listener refuses to bind past loopback, and bounds what a client can spend**
   (SECURITY-282834 / CWE-284, CWE-400). `ResolveBindAddress` passed any parseable address through,
-  so `0.0.0.0` silently published the channel to the network. A non-loopback bind now requires both
-  `allowNonLoopbackBind` and an explicit `authToken` — the generated token is shared through a local
-  file and so is not a credential a remote client could hold — and the server refuses to start
-  otherwise, logging why. The port is taken with `ExclusiveAddressUse` instead of `ReuseAddress`, so
+  so `0.0.0.0` silently published the channel to the network. The listener is now loopback-only and
+  the server refuses to start on any other address, logging why. The port is taken with
+  `ExclusiveAddressUse` instead of `ReuseAddress`, so
   a co-located process can no longer rebind it and intercept clients. Three unbounded resources
   driven by unauthenticated input were capped: the hand-rolled JSON parser rejects nesting past 32
   levels (unbounded recursion on the main thread was an *uncatchable* `StackOverflowException`, so

@@ -77,9 +77,9 @@ node's "last sent" state, so the next dirty-diff pass does not bounce it straigh
 
 `UsdLiveSyncServer` inspector fields:
 
-- **Binding** — `bindAddress` (loopback; see Security), `port` (`10000`), `backlog`.
-- **Security** — `authToken`, `allowNonLoopbackBind`, `authTimeoutSeconds`, `maxClients`,
-  `maxCommandBytes`. See [Security](#security).
+- **Binding** — `bindAddress` (loopback only; see Security), `port` (`10000`), `backlog`.
+- **Security** — `authToken`, `authTimeoutSeconds`, `maxClients`, `maxCommandBytes`.
+  See [Security](#security).
 - **Sync scope** — `syncRoot` (this GameObject when unset) and `trackMode`:
   - `AllDescendants` (default) — every Transform under the root is tracked. Good for a scene of props.
   - `ExplicitNodesOnly` — only Transforms carrying a `UsdSyncNode` are tracked. Use this to sync a
@@ -210,20 +210,30 @@ The token is resolved in this order:
    `base_stage.usda`). The server logs the exact path when it starts.
 
 Option 3 is the default and needs no setup: `usd_live_sync.py` and the Isaac Sim client find that file
-on their own. Anyone who can read the file can drive the server, so keep the output folder private —
-or set an explicit `authToken` and pass it with `--token` / `$USD_LIVE_SYNC_TOKEN`.
+on their own. The file is created readable and writable **only by the user running the Editor** —
+mode `0600` on macOS and Linux, and an ACL granting just that account on Windows. The secret is
+written to an unguessably named file that is restricted while still empty and then renamed into
+place, so it is never briefly world-readable. If those permissions cannot be applied the token is not
+written at all and the server refuses to start, rather than leaving a readable secret on disk; set an
+explicit `authToken` or `$USD_LIVE_SYNC_TOKEN` in that case.
 
-**Binding.** `bindAddress` is `127.0.0.1` and the server *refuses to start* on any other address unless
-you both tick `allowNonLoopbackBind` and set an explicit `authToken` — the generated token is shared
-through a local file, so it is not a credential a remote client can obtain. Traffic is not encrypted
-and the token crosses the wire in clear text, so a non-loopback bind belongs only on a trusted,
-isolated network.
+**Binding is loopback-only.** `bindAddress` accepts `127.0.0.1`, `::1` or `localhost`; anything else
+makes the server log an error and refuse to start. There is no opt-in to widen it. The transport is
+plain TCP, so the token and the whole scene stream would cross a network in clear text where anyone
+on the path could capture and replay them — which is why the sample does not offer that at all rather
+than offering it with a warning. To drive Unity from another machine, put your own authenticated,
+encrypted transport (an SSH tunnel, a VPN, a TLS proxy) in front of this loopback listener.
 
 **Resource limits.** Inbound JSON is rejected past 32 levels of nesting (an unbounded recursive parse
 would be an uncatchable stack overflow, not a caught error), a command is capped at `maxCommandBytes`
 (64 KB) before a newline arrives, the pending-command queue is bounded, and `maxClients` (8) caps
 simultaneous connections. The listener takes the port exclusively rather than with `SO_REUSEADDR`, so
 another local process cannot rebind it and intercept clients.
+
+**What this does not defend against.** Loopback traffic is unencrypted, and any process running as
+you can read the token file and connect. The trust boundary is your user account on this machine —
+the sample protects against other accounts on a shared host, not against code already running as
+you.
 
 **Per-object writes.** `UsdSyncNode.AcceptsRemoteWrites` still decides which objects accept inbound
 transforms. It is a scope control layered on top of authentication, not a substitute for it.
