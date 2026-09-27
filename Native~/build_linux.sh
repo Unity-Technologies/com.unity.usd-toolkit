@@ -18,6 +18,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PACKAGE_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
+RECORD_DEPENDENCY_DIGESTS=0
 OPENUSD_ROOT="${OPENUSD_ROOT:-$HOME/.cache/packman/chk/usd.py311.manylinux_2_35_x86_64.stock.release/0.24.05.kit.7-gl.16400+05f48f24}"
 PYTHON_ROOT="${PYTHON_ROOT:-$HOME/.cache/packman/chk/python/3.11.13+nv1-linux-x86_64}"
 
@@ -25,8 +26,9 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --openusd-root) OPENUSD_ROOT="$2"; shift 2 ;;
         --python-root)  PYTHON_ROOT="$2";  shift 2 ;;
+        --record-dependency-digests) RECORD_DEPENDENCY_DIGESTS=1; shift ;;
         -h|--help)
-            echo "Usage: build_linux.sh [--openusd-root PATH] [--python-root PATH]"
+            echo "Usage: build_linux.sh [--openusd-root PATH] [--python-root PATH] [--record-dependency-digests]"
             exit 0 ;;
         *) echo "Unknown option: $1" >&2; exit 2 ;;
     esac
@@ -63,6 +65,33 @@ g++ -std=c++17 -fPIC -shared -O2 \
     -lusd_work -lusd_plug -lusd_arch -lusd_ar -lusd_trace \
     -Wl,--disable-new-dtags -Wl,-rpath,'$ORIGIN/lib' \
     -o "${DST}/libUnityUSDToolkitNative.so"
+
+# --- Dependency digest gate (SECURITY-282834, CWE-347) -------------------------------------
+# What follows is copied verbatim off this machine into the shipped package, so a tampered local
+# OpenUSD/Python tree would ride in unnoticed. Verify against the checked-in record first; pass
+# --record-dependency-digests to accept the current tree and rewrite that record.
+collect_dependency_files() {
+    LD_LIBRARY_PATH="${USD_LIB}:${PY_LIB}" ldd "${DST}/libUnityUSDToolkitNative.so" \
+        | awk -v u="${USD_LIB}/" -v p="${PY_LIB}/" '/=>/ { if (index($3, u) == 1 || index($3, p) == 1) print $3 }' \
+        | sort -u | tr '\n' '\0'
+
+    [[ -f "${USD_LIB}/usd/plugInfo.json" ]] && printf '%s\0' "${USD_LIB}/usd/plugInfo.json"
+    for plugin in usd usdGeom usdShade sdf ar ndr sdr; do
+        [[ -d "${USD_LIB}/usd/${plugin}" ]] || continue
+        find "${USD_LIB}/usd/${plugin}" -type f ! -name "*.meta" -print0
+    done
+}
+
+DEPENDENCY_MODE="--verify"
+if [[ ${RECORD_DEPENDENCY_DIGESTS} -eq 1 ]]; then
+    DEPENDENCY_MODE="--record"
+fi
+
+if ! collect_dependency_files | xargs -0 python3 "${SCRIPT_DIR}/verify_dependency_digests.py" \
+    --platform linux --root "${OPENUSD_ROOT}" "${DEPENDENCY_MODE}"; then
+    echo "Refusing to copy an unverified dependency tree into the package." >&2
+    exit 1
+fi
 
 echo "[2/3] Copying dependency closure (.so) into lib/ ..."
 LD_LIBRARY_PATH="${USD_LIB}:${PY_LIB}" ldd "${DST}/libUnityUSDToolkitNative.so" \

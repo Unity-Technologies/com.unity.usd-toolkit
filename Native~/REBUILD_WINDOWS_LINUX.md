@@ -93,8 +93,12 @@ Linux:
 
 - **g++ 11+** (C++17), `patchelf` (`pip install patchelf`), `binutils` (`nm`, `objdump`, `strip`).
 - Build on the **oldest glibc you must support**. The current payload was built on Ubuntu 24.04
-  and therefore requires **glibc ≥ 2.38**, which excludes Ubuntu 22.04. If you need 22.04, build
-  in an Ubuntu 22.04 (glibc 2.35) container or on that distro directly.
+  and therefore requires **glibc ≥ 2.38** and `GLIBCXX_3.4.32`, which excludes Ubuntu 22.04.
+  Ubuntu 24.04 is the package's documented minimum for Linux (see `README.md` and the user
+  manuals), so rebuilding on 24.04 keeps that promise. To lower the floor to 22.04 — Unity 6.3
+  supports it, so this is worth doing when a machine is available — build in an Ubuntu 22.04
+  (glibc 2.35) container or on that distro directly. No source change is needed; the dependency
+  comes entirely from the build host's headers.
 
 ## 4. Get the repository
 
@@ -133,10 +137,18 @@ fixes, and Gate 9's `security_test` is the only thing that would catch it, after
 
 ## 5. Build OpenUSD (once per machine)
 
-Monolithic, no Python, no imaging. The shipped Windows/Linux payloads use the public **`v26.05`**
-tag; macOS uses 26.08, which has no public tag. Mixing 26.05 and 26.08 across platforms is fine —
-the native ABI is `RUsd_GetApiVersion()`, not the OpenUSD version, and the toolkit only uses
-stable APIs (mesh, xform, `UsdPreviewSurface`, `UsdGeomSubset`, primvars).
+Monolithic, no Python, no imaging. **All three platforms use the public `v26.05` tag** (commit
+`2095faf`) as of 2026-09-23 — macOS was realigned onto it from a non-public 26.08 drop so that
+every payload is reproducible from a published commit (SECURITY-282834). Do not substitute a
+different tag: matching versions across platforms is what makes the provenance claim checkable.
+
+**The clone and the download are gated.** `Native~/dependency-sources/<platform>.tsv` pins the
+OpenUSD commit and the TBB archive each payload is built from, and
+`Native~/verify_upstream_sources.py` checks a build against it. Run it before `build_usd.py` and
+again afterwards to stamp the install root — `build_macos.sh` and `build_windows.ps1` refuse an
+install root without that stamp. The download half is not belt and braces: `build_usd.py` passes
+`expectedSHA256` for Boost and for nothing else, so TBB arrives over HTTPS with no integrity
+check of its own.
 
 **Windows** (x64 Native Tools prompt):
 
@@ -144,29 +156,72 @@ stable APIs (mesh, xform, `UsdPreviewSurface`, `UsdGeomSubset`, primvars).
 git clone https://github.com/PixarAnimationStudios/OpenUSD.git C:\Dev\OpenUSD
 cd C:\Dev\OpenUSD
 git checkout v26.05
+
+:: The clone is the pinned commit, unmodified, from the recorded remote.
+python <package>\Native~\verify_upstream_sources.py --platform windows ^
+  --openusd-src C:\Dev\OpenUSD
+
 python build_scripts\build_usd.py --build-variant release --build-monolithic ^
   --no-python --no-imaging --no-usdview --no-examples --no-tutorials --no-tests ^
   --no-materialx C:\USD\OpenUSD-26.05-win-x64
+
+:: What build_usd.py downloaded is the recorded archive, and the install root is stamped
+:: with that result so the wrapper build can require it.
+python <package>\Native~\verify_upstream_sources.py --platform windows ^
+  --archive C:\USD\OpenUSD-26.05-win-x64\src\tbb-2020.3-win.zip
+python <package>\Native~\verify_upstream_sources.py --platform windows ^
+  --openusd-src C:\Dev\OpenUSD --require-scan --stamp C:\USD\OpenUSD-26.05-win-x64
 ```
+
+Drop `--require-scan` for local experiments and the stamp records that it was dropped, which
+makes the wrapper build warn. A payload that will be committed needs it: it checks that
+`Native~/security-scans/` holds a record for every pinned version, which is the review's
+"scan the source before compiling it" requirement. See that directory's README.
 
 **Linux:**
 
+Build from a path that contains **no user name** — `__FILE__` and `__PRETTY_FUNCTION__` bake the
+absolute source and install paths into `libusd_ms.so` (536 strings), so a build under `$HOME`
+ships the developer's user name to everyone who unpacks the package. Not `/tmp` either: the path
+is permanent in the binary and `/tmp` is not. `/opt/usd-26.05` is what the shipped payload used:
+
 ```bash
-git clone --depth 1 --branch v26.05 \
-  https://github.com/PixarAnimationStudios/OpenUSD.git /tmp/OpenUSD-src
-cd /tmp/OpenUSD-src
+sudo mkdir -p /opt/usd-26.05 && sudo chown "$(id -u):$(id -g)" /opt/usd-26.05
+git clone --branch v26.05 \
+  https://github.com/PixarAnimationStudios/OpenUSD.git /opt/usd-26.05/src
+cd /opt/usd-26.05/src && git log -1 --format=%h        # 2095faf
+python3 <package>/Native~/verify_upstream_sources.py --platform linux \
+  --openusd-src /opt/usd-26.05/src
+
 python3 build_scripts/build_usd.py --build-variant release --build-monolithic \
   --no-python --no-imaging --no-usdview --no-examples --no-tutorials --no-tests \
-  --no-materialx "$HOME/USD/OpenUSD-26.05-linux-x64"
+  --no-materialx /opt/usd-26.05/install
+strings -a /opt/usd-26.05/install/lib/libusd_ms.so | grep -c '/home/'   # must be 0
+
+python3 <package>/Native~/verify_upstream_sources.py --platform linux \
+  --archive /opt/usd-26.05/install/src/v2020.3.1.zip
+python3 <package>/Native~/verify_upstream_sources.py --platform linux \
+  --openusd-src /opt/usd-26.05/src --require-scan --stamp /opt/usd-26.05/install
 ```
 
-**Gate 2 — the right OpenUSD.** `PXR_VERSION` must read `2605`, and the monolithic library must
-exist:
+The Linux wrapper is built with plain CMake (next section), not through a script, so nothing
+enforces the stamp for you here — the two commands above are the gate. `build_linux.sh` is left
+out of this on purpose: it targets the packman + Python layout, whose OpenUSD is not the pinned
+v26.05 at all.
+
+**Gate 2 — the right OpenUSD, from the pinned source.** `PXR_VERSION` must read `2605`, the
+monolithic library must exist, and the install root must carry the provenance stamp:
 
 ```bash
 grep 'define PXR_VERSION' <openusd-root>/include/pxr/pxr.h     # 2605
 ls <openusd-root>/lib | grep -E 'usd_ms'                       # usd_ms.dll / libusd_ms.so
+python3 Native~/verify_upstream_sources.py --platform <platform> \
+  --check-stamp <openusd-root>                                 # exit 0
 ```
+
+A version number says which release this claims to be; the stamp says which revision it was
+actually built from. Only the second is evidence, which is why the wrapper build scripts check
+it and not `PXR_VERSION`.
 
 ## 6. Build the wrapper — clean, every time
 
@@ -194,9 +249,13 @@ packman + Python layout (Isaac/Omniverse) and ships a much larger closure (libpy
 ```bash
 rm -rf Native~/build~
 cmake -S Native~ -B Native~/build~ -DCMAKE_BUILD_TYPE=Release \
-  -DOPENUSD_ROOT="$HOME/USD/OpenUSD-26.05-linux-x64"
+  -DOPENUSD_ROOT=/opt/usd-26.05/install
 cmake --build Native~/build~ -j
 ```
+
+`Native~/CMakeLists.txt` adds `-ffile-prefix-map` for the package root (`/usd-toolkit`) and
+`OPENUSD_ROOT` (`/openusd`), so the wrapper's own strings are neutral wherever the clone lives;
+after assembling, `strings -a <each .so> | grep -c '/home/'` must print `0` for all three files.
 
 Then assemble the payload under `Runtime/Plugins/x86_64/Linux/` exactly in this shape (match the
 committed layout — the managed layer points `PXR_PLUGINPATH_NAME` at `lib/usd` and `plugin/usd`):
@@ -213,14 +272,15 @@ plugin/usd/**/plugInfo.json
 patchelf --set-rpath '$ORIGIN:$ORIGIN/lib' Runtime/Plugins/x86_64/Linux/libUnityUSDToolkitNative.so
 patchelf --set-rpath '$ORIGIN'             Runtime/Plugins/x86_64/Linux/lib/libusd_ms.so
 strip --strip-unneeded Runtime/Plugins/x86_64/Linux/libUnityUSDToolkitNative.so \
-                       Runtime/Plugins/x86_64/Linux/lib/libusd_ms.so
+                       Runtime/Plugins/x86_64/Linux/lib/libusd_ms.so \
+                       Runtime/Plugins/x86_64/Linux/lib/libtbb.so.2
 ldd Runtime/Plugins/x86_64/Linux/libUnityUSDToolkitNative.so   # no "not found", no build paths
 ```
 
 **Gate 3 — the build produced the binary.** Exit code 0 and:
 
 - Windows: `Runtime\Plugins\x86_64\Windows\UnityUSDToolkitNative.dll` exists, **plus**
-  `usd_rt.dll` and `tbb.dll` next to it, and `lib\usd\plugInfo.json` + `plugin\usd\plugInfo.json`.
+  `usd_rt.dll` and `tbb_usdrt.dll` next to it, and `lib\usd\plugInfo.json` + `plugin\usd\plugInfo.json`.
 - Linux: the tree above, and `ldd` resolves everything through `$ORIGIN`.
 
 **Gate 4 — the ABI-5 entry points are exported.** All 25 `RUsd_*` symbols must be present; these
@@ -421,7 +481,62 @@ Only your platform's payload may appear. Specifically:
   LFS-tracked via `.gitattributes`. A plain (non-LFS) binary commit is a mistake; re-run
   `git lfs install` and re-add.
 
-## 9b. Gate 9 — regenerate the native digest manifest
+## 9a. Gate 9 — record the dependency digests you are shipping
+
+The build scripts copy the OpenUSD/TBB tree off this machine straight into `Runtime/Plugins`, so
+a tampered local dependency tree would ride into the package unnoticed (SECURITY-282834,
+CWE-347). Each script now verifies what it is about to copy against
+`Native~/dependency-digests/<platform>.sha256` and **refuses to build** when that record is
+missing or no longer matches.
+
+On a rebuild the dependency tree legitimately changes, so record it deliberately and commit the
+result — the diff is what makes a substitution visible in review:
+
+```powershell
+# Windows, as part of a build
+.\Native~\build_windows.ps1 -OpenUsdRoot C:\USD\OpenUSD-26.05-win-x64 -RecordDependencyDigests `
+    -SigningCertificateThumbprint <thumbprint>
+```
+
+### Recording without a build
+
+A record can also be taken straight from a dependency tree, with no compile and no change to the
+payload — which is what you want when the record is simply missing for a platform, as
+`windows.sha256` and `linux.sha256` were. `--scan` makes the verifier enumerate the tree itself
+instead of being handed a file list:
+
+```powershell
+# Windows
+python Native~\verify_dependency_digests.py --platform windows `
+    --root C:\USD\OpenUSD-26.05-win-x64 --scan --record
+```
+
+```bash
+# Linux
+python3 Native~/verify_dependency_digests.py --platform linux \
+    --root /opt/usd-26.05/install --scan --record
+```
+
+Then commit `Native~/dependency-digests/<platform>.sha256`. Nothing else changes: no binary is
+rebuilt, so `Runtime/Native/NativeRuntimeHashes.g.cs` and the SBOM stay as they are.
+
+Swap `--record` for `--verify` to check a tree against the committed record the same way a build
+would. The scan rules live in `SCAN_RULES` in the verifier and mirror what each build copies —
+for Linux that is the monolithic assembly in section 6, **not** `build_linux.sh`. They were
+checked against the macOS record, which they reproduce exactly (89/89 files, same digests, no
+build); the Windows rules are structurally identical but have not been run against a real tree,
+so read the file count in the output before committing. If the rules ever drift from what a build
+copies, the next real build fails its gate rather than shipping something unrecorded.
+
+**Signing is no longer optional-by-default.** `build_windows.ps1` requires
+`-SigningCertificateThumbprint` (Authenticode is applied *after* the in-place import patch, since
+patching would invalidate an earlier signature) or an explicit `-SkipSigning`, and
+`build_macos.sh` requires `--codesign-id`, `--adhoc-codesign` or `--skip-codesign`. A build that
+cannot sign now fails instead of quietly producing an unattributable binary. Linux has no
+equivalent OS signing; publish detached digests or signatures for the `.so` files alongside the
+release instead.
+
+## 9b. Gate 10 — regenerate the native digest manifest
 
 The managed loader compares every shipped native binary against the SHA-256 digest recorded in
 `Runtime/Native/NativeRuntimeHashes.g.cs` before the first P/Invoke (SECURITY-282834, CWE-494).
@@ -429,9 +544,19 @@ A rebuild produces a new binary with a new digest, so a stale manifest makes the
 its own payload:
 
 ```bash
-python3 Native~/generate_native_hashes.py   # Windows: usually `python` — `python3` is often absent
+python3 Native~/generate_native_hashes.py   # macOS or Linux only -- see below
 git diff --stat Runtime/Native/NativeRuntimeHashes.g.cs   # your platform's entries only
 ```
+
+**Generate the manifest on macOS or Linux, never on Windows** — even for a Windows rebuild. The
+digests are of the bytes on disk, and a Windows checkout has a history of not holding the bytes
+the repository stores: before `.gitattributes` marked the plugin descriptors `-text`,
+`core.autocrlf=true` rewrote every `.usda` and `.glslfx` to CRLF while `git status` stayed clean.
+A manifest generated there records CRLF digests, and the CI `integrity_check` (Ubuntu), the
+published tarball and every macOS and Linux user then refuse the payload. So after a Windows
+rebuild, commit the binaries, pull them on a macOS or Linux machine, and generate there. The
+`-text` rule makes this safe today; the rule of thumb is what keeps it safe when a new file type
+joins the payload before anyone thinks to mark it.
 
 The generator hashes **every** platform's binaries, not just the one you rebuilt, so make sure the
 other platforms' payloads are real content and not unfetched Git LFS pointer files before you run
@@ -439,6 +564,13 @@ it — it cannot tell the difference and would record the pointers' digests, bre
 platforms at load time. `git lfs fsck --pointers` and a size check are enough. A single-platform
 rebuild should change **only that platform's entries**; anything else in the diff means the LFS
 working copy was incomplete.
+
+The manifest now covers the plugin descriptors (`plugInfo.json`, `.usda`, `.glslfx`) as well as
+the libraries, keyed by path relative to the platform's payload root, and the runtime verifier
+**fails** on any unlisted file inside `lib/usd`, `plugin/usd` or `share/usd`. A stale plugin
+directory left behind by a previous OpenUSD version therefore now breaks the load rather than
+being silently blessed — `usdLuxValidators` (26.08 only) survived the Windows 26.05 rebuild
+exactly this way, because the Windows copy did not clear its destination first. It does now.
 
 The regenerated file goes in the **same commit** as the payload. Then confirm the check passes in
 the Editor (Gate 7's project works): `Unity.USDToolkit.UsdExporter.GetRuntimeInfo()` must return

@@ -298,9 +298,28 @@ class MockServer:
                              "t": self._now_ms(), "prims": prims})
 
 
-def write_token_file(token_path, token):
+TOKEN_FILE_NAME = "live_sync_token.txt"
+
+
+def _path_inside(directory, name):
     """
-    Write the token so only the current user can read it, matching UsdLiveSyncServer.
+    Join a fixed file name onto an already-canonical directory and prove the result stays in it.
+
+    'directory' is derived from the user-supplied --base-stage, so nothing built from it is trusted
+    until it has been resolved and checked: the joined path is canonicalized and must still have
+    'directory' as its parent. Anything that escapes (a separator or '..' smuggled into 'name', or a
+    symlink swapped in) raises instead of reaching os.open / os.unlink.
+    """
+    candidate = os.path.realpath(os.path.join(directory, name))
+    if os.path.dirname(candidate) != directory:
+        raise OSError("refusing to write outside {}: {}".format(directory, candidate))
+    return candidate
+
+
+def write_token_file(directory, token):
+    """
+    Write the token to TOKEN_FILE_NAME in 'directory' so only the current user can read it, matching
+    UsdLiveSyncServer. Returns the path written.
 
     A plain open(path, "w") creates the file under the umask -- 0644 on a typical macOS/Linux host --
     which publishes the one secret guarding this server to every other account on the machine, and it
@@ -309,11 +328,17 @@ def write_token_file(token_path, token):
     mode 0600, write into it, then os.replace() it into place. The rename is atomic and replaces a
     symlink at the destination rather than following it. umask can only clear permission bits, so the
     result is never more permissive than 0600.
+
+    Only the directory comes from the caller; both file names are fixed here, and every path is
+    canonicalized and confined to that directory before it is used.
     """
-    directory = os.path.dirname(token_path) or "."
+    directory = os.path.realpath(directory or ".")
     os.makedirs(directory, exist_ok=True)
-    staging = os.path.join(directory, ".{}.{}.tmp".format(
-        os.path.basename(token_path), secrets.token_hex(8)))
+    if not os.path.isdir(directory):
+        raise OSError("not a directory: {}".format(directory))
+
+    token_path = _path_inside(directory, TOKEN_FILE_NAME)
+    staging = _path_inside(directory, ".{}.{}.tmp".format(TOKEN_FILE_NAME, secrets.token_hex(8)))
 
     fd = os.open(staging, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
@@ -326,6 +351,7 @@ def write_token_file(token_path, token):
         except OSError:
             pass
         raise
+    return token_path
 
 
 def main(argv=None):
@@ -362,9 +388,10 @@ def main(argv=None):
     args.token = args.token or os.environ.get("USD_LIVE_SYNC_TOKEN")
     if not args.token:
         args.token = secrets.token_hex(32)
-        token_path = os.path.join(os.path.dirname(os.path.abspath(args.base_stage)), "live_sync_token.txt")
+        token_dir = os.path.dirname(os.path.realpath(args.base_stage))
+        token_path = os.path.join(token_dir, TOKEN_FILE_NAME)
         try:
-            write_token_file(token_path, args.token)
+            token_path = write_token_file(token_dir, args.token)
             print("[mock-unity] generated auth token -> {} (owner-readable only)".format(token_path),
                   flush=True)
         except OSError as e:

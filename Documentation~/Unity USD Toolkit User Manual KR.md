@@ -48,14 +48,25 @@ Unity USD Toolkit은 빌드된 Unity 플레이어 **안에서** USD 파일을 �
 
 ### 플랫폼
 
-| 플랫폼 | 지원 | 비고 |
-| --- | --- | --- |
-| Windows x64 (Editor / Standalone) | 지원 | `Runtime/Plugins/x86_64/Windows` |
-| macOS (Editor / Standalone) | 지원 | Universal(x86_64 + arm64), `Runtime/Plugins/macOS` |
-| Linux x64 (Editor / Standalone) | 지원 | self-contained 페이로드, `Runtime/Plugins/x86_64/Linux` |
-| 모바일 / WebGL / 콘솔 | 미지원 | 이번 버전 범위 밖입니다. |
+| 플랫폼 | 지원 | 최소 OS | 비고 |
+| --- | --- | --- | --- |
+| Windows x64 (Editor / Standalone) | 지원 | Windows 10 21H1 | `Runtime/Plugins/x86_64/Windows` |
+| macOS (Editor / Standalone) | 지원 | macOS 12.0 (Monterey) | Universal(x86_64 + arm64), `Runtime/Plugins/macOS` |
+| Linux x64 (Editor / Standalone) | 지원 | **Ubuntu 24.04** | self-contained 페이로드, `Runtime/Plugins/x86_64/Linux` |
+| 모바일 / WebGL / 콘솔 | 미지원 | — | 이번 버전 범위 밖입니다. |
 
-> OpenUSD 버전은 플랫폼마다 다릅니다: macOS는 26.08, Windows와 Linux는 26.05입니다. 네이티브 ABI는 셋 다 API 5로 동일하며, 툴킷이 쓰는 API가 두 버전에서 동일하게 동작하므로 기능 차이는 없습니다.
+최소 OS는 C# 레이어가 아니라 동봉된 네이티브 페이로드의 특성이며, 에디터뿐 아니라 여러분이 빌드한
+플레이어에도 그대로 적용됩니다. 같은 라이브러리가 스탠드얼론 빌드로 복사되기 때문입니다.
+
+- **macOS 12.0.** 모든 dylib을 deployment target 12.0으로 빌드합니다. Unity 6.3의 macOS 플레이어
+  최소 사양이며, 그보다 낮은 버전에서는 dyld가 로드를 거부합니다.
+- **Ubuntu 24.04.** Linux 페이로드는 Ubuntu 24.04에서 빌드되어 **glibc 2.38 이상**과
+  **`GLIBCXX_3.4.32`를 제공하는 libstdc++**(GCC 13)를 요구합니다. Unity 6.3은 Ubuntu 22.04도
+  지원하지만(glibc 2.35 / `GLIBCXX_3.4.30`) 이 패키지는 그 환경에서 동작하지 않으며, 조용히
+  실패하는 대신 요구사항을 알려주는 네이티브 로드 오류를 던집니다. 코드가 24.04를 필요로 하는 것은
+  아니고 빌드 머신에서 생긴 의존성이므로, 22.04에서 다시 빌드하면 기준은 낮아집니다.
+
+> 세 플랫폼 모두 공개 태그 **OpenUSD `v26.05`** (커밋 `2095faf`)로 빌드되며, 네이티브 ABI는 API 5로 동일합니다. 공개 태그로 통일한 것은 제3자가 페이로드를 그대로 재현해 검증할 수 있게 하기 위해서입니다.
 
 ### Export
 
@@ -120,7 +131,8 @@ Unity USD Toolkit은 빌드된 Unity 플레이어 **안에서** USD 파일을 �
 Runtime/Plugins/x86_64/Windows/
   UnityUSDToolkitNative.dll
   usd_rt.dll          (OpenUSD monolithic. 다른 패키지와의 이름 충돌을 피해 usd_ms에서 rename)
-  tbb.dll
+  tbb_usdrt.dll       (Intel TBB. Windows 로더가 Editor의 tbb.dll을 대신 물리지 않도록
+                       tbb.dll에서 rename)
   lib/usd/**/plugInfo.json
   plugin/usd/**/plugInfo.json
 
@@ -149,6 +161,61 @@ python3 Native~/generate_native_hashes.py
 ```
 
 > 이 스크립트는 **모든 플랫폼**의 바이너리를 해싱합니다. 다른 플랫폼 페이로드가 LFS 포인터 상태면 실행이 거부되므로, 먼저 `git lfs pull`로 실제 내용을 받아야 합니다.
+
+### 받은 패키지가 Unity가 배포한 것인지 확인하기
+
+확인할 수 있는 것이 셋이고, 각각 증명하는 성질이 다릅니다. 위의 다이제스트 매니페스트는 패킹
+이후 페이로드가 바뀌지 않았음을 증명하고, 아래 둘은 그것이 **어디서 왔는지**를 증명합니다.
+
+**1. 패키지 서명 (전 플랫폼).** Unity 파이프라인으로 배포된 패키지에는 `package/.attestation.p7m`
+CMS/PKCS#7 어테스테이션이 들어 있습니다. Unity PKI가 서명하며, tarball 안 **모든 파일**의
+다이제스트를 커버합니다 — `Runtime/Plugins/**`의 네이티브 바이너리 포함. 패킹 이후 파일이 추가·
+삭제·변경되면 서명이 깨집니다. Unity 6.3 이상은 이를 자동 검증해 Package Manager 창에 표시하며,
+직접 확인하려면:
+
+```bash
+tar -xzf com.unity.usd-toolkit-<version>.tgz package/.attestation.p7m
+openssl cms -verify -in package/.attestation.p7m -inform DER -noverify -out attestation.json
+openssl pkcs7 -in package/.attestation.p7m -inform DER -print_certs -text | head -40
+```
+
+`-noverify`를 빼고 `-CAfile`로 Unity 루트 인증서를 지정하면 구조뿐 아니라 체인까지 검증합니다.
+내부적으로는 PVP-28-3(서명 존재)과 PVP-29-3(서명 유효 및 아카이브 내용 일치)이 같은 두 성질을
+검사합니다.
+
+**2. 플랫폼 코드 서명 (Windows / macOS).** 네이티브 바이너리는 Unity 인증서로 서명된 게시자
+서명을 가집니다:
+
+```bash
+# macOS — Developer ID authority가 나와야 하며 "Signature=adhoc"이면 안 됩니다
+codesign --verify --strict --verbose=2 Runtime/Plugins/macOS/UnityUSDToolkitNative.dylib
+codesign -dv --verbose=4 Runtime/Plugins/macOS/libusd_ms.dylib
+```
+
+```powershell
+# Windows — Status: Valid 를 기대
+Get-ChildItem Runtime\Plugins\x86_64\Windows\*.dll | ForEach-Object {
+    Get-AuthenticodeSignature $_.FullName | Select-Object Status, SignerCertificate
+}
+```
+
+**Linux은 의도적으로 코드 서명하지 않습니다.** ELF 포맷에도, 동적 링커에도, Unity의 서명
+인프라에도 `.so`에 대한 Authenticode/Developer ID 상당물이 없습니다. Unity의 코드 서명 서비스는
+Windows PE와 macOS Mach-O만 대상으로 하며, 네이티브 Linux 라이브러리를 배포하는 다른 Unity
+패키지들도 동일하게 패키지 레벨에서 처리합니다. Linux의 무결성 근거는 (1)의 어테스테이션과
+(3)의 다이제스트입니다.
+
+**3. 파일별 다이제스트 (전 플랫폼).** `ThirdPartyNotices~/sbom.cdx.json`은 CycloneDX 1.6 형식의
+BOM으로, 페이로드에 포함된 모든 서드파티 구성요소를 버전·출처·SHA-256과 함께 나열합니다.
+런타임 검사가 쓰는 것과 같은 다이제스트이며, 에디터 밖에서 검증할 수 있습니다:
+
+```bash
+sha256sum Runtime/Plugins/x86_64/Linux/lib/libusd_ms.so
+python3 -c "import json;[print(c['hashes'][0]['content'], [p['value'] for p in c['properties'] if p['name']=='unity:shippedPath'][0]) for c in json.load(open('ThirdPartyNotices~/sbom.cdx.json'))['components'][1:]]"
+```
+
+SBOM에는 각 바이너리가 어떤 OpenUSD 태그와 커밋으로 빌드됐는지도 기록되어 있어, 제3자가 같은
+공개 소스에서 다시 빌드해 내용을 비교할 수 있습니다.
 
 ## 5. 런타임 Export 사용 방법
 

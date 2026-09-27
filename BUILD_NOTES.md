@@ -4,6 +4,129 @@ Records the macOS development state and the exact steps to rebuild the native pl
 **Windows** and **Linux**. The managed (C#) code is platform-agnostic — only the native C++
 wrapper must be rebuilt per platform.
 
+## How the payload is trusted, and what is still weak (SECURITY-282834)
+
+Where the shipped binaries' trustworthiness rests today, written down so the gaps are a position
+rather than an oversight. Each line is verifiable from the repository.
+
+**What holds today**
+
+- *Provenance of the third-party code.* All three payloads are built from the public OpenUSD
+  `v26.05` tag, commit `2095faf`, with identical flags, and the build environment of each platform
+  — OS, compiler, CMake, SDK, build root — is recorded per payload below. A third party can
+  rebuild from the same published source and compare what the binary contains.
+- *The pin is enforced, not just written down.* `Native~/dependency-sources/<platform>.tsv`
+  records the OpenUSD commit and the TBB archive a build may use;
+  `Native~/verify_upstream_sources.py` checks a clone against it — pinned commit, recorded remote,
+  unmodified worktree, a tag upstream has not moved — verifies the downloaded archive's digest,
+  and stamps the OpenUSD install root. `build_macos.sh` and `build_windows.ps1` refuse an install
+  root without that stamp. Under this package's flags TBB is the only dependency `build_usd.py`
+  downloads at all; everything else, the four vendored libraries included, comes from the OpenUSD
+  tree and is covered by the commit pin. Worth knowing when reading that: `build_usd.py` passes
+  `expectedSHA256` for Boost and for nothing else.
+- *Inventory.* `ThirdPartyNotices~/sbom.cdx.json` (CycloneDX 1.6) lists every component in the
+  payload with version, source and per-file SHA-256, including the four libraries OpenUSD vendors
+  into the monolithic build.
+- *What was read off the build host.* `Native~/dependency-digests/<platform>.sha256` records the
+  digest of every OpenUSD/TBB file a build copies in, and a build refuses to run against a tree
+  that does not match. Changing dependencies has to appear as a reviewed diff.
+- *Tamper detection at load.* `Runtime/Native/NativeRuntimeHashes.g.cs` covers every binary **and**
+  every plugin descriptor, keyed by relative path; the verifier walks the payload recursively,
+  fails on an unlisted file inside `lib/usd`, `plugin/usd` or `share/usd`, and refuses a
+  `plugInfo.json` whose `LibraryPath` escapes the payload root. A release player cannot opt out.
+- *Publisher identity.* Code signing on Windows and macOS — except Windows `tbb_usdrt.dll`, which
+  keeps Intel's own Authenticode signature, being the one binary in the payload we redistribute
+  rather than build — and the package attestation
+  (`package/.attestation.p7m`, CMS over the digest of every packaged file) for all three
+  platforms — the latter being the only such evidence Linux can have, as ELF has no code signature
+  and Unity's signing service covers PE and Mach-O only.
+
+**What is still weak, and why**
+
+1. *The payload is committed, not built in CI.* The binaries live in the repository under Git LFS
+   and CI signs and packs what is committed; it does not compile them. So the chain of custody
+   between "public OpenUSD tag" and "the bytes in this repository" is a person following
+   `Native~/REBUILD_WINDOWS_LINUX.md` on a machine, rather than a build log. The source end of
+   that chain is now gated rather than trusted — the build scripts refuse an OpenUSD install that
+   was not verified against the pinned commit — but the machine in the middle is still a person's,
+   and its output is still a commit rather than an artifact CI produced. This is the root of the
+   next two items.
+2. *No reproducible-build gate.* The review asks for a release that fails automatically when a
+   reproducible-build check does not match. That needs (1) plus byte-reproducible builds. Partly
+   prepared: build paths no longer leak into the binaries (`-ffile-prefix-map`, neutral build
+   roots), and the macOS wrapper already rebuilds byte-identically from the same input. Not
+   measured: whether the OpenUSD monolithic build is deterministic across two runs at the same
+   path.
+3. *Signing is applied at pack time, to committed binaries.* A consumer of the published package
+   gets signed binaries; a reader of the repository does not. If a re-review inspects the
+   repository rather than the published tarball, it will still find unsigned binaries there.
+4. *The upstream source has not been scanned.* The review requires each version to be scanned
+   for security issues before we compile it. Cycode runs on this repository's own code — SAST,
+   secrets and vulnerable dependencies, on every pull request — but the OpenUSD and oneTBB source
+   is not committed here, so nothing has looked at it. `Native~/security-scans/` holds the
+   requirement, the command, and what a record must contain;
+   `verify_upstream_sources.py --require-scan` gates a release stamp on one existing. No record
+   exists yet.
+
+**Why we may sign libraries we did not write**
+
+The code-signing review's rule is that a third party's binaries should carry the third party's
+signature; that if they will not sign, an alternative way to verify integrity and trust can stand
+in, in which case we may sign with Unity's certificates after establishing the code is free of
+malicious content and if the license allows; and that source we compile ourselves must be scanned
+per version before we compile it, and may then be signed if the license allows. Against that:
+
+1. *We compile almost all of it.* Every file in the payload except one is built here from public
+   source: OpenUSD from `v26.05`, oneTBB from the `v2020.3` (macOS, Windows) / `v2020.3.1` (Linux)
+   source tags. So the rule that applies is the "we compile it ourselves" one, not the
+   third-party-binary one.
+2. *No upstream signature exists to preserve.* OpenUSD's `v26.05` is a lightweight tag — there is
+   no tag object that could carry a signature — and its commit `2095faf` is unsigned. oneTBB
+   publishes no checksum for v2020.3. Asking upstream to sign is the step the rule prescribes
+   first; there is nothing there to ask for today.
+3. *The alternative evidence is the commit id.* A git commit id is a hash of the tree it names, so
+   the source cannot be altered after the fact without changing the id, and the same id is
+   observed independently by every other consumer of that tag. That is what
+   `Native~/dependency-sources/` pins and what `verify_upstream_sources.py` enforces, which is the
+   integrity-and-trust evidence the rule asks for in place of a signature.
+4. *The license permits it.* OpenUSD is under the Tomorrow Open Source Technology License 1.0,
+   which differs from Apache 2.0 only in Section 6 (Trademarks) — a restriction on using the
+   Licensor's marks, which signing does not do: an Authenticode or Developer ID signature asserts
+   who distributed the binary, not who endorses it. oneTBB is Apache 2.0, and the four vendored
+   libraries are permissive. All permit modification and redistribution, which is what building
+   and signing require. Formal compliance review is with the Security team.
+
+The one binary we do not build is Intel's TBB on Windows, shipped as `tbb_usdrt.dll`, and it lands
+on the other branch of the rule with the strongest evidence in the payload. It comes from Intel's
+published `tbb-2020.3-win.zip` release asset; the file this package ships is **byte-identical** to
+`tbb/bin/intel64/vc14/tbb.dll` inside that archive (SHA-256 `692380ce…`), and it carries Intel
+Corporation's own Authenticode signature (Intel External Issuing CA 7B, under QuoVadis). So it is
+a third-party binary that its author *did* sign, which is why `.yamato/sign.yml` signs the other
+two Windows DLLs and leaves this one alone.
+
+It ships under a different name than upstream gives it because the Unity Editor carries its own
+`tbb.dll`, and Windows resolves an import by base name against the modules already loaded: the
+first `tbb.dll` in the process wins, and the payload would run against a build it was not compiled
+against. Only the name changes — `Native~/patch_pe_import.py` repoints `usd_rt.dll`'s import
+descriptor and leaves Intel's file untouched, so the signature and the byte-identity above both
+still hold. Authenticode covers a PE's contents, not its filename.
+
+Step 3 establishes that the source is what upstream published. It does not establish what that
+source contains, which is step 1's scan — see `Native~/security-scans/`.
+
+**Planned, in order**
+
+- *Phase B1 — build the wrapper in CI.* Treat the OpenUSD install as a pinned, hash-fixed artifact
+  built once per tag, and compile `Native~/src` from source in Yamato on every release. The code
+  this team authors then has a build log, and because the wrapper is already deterministic the
+  reproducibility gate can be switched on for it immediately. Days of work, not weeks.
+- *Phase B2 — build OpenUSD in CI too.* A tier-1 pipeline per platform producing the OpenUSD
+  artifact, which is what fully closes the reproducible-build finding. Needs Bokken images with
+  the C++ toolchains, artifact storage for a payload of this size, and a determinism measurement
+  first.
+- *Smaller items carried to the next rebuild of each platform:* the oneTBB build-host stamp (see
+  below), and lowering the Linux floor to Ubuntu 22.04 by building in a 22.04 container.
+
 ## Current state (2026-09-22)
 
 - **Package version:** `0.7.2-exp.1`
@@ -16,8 +139,8 @@ wrapper must be rebuilt per platform.
   version — the SECURITY-282834 topology and asset-path fixes among them — are absent from an
   older binary with nothing in the version number to say so. The gate now also runs on the
   **import** path, which previously never checked the version at all.
-- **Linux was rebuilt on 2026-09-22 (API 5, SECURITY-282834 fixes included)** — see the Linux
-  payload entry below. All three desktop payloads are now API 5 and built from the current source.
+- **Linux was rebuilt on 2026-09-22 (API 5, SECURITY-282834 fixes included) and again on
+  2026-09-24 from a build path with no user name in it** — see the Linux payload entry below. All three desktop payloads are now API 5 and built from the current source.
   `Native~/REBUILD_WINDOWS_LINUX.md` remains the step-by-step rebuild guide with gates for both
   platforms (`Native~/WINDOWS_REBUILD.md` is the record of the stale-DLL texture bug it supersedes).
 - **Import UV/normal primvars (0.7.2, all platforms once rebuilt):** `BuildImportedMesh` resolves
@@ -33,19 +156,51 @@ wrapper must be rebuilt per platform.
   not cost.
 - **OpenUSD version:** built **monolithic** (`libusd_ms`/`usd_ms`) with
   `--no-python --no-imaging --no-usdview --no-examples --no-tutorials --no-tests --no-materialx`.
-  The OpenUSD *version differs per platform* (see below) — this is **not** an ABI concern: the
-  native ABI (`RUsd_GetApiVersion`) is `5` regardless of the OpenUSD minor version, and the
-  managed C# layer only validates the ABI version. The toolkit uses only stable OpenUSD APIs
-  (mesh, xform, `UsdPreviewSurface`, `UsdGeomSubset`), so 26.05 and 26.08 behave the same here.
-- **macOS payload:** built against **26.08** (`PXR_VERSION 2608`, binary tag `pxrInternal_v0_26_8`),
-  **API 5** (`RUsd_GetApiVersion()` -> 5, confirmed 2026-09-22 by `Native~/Tests~/import_uv_test`;
-  this line previously read "ABI v2", which the binary has not matched since the usdz work),
-  **verified** (export/import round-trips, hierarchy + multi-material, async import of a
-  real 96-mesh / 251-material / 2K-texture scene). Universal (`x86_64` + `arm64`), under
-  `Runtime/Plugins/macOS/`. **Rebuilt 2026-09-22** with the SECURITY-282834 importer fixes
-  (topology consistency check, asset-path confinement). No ABI change — still API 5. Verified by
+  **All three platforms are built against the same public OpenUSD tag, `v26.05`** (commit
+  `2095faf`, "Merge release v26.05"), as of 2026-09-23. macOS was previously built from a
+  non-public 26.08 source drop that carried no git history, so no third party could reproduce or
+  inspect it; SECURITY-282834 raised that as its High finding and the fix was to align macOS on
+  the tag Windows and Linux already used. The native ABI (`RUsd_GetApiVersion`) is `5` on all
+  three.
+- **macOS payload:** built against **26.05** (`PXR_VERSION 2605`, binary tag
+  `pxrInternal_v0_26_5`), **API 5**, universal (`x86_64` + `arm64`), under
+  `Runtime/Plugins/macOS/`. **Rebuilt 2026-09-23 from the public `v26.05` tag** (commit
+  `2095faf`) to close SECURITY-282834's provenance finding — the previous payload came from a
+  non-public 26.08 source with no git history, so its exact revision could not be published and
+  nobody outside the build could reproduce it. Same build flags as Windows and Linux
+  (`--build-monolithic --no-python --no-imaging --no-usdview --no-examples --no-tutorials
+  --no-tests --no-materialx`). Verified after the rebuild: `RUsd_GetApiVersion()` -> 5 and
+  `RUsd_GetOpenUsdVersion()` -> `0.26.5`; `security_test` 9/9, `import_uv_test` PASS, `usdz_test`
+  PASS; Unity 6000.4.10f1 clean compile with 0 errors, the digest check passing and the import
+  gate returning 1 mesh for the 3-mesh inconsistent-topology fixture. The earlier 26.08 payload
+  was itself verified by
   `Native~/Tests~/security_test.cpp` (9/9), plus `import_uv_test` and `usdz_test` re-run for
   regressions (both PASS).
+  **Toolchain** (recorded so a third party can reproduce the build environment, which is the
+  other half of SECURITY-282834's provenance finding — Windows and Linux already recorded
+  theirs below): macOS 26.6.2 (`25G83`), Xcode 26.6 (`17F113`), Apple clang 21.0.0
+  (`clang-2100.1.1.101`), CMake 4.3.2, SDK 26.5, `CMAKE_OSX_ARCHITECTURES=x86_64;arm64`.
+  **Build location: `/Users/Shared/usd-26.05`, never a home directory.** `__FILE__` (OpenUSD's
+  `TF_AXIOM` / `TF_VERIFY` macros expand it) and `__PRETTY_FUNCTION__` (a lambda passed as a
+  template argument prints the file it was written in) embed the absolute path of what is being
+  compiled, so a build from `~` ships the developer's user name inside the payload — 1,134 such
+  strings in the 2026-09-23 `libusd_ms.dylib`, 8 in the wrapper. Build OpenUSD from a path that
+  contains no user name; the wrapper additionally passes `-ffile-prefix-map` for the package root
+  and the OpenUSD install (`Native~/CMakeLists.txt`), so its own strings read `/usd-toolkit/...`
+  and `/openusd/...` wherever it is built. Check with
+  `strings -a <dylib> | grep '/Users/'` — the only paths left should be the neutral build root.
+  One identifier is left that is not a path: the oneTBB banner in `libtbb.dylib` names the build
+  host, which on this machine is a personal machine name. See "Build host names in the oneTBB
+  stamp" below — it applies to macOS and Linux alike.
+  **Deployment target: 12.0.** Nothing used to set `CMAKE_OSX_DEPLOYMENT_TARGET`, so every dylib
+  took the SDK default — the build machine's own OS — and the payload shipped as `minos 26.0`,
+  which dyld refuses on anything older. The whole macOS payload was rebuilt on 2026-09-23 with
+  `MACOSX_DEPLOYMENT_TARGET=12.0` for OpenUSD and oneTBB and `--deployment-target` (default
+  `12.0`) for the wrapper; all five dylibs now report `minos 12.0` on both slices. 12.0 is
+  Unity 6.3's minimum for a macOS **player**; the Editor's own minimum is 13.0, so one value
+  covers both surfaces the plugin loads into. Rebuild OpenUSD and the wrapper with the same
+  value — the wrapper's flag does not reach the OpenUSD dylibs, which keep whatever they were
+  built with.
 
 - **Payload digest manifest:** `Runtime/Native/NativeRuntimeHashes.g.cs` records the SHA-256 of
   every shipped `.dll`/`.dylib`/`.so`, and `UsdExporter.VerifyNativeRuntimeIntegrity` compares
@@ -56,8 +211,24 @@ wrapper must be rebuilt per platform.
   anyone who can edit the binaries. This does not defend against someone who already has write
   access to the package; it catches substitution or corruption in distribution and makes the
   payload auditable.
+- **Signing and CI:** the payload is signed in CI, not on a developer machine. `.yamato/` holds the
+  pipeline — sign the committed binaries with Unity's certificates (Azure Key Vault bricks), regenerate
+  both manifests from the signed files, then pack, test and publish — and `.yamato/README.md` explains the
+  ordering constraints and what still has to be requested from `#devs-code-signing` and PETS before it can
+  run. A local rebuild is unsigned by design: `build_macos.sh --adhoc-codesign` or
+  `build_windows.ps1 -SkipSigning` is the normal development path, and the committed manifests describe
+  those unsigned binaries.
+- **Software bill of materials:** `ThirdPartyNotices~/sbom.cdx.json` (CycloneDX 1.6) lists every
+  third-party component the payload carries — OpenUSD `v26.05` with its commit and build flags,
+  oneTBB 2020.3, and the four libraries OpenUSD vendors into the monolithic build (CLI11,
+  double-conversion, LZ4, tsl robin-map) — with the per-platform toolchain and the SHA-256 of each
+  shipped file (SECURITY-282834, CWE-494 remediation 4). **Regenerate it in the same commit as any
+  payload rebuild** — `python3 Native~/generate_sbom.py` — alongside `generate_native_hashes.py`,
+  and update the version and toolchain constants at the top of that script when they change. Its
+  digests are the same values as the runtime manifest's; it is an inventory for consumers, not a
+  second integrity control.
 
-> All three payloads (macOS, Windows, Linux — each rebuilt 2026-09-22) now carry the
+> All three payloads (Windows rebuilt 2026-09-22, macOS 2026-09-23, Linux 2026-09-24) now carry the
 > SECURITY-282834 native fixes and pass `Native~/Tests~/security_test.cpp` (9/9).
 - **Windows payload:** rebuilt against **26.05** (`PXR_VERSION 2605`, binary tag
   `pxrInternal_v0_26_5`), **API 5**, x64, under `Runtime/Plugins/x86_64/Windows/`. **Rebuilt and
@@ -77,28 +248,109 @@ wrapper must be rebuilt per platform.
   `VtValueHoldsType` texture fix. McUsd was last measured on the 2026-09-11 ABI 4 payload
   (23 meshes / 1760 vertices / 880 triangles, 23/23 UVs and normals, 23/23 `_BaseMap`, 8
   alpha-cutout, 1 alpha-blended, no console warnings); nothing in this rebuild touches that path.
-  **Why 26.05, not 26.08:** OpenUSD has **no public `v26.08` tag** (latest public is `v26.05`);
-  the macOS 26.08 build came from a non-public source. 26.05 is used for Windows by decision —
-  functionally equivalent for this toolkit. To match exactly, rebuild against the same 26.08
-  source the macOS build used.
+  **Why 26.05:** it is the latest public tag — there is no public `v26.08`. Since 2026-09-23 all
+  three platforms use it, so the payloads are now reproducible from the same published commit.
 - **Linux payload:** rebuilt against **26.05** (`PXR_VERSION 2605`, binary tag `pxrInternal_v0_26_5`),
-  **API 5**, x64, under `Runtime/Plugins/x86_64/Linux/`. **Rebuilt and verified on 2026-09-22**
-  with the SECURITY-282834 fixes, following `Native~/REBUILD_WINDOWS_LINUX.md`. Only
-  `libUnityUSDToolkitNative.so` changed: `lib/libusd_ms.so` and `lib/libtbb.so.2` are the same
-  monolithic + `--no-python` OpenUSD 26.05 build as the 2026-06-24 payload (byte-identical after
-  strip), and the `lib/usd` / `plugin/usd` resource trees are unchanged, so the digest manifest
-  diff is the one wrapper entry. Gates: `ldd` resolves purely through `$ORIGIN`; 25 `RUsd_*`
+  **API 5**, x64, under `Runtime/Plugins/x86_64/Linux/`. **Rebuilt in full on 2026-09-24 from
+  `/opt/usd-26.05`** (see *Build location* below) — OpenUSD, oneTBB and the wrapper — from the
+  public `v26.05` tag (commit `2095faf`, a fresh full clone, not a copy of an older tree) with the
+  same flags as Windows and macOS (`--build-monolithic --no-python --no-imaging --no-usdview
+  --no-examples --no-tutorials --no-tests --no-materialx`). The rebuild before it, on 2026-09-22
+  with the SECURITY-282834 fixes, had replaced only the wrapper and kept the 2026-06-24
+  `libusd_ms.so` / `libtbb.so.2`. All three ELF files are now `strip --strip-unneeded`, the
+  wrapper and `libusd_ms.so` carry `$ORIGIN`-only rpaths, and every plugin descriptor under
+  `lib/usd` / `plugin/usd` is byte-identical to the previous payload (same source tag), so the
+  digest manifest, the SBOM and `Native~/dependency-digests/linux.sha256` each change by exactly
+  the three compiled files (86 of the 88 recorded dependency digests are unchanged). Gates, all
+  re-run on the 2026-09-24 payload: `ldd` resolves purely through `$ORIGIN`; 25 `RUsd_*`
   exports incl. the seven added after ABI 2; all Gate 5 literals present plus the two refusal
   literals (`has inconsistent topology`, `resolves outside the stage's own folders and was
   refused`); `import_uv_test` → `API 5` + `PASS`, `usdz_test` `PASS`, `security_test` **9/9
-  PASS**. Toolchain: Ubuntu 24.04, g++ 13.3.0, CMake 3.28.3, patchelf 0.17 (venv). **Why 26.05,
+  PASS**; the wrapper's four OpenUSD header paths now read `/openusd/include/pxr/...`.
+  **Toolchain** (2026-09-24 payload): Ubuntu 24.04.5 LTS (glibc 2.39), g++ 13.3.0
+  (`Ubuntu 13.3.0-6ubuntu2~24.04.1`), CMake 3.28.3, GNU Binutils 2.42 (`strip`, `nm`, `objdump`),
+  patchelf 0.17.2, Python 3.12.3 for `build_usd.py`; wrapper BuildID
+  `b38890c4531608a3ff545befaec094ebca389f71`. Shipped digests: wrapper `75391e9f…9348a`
+  (213,000 bytes), `libusd_ms.so` `ba8f9c29…22d73` (43,501,936 bytes), `libtbb.so.2`
+  `0147d53d…67400` (277,968 bytes).
+  **Build location: `/opt/usd-26.05`, never a home directory.** Same defect and same remedy as
+  the macOS entry above: `__FILE__` and `__PRETTY_FUNCTION__` embed the absolute path of what is
+  being compiled, so the previous Linux payload — built under `/home/<user>/…` — carried 536
+  strings naming the developer's home directory in `libusd_ms.so` and 4 in the wrapper (the
+  `__FILE__` of `tf/refPtr.h`, `tf/weakPtrFacade.h`, `usdGeom/xformOp.h`, `usd/object.h`).
+  OpenUSD is now cloned and built under `/opt/usd-26.05/{src,install}` (created once with
+  `sudo mkdir -p /opt/usd-26.05 && sudo chown $(id -u):$(id -g) /opt/usd-26.05`; not `/tmp`,
+  because the path is permanent in the binaries and `/tmp` is not), and the wrapper is compiled
+  with `-ffile-prefix-map` (`Native~/CMakeLists.txt`) for the package root → `/usd-toolkit` and
+  `OPENUSD_ROOT` → `/openusd`. Measured on the 2026-09-24 payload with
+  `strings -a <file> | grep -c '/home/'`: **0 / 0 / 0** for the wrapper, `libusd_ms.so` and
+  `libtbb.so.2` (also 0 for `/Users/`). What remains: 536 strings under the neutral
+  `/opt/usd-26.05/src/...` root in `libusd_ms.so` (one per source file OpenUSD's macros name; the
+  same count as before, now without the user), and in the wrapper only the four `/openusd/include/…`
+  headers and nothing under `/usd-toolkit/` — its own sources reach the binary through no such
+  macro. **Still present, not fixed here, and not Linux-specific:** the oneTBB build-host stamp — see
+  "Build host names in the oneTBB stamp" below. **Why 26.05,
   not 26.08:** OpenUSD has no public `v26.08` tag; 26.05 is functionally equivalent for this
-  toolkit (identical decision to the Windows build). **glibc baseline:** the wrapper itself only
-  needs `GLIBC_2.32`, but `libusd_ms.so` was built on Ubuntu 24.04 and requires **GLIBC ≥ 2.38**
-  (Ubuntu 23.10+). To run on older distros (e.g. Ubuntu 22.04 / glibc 2.35, the packman
-  manylinux_2_35 baseline) rebuild OpenUSD and the wrapper on an older toolchain or in a
-  manylinux_2_35 container. The 2026-06-24 payload before this one was ABI v2 and predated the
+  toolkit (identical decision to the Windows build). **Minimum OS: Ubuntu 24.04 — a decision, not a defect
+  (2026-09-23).** The wrapper itself only needs `GLIBC_2.32`, but `libusd_ms.so` is built on
+  Ubuntu 24.04 and needs **glibc ≥ 2.38** and **`GLIBCXX_3.4.32`** (GCC 13 libstdc++, which the
+  payload does not bundle). Unity 6.3 supports Ubuntu 22.04 as well (glibc 2.35 /
+  `GLIBCXX_3.4.30`), so the package is deliberately narrower than the Editor it ships for; that
+  is documented in `README.md` and both user manuals, and `CreateNativeLoadException` names the
+  requirement so a 22.04 user is not left hunting for a missing file. Nothing in the source needs
+  24.04: only three symbols force 2.38 — `__isoc23_strtol`, `fmod`, `fmodf`, all artifacts of
+  compiling against 24.04 headers. To lower the floor to 22.04, rebuild OpenUSD and the wrapper
+  in an Ubuntu 22.04 (glibc 2.35) container or on that distro directly — no code change. That is
+  the Linux counterpart of the macOS deployment target above, and it is still open. The 2026-06-24 payload before this one was ABI v2 and predated the
   UV/normal primvar, opacity, usdz and security work.
+  **2026-09-23 확인 — 재빌드 없이, 커밋된 파일만으로.** Wrapper
+  `libUnityUSDToolkitNative.so` (sha256 `174665c8…b77c`, 213,000 bytes, BuildID
+  `0151726566791fda0e11bc1323237579193166b0`): `nm -D --defined-only | grep -c RUsd_` → **25**, and
+  `Native~/include/unity_usd_toolkit_native.h` declares exactly 25, so the export set matches the
+  source; `RUsd_GetImportMeshUvSetInfo`, `RUsd_CopyImportMeshUvSet`, `RUsd_GetImportMaterialOpacity`,
+  `RUsd_CreateUsdzPackage`, `RUsd_ReadImportAsset` all present. `strings -a`: `SdfAssetPath` ×5,
+  `GfVec4f` (both in the mangled `UsdAttribute::_Set<T>` instantiations), `texCoord2f[]` ×1,
+  `float2[]` ×1, `normal3f[]` ×1, `USD import: ` ×2, `Failed to write the usdz package` ×2. `ldd`: no
+  "not found"; every non-system library resolves through `$ORIGIN:$ORIGIN/lib` (`libusd_ms.so`,
+  `libtbb.so.2` from the payload's own `lib/`); DT_NEEDED is `libusd_ms.so`, `libstdc++.so.6`,
+  `libgcc_s.so.1`, `libc.so.6`, `ld-linux-x86-64.so.2`. `objdump -T` measured: wrapper needs at most
+  **`GLIBC_2.32` / `GLIBCXX_3.4.29` / `CXXABI_1.3.9`**; `lib/libusd_ms.so` **`GLIBC_2.38` /
+  `GLIBCXX_3.4.32` / `CXXABI_1.3.11`**; `lib/libtbb.so.2` `GLIBC_2.34` / `GLIBCXX_3.4.21` /
+  `CXXABI_1.3.13` — so the payload-wide floor is glibc ≥ 2.38 + `GLIBCXX_3.4.32`, exactly as
+  documented above and in the manuals; no discrepancy. **One observation, fixed by the 2026-09-24
+  rebuild (see *Build location* above):** `strings` showed four absolute build-machine paths in the wrapper — the `__FILE__`
+  of `pxr/base/tf/refPtr.h`, `pxr/base/tf/weakPtrFacade.h`, `pxr/usd/usdGeom/xformOp.h`,
+  `pxr/usd/usd/object.h` under the OpenUSD include root, baked in by `TF_AXIOM`/`TF_VERIFY`-style
+  macros in those headers (`libusd_ms.so` carries 536 such strings from its own build). The
+  `ldd` gate ("no absolute build paths") is about the resolver and still holds; this is a separate,
+  low-severity information leak of the build tree path; the 2026-09-24 rebuild removed it with
+  `-ffile-prefix-map` and a user-name-free OpenUSD build root. Also confirmed the same day:
+  the shipped `lib/libtbb.so.2` is the recorded one after `strip --strip-unneeded` (binutils 2.42),
+  which the runbook's §6 strip step now lists (see that commit).
+
+## Build host names in the oneTBB stamp (open, macOS and Linux)
+
+The path work removed 1,682 build-machine paths from the payload. One identifier per TBB library
+survives it, because it is not a path: oneTBB's own build writes a version banner through
+`build/version_info_<platform>.sh`, which runs `hostname -s`, and that string ships.
+
+| file | stamp |
+| --- | --- |
+| `Runtime/Plugins/x86_64/Linux/lib/libtbb.so.2` | `TBB: BUILD_HOST beat-Alienware-x16-R2 (x86_64)` |
+| `Runtime/Plugins/macOS/libtbb.dylib` | `TBB: BUILD_HOST YoonseokChois-MacBook-Pro-2 (arm64)` |
+| `Runtime/Plugins/x86_64/Windows/tbb_usdrt.dll` | `TBB: BUILD_HOST nntpat21-250` |
+
+Both non-Windows stamps identify a person: the Linux host name contains the user account name,
+and the macOS one is the default "<owner>'s MacBook Pro" form, which carries a full name. The
+Windows stamp is a neutral machine name. This is not a product of the 2026-09 rebuilds — the same
+stamp is in the 2026-06-24 payload — and it is now the only place a developer's name appears in
+any shipped binary.
+
+Not fixed because the remedy is a change to the dependency build rather than ours: oneTBB has to
+be built under a neutral host name, and the stamp is written at TBB build time, so that means
+another OpenUSD/TBB rebuild on each machine for one string per file. Deferred to the next rebuild
+of each platform rather than done on its own. Check with
+`strings -a <tbb library> | grep -A1 BUILD_HOST`.
 
 ## What changed this cycle (already in the macOS build)
 
@@ -162,9 +414,10 @@ See `CHANGELOG.md` (`0.4.0`–`0.6.0`) for the full per-feature list.
 
 Run from an **x64 Native Tools Command Prompt for Visual Studio**.
 
-1. Build OpenUSD monolithic (once). The shipped Windows payload uses **`v26.05`** (the latest
-   public tag — there is no public `v26.08`). Substitute the 26.08 source tag/commit only if you
-   have access to the same non-public source the macOS build used.
+1. Build OpenUSD monolithic (once). Every shipped payload uses **`v26.05`**, the latest public
+   tag (there is no public `v26.08`). Do not substitute another tag — matching, publicly pinned
+   versions across all three platforms are what make the payloads reproducible, which is the
+   point of SECURITY-282834's provenance finding.
    ```bat
    git clone https://github.com/PixarAnimationStudios/OpenUSD.git C:\Dev\OpenUSD
    cd C:\Dev\OpenUSD
@@ -180,7 +433,7 @@ Run from an **x64 Native Tools Command Prompt for Visual Studio**.
    .\build_windows.ps1 -OpenUsdRoot C:\USD\OpenUSD-26.05-win-x64
    ```
 3. Expected payload in `Runtime/Plugins/x86_64/Windows/`:
-   `UnityUSDToolkitNative.dll`, `usd_ms.dll`, `tbb.dll`, `lib/usd/**/plugInfo.json`,
+   `UnityUSDToolkitNative.dll`, `usd_rt.dll`, `tbb_usdrt.dll`, `lib/usd/**/plugInfo.json`,
    `plugin/usd/plugInfo.json`.
 
 ## Rebuild for Linux (x64)
@@ -230,4 +483,7 @@ closure (libpython, libboost_python). Prefer the monolithic path for a minimal p
 - macOS caches a loaded native dylib for the Editor session — restart the Editor to reload a
   rebuilt plugin. Windows/Linux behave similarly in a running player.
 - The OpenUSD install and native build caches live under `Build~/` and `Native~/build~/`, which
-  are git-ignored. On macOS the install used here is OpenUSD 26.08 universal.
+  are git-ignored. The macOS install used here is OpenUSD 26.05 universal, built from
+  `Build~/src-2605/OpenUSD-dev` (a shallow clone of the public `v26.05` tag, commit `2095faf`).
+  The older 26.08 install and its source tree are kept alongside it as the provenance record of
+  the payload shipped before 2026-09-23.

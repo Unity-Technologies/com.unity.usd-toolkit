@@ -7,8 +7,20 @@ OPENUSD_ROOT=""
 CONFIGURATION="Release"
 ARCH="universal"
 CMAKE_BIN="cmake"
-CODESIGN_ID="-"
+# Without this the SDK default applies, which is the build machine's own macOS version: the
+# 2026-09-23 payload shipped with `minos 26.0` and dyld refused it on anything older. 12.0 is
+# Unity 6.3's minimum for a macOS player; the Editor's own minimum (13.0) is above it, so one
+# value covers both.
+DEPLOYMENT_TARGET="12.0"
+# Deliberately NOT defaulted to the ad-hoc "-" identity. An ad-hoc signature carries no
+# publisher identity, so it cannot establish trust, and defaulting to it made every build
+# silently produce an unattributable binary (SECURITY-282834, CWE-347). Pass --codesign-id for a
+# real Developer ID, or --adhoc-codesign to accept an unattributable build on purpose.
+CODESIGN_ID=""
+ADHOC_CODESIGN=0
 SKIP_CODESIGN=0
+RECORD_DEPENDENCY_DIGESTS=0
+SKIP_SOURCE_PROVENANCE=0
 
 usage() {
     cat <<'USAGE'
@@ -21,9 +33,23 @@ Options:
   --openusd-root <path>      Pixar OpenUSD install root.
   --configuration <value>    CMake configuration. Defaults to Release.
   --arch <value>             native, x86_64, arm64, or universal. Defaults to universal.
+  --deployment-target <ver>  Minimum macOS version the plugin runs on. Defaults to 12.0, Unity
+                             6.3's minimum for a macOS player. Build OpenUSD with the same
+                             value (MACOSX_DEPLOYMENT_TARGET) or its dylibs keep their own.
   --cmake <path>             CMake executable. Defaults to cmake.
-  --codesign-id <identity>   Codesign identity. Defaults to ad-hoc '-'.
+  --codesign-id <identity>   Developer ID to sign the patched dylibs with. Required unless
+                             --adhoc-codesign or --skip-codesign is given.
+  --adhoc-codesign           Sign ad-hoc ('-'). Produces a binary with no publisher identity;
+                             acceptable for local work, not for a release.
   --skip-codesign            Do not codesign patched dylibs.
+  --record-dependency-digests
+                             Accept the current OpenUSD/TBB tree and rewrite
+                             Native~/dependency-digests/macos.sha256 instead of verifying
+                             against it. Commit the result so the change is reviewable.
+  --skip-source-provenance   Build against an OpenUSD install that was never verified against
+                             Native~/dependency-sources/macos.tsv. For local experiments only:
+                             the resulting payload has no chain back to a published revision
+                             and must not be committed or shipped.
   -h, --help                 Show this help.
 USAGE
 }
@@ -42,6 +68,10 @@ while [[ $# -gt 0 ]]; do
             ARCH="$2"
             shift 2
             ;;
+        --deployment-target)
+            DEPLOYMENT_TARGET="$2"
+            shift 2
+            ;;
         --cmake|-CMakePath)
             CMAKE_BIN="$2"
             shift 2
@@ -50,8 +80,20 @@ while [[ $# -gt 0 ]]; do
             CODESIGN_ID="$2"
             shift 2
             ;;
+        --adhoc-codesign)
+            ADHOC_CODESIGN=1
+            shift
+            ;;
         --skip-codesign)
             SKIP_CODESIGN=1
+            shift
+            ;;
+        --record-dependency-digests)
+            RECORD_DEPENDENCY_DIGESTS=1
+            shift
+            ;;
+        --skip-source-provenance)
+            SKIP_SOURCE_PROVENANCE=1
             shift
             ;;
         -h|--help)
@@ -123,8 +165,74 @@ if [[ ! -f "${USD_MONOLITHIC_DYLIB}" && -f "${OPENUSD_ROOT}/build/OpenUSD-dev/li
     cp -p "${OPENUSD_ROOT}/build/OpenUSD-dev/libusd_ms.dylib" "${USD_MONOLITHIC_DYLIB}"
 fi
 
-if [[ -f "${USD_MONOLITHIC_DYLIB}" ]] && command -v codesign >/dev/null 2>&1; then
-    codesign --force --sign "${CODESIGN_ID}" --timestamp=none "${USD_MONOLITHIC_DYLIB}" >/dev/null
+# Fail rather than fall back to an unattributable signature: a silent ad-hoc default is how
+# unsigned artifacts end up shipped.
+if [[ ${SKIP_CODESIGN} -eq 0 ]]; then
+    if [[ -z "${CODESIGN_ID}" && ${ADHOC_CODESIGN} -eq 0 ]]; then
+        echo "No code signing identity given." >&2
+        echo "  --codesign-id <identity>   sign with a real Developer ID (use this for a release)" >&2
+        echo "  --adhoc-codesign           accept an ad-hoc, unattributable signature" >&2
+        echo "  --skip-codesign            do not sign at all" >&2
+        exit 1
+    fi
+
+    if [[ -z "${CODESIGN_ID}" ]]; then
+        CODESIGN_ID="-"
+        echo "WARNING: signing ad-hoc. The result carries no publisher identity and must not be released."
+        CODESIGN_TIMESTAMP_ARGS=(--timestamp=none)
+    else
+        # A real identity gets a secure timestamp, so the signature outlives the certificate.
+        CODESIGN_TIMESTAMP_ARGS=(--timestamp)
+    fi
+
+    if [[ -f "${USD_MONOLITHIC_DYLIB}" ]] && command -v codesign >/dev/null 2>&1; then
+        codesign --force --sign "${CODESIGN_ID}" "${CODESIGN_TIMESTAMP_ARGS[@]}" "${USD_MONOLITHIC_DYLIB}" >/dev/null
+    fi
+fi
+
+# --- Source provenance gate (SECURITY-282834, trust chain) ---------------------------------
+# The digest gate below establishes that the tree being copied is the tree that was reviewed. It
+# cannot establish where that tree came from -- by this point OpenUSD has already been fetched and
+# compiled. That earlier link is what the stamp carries: verify_upstream_sources.py writes it into
+# the install root only after checking the clone against the commit pinned in
+# Native~/dependency-sources/macos.tsv, so requiring it here is what ties the payload to a
+# published revision rather than to whatever happened to be on this machine.
+if [[ ${SKIP_SOURCE_PROVENANCE} -eq 1 ]]; then
+    echo "WARNING: --skip-source-provenance. This payload has no chain back to a published" >&2
+    echo "         OpenUSD revision. Do not commit or ship what this build produces." >&2
+elif ! python3 "${SCRIPT_DIR}/verify_upstream_sources.py" --platform macos \
+    --check-stamp "${OPENUSD_ROOT}"; then
+    echo "Refusing to build against an OpenUSD install of unverified origin." >&2
+    exit 1
+fi
+
+# --- Dependency digest gate (SECURITY-282834, CWE-347) -------------------------------------
+# Everything below is copied verbatim off this machine into the shipped package, so a tampered
+# local OpenUSD/TBB tree would ride in unnoticed. Check what is about to be copied against the
+# checked-in record first; --record-dependency-digests updates that record deliberately.
+collect_dependency_files() {
+    local dir
+    for dir in "${OPENUSD_ROOT}/lib" "${OPENUSD_ROOT}/bin"; do
+        [[ -d "${dir}" ]] || continue
+        find "${dir}" -maxdepth 1 -type f -name "*.dylib*" ! -name "*.meta" ! -name "*debug*" -print0
+    done
+
+    for dir in "${OPENUSD_ROOT}/lib/usd" "${OPENUSD_ROOT}/plugin" "${OPENUSD_ROOT}/share" \
+        "${OPENUSD_ROOT}/resources"; do
+        [[ -d "${dir}" ]] || continue
+        find "${dir}" -type f ! -name "*.meta" -print0
+    done
+}
+
+DEPENDENCY_MODE="--verify"
+if [[ ${RECORD_DEPENDENCY_DIGESTS} -eq 1 ]]; then
+    DEPENDENCY_MODE="--record"
+fi
+
+if ! collect_dependency_files | xargs -0 python3 "${SCRIPT_DIR}/verify_dependency_digests.py" \
+    --platform macos --root "${OPENUSD_ROOT}" "${DEPENDENCY_MODE}"; then
+    echo "Refusing to copy an unverified dependency tree into the package." >&2
+    exit 1
 fi
 
 BUILD_DIR="${SCRIPT_DIR}/build~/macos-${BUILD_SUFFIX}"
@@ -141,6 +249,10 @@ CMAKE_CONFIGURE_ARGS=(
 
 if [[ -n "${CMAKE_ARCHS}" ]]; then
     CMAKE_CONFIGURE_ARGS+=("-DCMAKE_OSX_ARCHITECTURES=${CMAKE_ARCHS}")
+fi
+
+if [[ -n "${DEPLOYMENT_TARGET}" ]]; then
+    CMAKE_CONFIGURE_ARGS+=("-DCMAKE_OSX_DEPLOYMENT_TARGET=${DEPLOYMENT_TARGET}")
 fi
 
 "${CMAKE_BIN}" "${CMAKE_CONFIGURE_ARGS[@]}"

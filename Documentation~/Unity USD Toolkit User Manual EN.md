@@ -48,14 +48,25 @@ The managed layer checks the API version the loaded plugin reports and **refuses
 
 ### Platforms
 
-| Platform | Supported | Notes |
-| --- | --- | --- |
-| Windows x64 (Editor / Standalone) | Yes | `Runtime/Plugins/x86_64/Windows` |
-| macOS (Editor / Standalone) | Yes | Universal (x86_64 + arm64), `Runtime/Plugins/macOS` |
-| Linux x64 (Editor / Standalone) | Yes | Self-contained payload, `Runtime/Plugins/x86_64/Linux` |
-| Mobile / WebGL / console | No | Out of scope for this version. |
+| Platform | Supported | Minimum OS | Notes |
+| --- | --- | --- | --- |
+| Windows x64 (Editor / Standalone) | Yes | Windows 10 version 21H1 | `Runtime/Plugins/x86_64/Windows` |
+| macOS (Editor / Standalone) | Yes | macOS 12.0 (Monterey) | Universal (x86_64 + arm64), `Runtime/Plugins/macOS` |
+| Linux x64 (Editor / Standalone) | Yes | **Ubuntu 24.04** | Self-contained payload, `Runtime/Plugins/x86_64/Linux` |
+| Mobile / WebGL / console | No | — | Out of scope for this version. |
 
-> The OpenUSD version differs per platform: macOS is built against 26.08, Windows and Linux against 26.05. The native ABI is API 5 on all three, and the APIs this toolkit uses behave identically across those versions, so there is no functional difference.
+The minimum OS is a property of the shipped native payload, not of the C# layer, and it applies to
+players you build as well as to the Editor: the same libraries are copied into a standalone build.
+
+- **macOS 12.0.** Every dylib is built with a deployment target of 12.0, which is Unity 6.3's
+  minimum for a macOS player. dyld refuses to load them on anything older.
+- **Ubuntu 24.04.** The Linux payload is built on Ubuntu 24.04 and needs **glibc ≥ 2.38** and
+  **libstdc++ with `GLIBCXX_3.4.32`** (GCC 13). Unity 6.3 itself also supports Ubuntu 22.04, which
+  ships glibc 2.35 and `GLIBCXX_3.4.30` — this package does not run there, and the toolkit throws
+  a native-load error naming the requirement rather than failing silently. Nothing in the code
+  needs 24.04; the dependency comes from the build machine, and a rebuild on 22.04 would lower it.
+
+> All three platforms are built against the public **OpenUSD `v26.05`** tag (commit `2095faf`), and the native ABI is API 5 on all three. Standardising on a published tag is what lets a third party reproduce and check the shipped payload.
 
 ### Export
 
@@ -121,7 +132,8 @@ Runtime/Plugins/x86_64/Windows/
   UnityUSDToolkitNative.dll
   usd_rt.dll          (OpenUSD monolithic, renamed from usd_ms to avoid a name collision
                        with another package's OpenUSD)
-  tbb.dll
+  tbb_usdrt.dll       (Intel's TBB, renamed from tbb.dll so the Windows loader cannot
+                       hand the plugin the Unity Editor's own copy instead)
   lib/usd/**/plugInfo.json
   plugin/usd/**/plugInfo.json
 
@@ -151,6 +163,63 @@ python3 Native~/generate_native_hashes.py
 ```
 
 > The script hashes **every** platform's binaries, not just the one you rebuilt. It refuses to run while any payload file is still an unfetched Git LFS pointer, so run `git lfs pull` first.
+
+### Verifying that the package is the one Unity published
+
+Three separate things can be checked, and they establish different properties. The digest
+manifest above proves the payload has not changed since it was packed; the two below prove where
+it came from.
+
+**1. The package signature (all platforms).** A package published through Unity's pipeline carries
+a CMS/PKCS#7 attestation at `package/.attestation.p7m`, signed by Unity's PKI and covering the
+digest of every file in the tarball — the native binaries under `Runtime/Plugins/**` included. Any
+file added, removed or altered after packing invalidates it. Unity 6.3 and later verify it
+automatically and show the result in the Package Manager window; to check it yourself:
+
+```bash
+tar -xzf com.unity.usd-toolkit-<version>.tgz package/.attestation.p7m
+openssl cms -verify -in package/.attestation.p7m -inform DER -noverify -out attestation.json
+openssl pkcs7 -in package/.attestation.p7m -inform DER -print_certs -text | head -40
+```
+
+Drop `-noverify` and pass `-CAfile` with Unity's root to check the chain as well as the structure.
+Internally the same two properties are asserted by PVP-28-3 (the signature is present) and
+PVP-29-3 (it is valid and matches the archive contents).
+
+**2. Platform code signatures (Windows and macOS).** The native binaries carry a publisher
+signature from Unity's certificates:
+
+```bash
+# macOS — expect a Developer ID authority, not "Signature=adhoc"
+codesign --verify --strict --verbose=2 Runtime/Plugins/macOS/UnityUSDToolkitNative.dylib
+codesign -dv --verbose=4 Runtime/Plugins/macOS/libusd_ms.dylib
+```
+
+```powershell
+# Windows — expect Status: Valid
+Get-ChildItem Runtime\Plugins\x86_64\Windows\*.dll | ForEach-Object {
+    Get-AuthenticodeSignature $_.FullName | Select-Object Status, SignerCertificate
+}
+```
+
+**Linux is deliberately not code-signed.** Neither the ELF format, the dynamic linker, nor Unity's
+signing infrastructure has an equivalent of Authenticode or Developer ID for a `.so`; Unity's code
+signing service covers Windows PE and macOS Mach-O only, and other Unity packages that ship native
+Linux libraries are signed the same way — that is, at the package level. For Linux the attestation
+in (1) and the digests in (3) are the integrity evidence.
+
+**3. Per-file digests (all platforms).** `ThirdPartyNotices~/sbom.cdx.json` is a CycloneDX 1.6
+bill of materials listing every third-party component in the payload with its version, source and
+SHA-256. It is the same digest the runtime check uses, in a form you can verify from outside the
+Editor:
+
+```bash
+sha256sum Runtime/Plugins/x86_64/Linux/lib/libusd_ms.so
+python3 -c "import json;[print(c['hashes'][0]['content'], [p['value'] for p in c['properties'] if p['name']=='unity:shippedPath'][0]) for c in json.load(open('ThirdPartyNotices~/sbom.cdx.json'))['components'][1:]]"
+```
+
+The SBOM also records which OpenUSD tag and commit each binary was built from, so a third party can
+rebuild from the same public source and compare what the binary contains.
 
 ## 5. Exporting at runtime
 

@@ -18,9 +18,13 @@ namespace Unity.USDToolkit
         public bool ValidateNativeRuntime = true;
 
         /// <summary>
-        /// When true (the default), the SHA-256 of every shipped native binary is compared
-        /// against the digest recorded in <c>NativeRuntimeHashes</c> before the first P/Invoke,
-        /// and a mismatch throws. Unlike <see cref="ValidateNativeRuntime"/>, which only asks
+        /// When true (the default), the SHA-256 of every shipped native file — libraries and
+        /// plugin descriptors alike — is compared against the digest recorded in
+        /// <c>NativeRuntimeHashes</c> before the first P/Invoke, and a mismatch throws.
+        ///
+        /// Setting this to false is honoured in the Editor and in development builds only. A
+        /// release player always verifies: the check is what catches a payload substituted after
+        /// distribution, and that is exactly the situation a shipped build is in. Unlike <see cref="ValidateNativeRuntime"/>, which only asks
         /// whether a file of the right name exists, this verifies the contents. If you rebuild
         /// the native plugin yourself, regenerate the manifest with
         /// <c>python3 Native~/generate_native_hashes.py</c>.

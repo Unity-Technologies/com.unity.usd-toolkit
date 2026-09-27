@@ -491,31 +491,113 @@ namespace Unity.USDToolkit.Samples
             catch (Exception) { /* best effort */ }
         }
 
-#if UNITY_STANDALONE_WIN || UNITY_EDITOR_WIN || UNITY_WSA
-        /// <summary>Windows: replace the file's ACL with a single entry for the current user.</summary>
+// Key on the host OS, not the build target: a macOS/Linux Editor with Windows as the active target still
+// defines UNITY_STANDALONE_WIN, and would otherwise compile the advapi32 path it cannot load.
+#if UNITY_EDITOR_WIN || (!UNITY_EDITOR && (UNITY_STANDALONE_WIN || UNITY_WSA))
+        [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+        private static extern IntPtr GetCurrentProcess();
+
+        [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+        private static extern IntPtr LocalFree(IntPtr hMem);
+
+        [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool CloseHandle(IntPtr handle);
+
+        [System.Runtime.InteropServices.DllImport("advapi32.dll", SetLastError = true)]
+        private static extern bool OpenProcessToken(IntPtr process, uint desiredAccess, out IntPtr token);
+
+        [System.Runtime.InteropServices.DllImport("advapi32.dll", SetLastError = true)]
+        private static extern bool GetTokenInformation(IntPtr token, int infoClass, IntPtr info, int length, out int returnLength);
+
+        [System.Runtime.InteropServices.DllImport("advapi32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+        private static extern bool ConvertSidToStringSidW(IntPtr sid, out IntPtr stringSid);
+
+        [System.Runtime.InteropServices.DllImport("advapi32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+        private static extern bool ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            string sddl, uint revision, out IntPtr securityDescriptor, IntPtr size);
+
+        [System.Runtime.InteropServices.DllImport("advapi32.dll", SetLastError = true)]
+        private static extern bool GetSecurityDescriptorDacl(IntPtr securityDescriptor, out bool present, out IntPtr dacl, out bool defaulted);
+
+        [System.Runtime.InteropServices.DllImport("advapi32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+        private static extern uint SetNamedSecurityInfoW(
+            string objectName, int objectType, uint securityInfo, IntPtr owner, IntPtr group, IntPtr dacl, IntPtr sacl);
+
+        /// <summary>
+        /// Windows: replace the file's ACL with a single entry for the current user. The managed ACL API
+        /// (<c>FileSecurity</c>, <c>WindowsIdentity</c>) is not part of Unity's .NET Standard profile, so this
+        /// goes straight to advapi32, mirroring the libc route on POSIX.
+        /// </summary>
         private static bool TryRestrictToOwner(string path, out string error)
         {
             error = null;
+            IntPtr securityDescriptor = IntPtr.Zero;
             try
             {
-                var identity = System.Security.Principal.WindowsIdentity.GetCurrent();
-                var security = new System.Security.AccessControl.FileSecurity();
+                string userSid = GetCurrentUserSid();
 
-                // Protect from inheritance and drop the inherited entries, otherwise a permissive ACL on the
-                // parent folder (a shared drive, a world-readable project root) still grants other accounts.
-                security.SetAccessRuleProtection(true, false);
-                security.AddAccessRule(new System.Security.AccessControl.FileSystemAccessRule(
-                    identity.User,
-                    System.Security.AccessControl.FileSystemRights.FullControl,
-                    System.Security.AccessControl.AccessControlType.Allow));
+                // D:P = protected DACL, so inherited entries are dropped; otherwise a permissive ACL on the parent
+                // folder (a shared drive, a world-readable project root) still grants other accounts.
+                // (A;;FA;;;sid) = allow full file access to the current user only.
+                if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                        $"D:P(A;;FA;;;{userSid})", 1, out securityDescriptor, IntPtr.Zero))
+                    throw new System.ComponentModel.Win32Exception();
 
-                new FileInfo(path).SetAccessControl(security);
+                if (!GetSecurityDescriptorDacl(securityDescriptor, out _, out IntPtr dacl, out _))
+                    throw new System.ComponentModel.Win32Exception();
+
+                const int seFileObject = 1;
+                const uint daclSecurityInformation = 0x00000004;
+                const uint protectedDaclSecurityInformation = 0x80000000;
+                uint result = SetNamedSecurityInfoW(path, seFileObject,
+                    daclSecurityInformation | protectedDaclSecurityInformation,
+                    IntPtr.Zero, IntPtr.Zero, dacl, IntPtr.Zero);
+                if (result != 0)
+                    throw new System.ComponentModel.Win32Exception((int)result);
+
                 return true;
             }
             catch (Exception e)
             {
                 error = e.Message;
                 return false;
+            }
+            finally
+            {
+                if (securityDescriptor != IntPtr.Zero)
+                    LocalFree(securityDescriptor);
+            }
+        }
+
+        private static string GetCurrentUserSid()
+        {
+            const uint tokenQuery = 0x0008;
+            const int tokenUser = 1;
+
+            if (!OpenProcessToken(GetCurrentProcess(), tokenQuery, out IntPtr token))
+                throw new System.ComponentModel.Win32Exception();
+
+            IntPtr buffer = IntPtr.Zero;
+            try
+            {
+                GetTokenInformation(token, tokenUser, IntPtr.Zero, 0, out int length);
+                buffer = System.Runtime.InteropServices.Marshal.AllocHGlobal(length);
+                if (!GetTokenInformation(token, tokenUser, buffer, length, out _))
+                    throw new System.ComponentModel.Win32Exception();
+
+                // TOKEN_USER starts with SID_AND_ATTRIBUTES, whose first field is the SID pointer.
+                IntPtr sid = System.Runtime.InteropServices.Marshal.ReadIntPtr(buffer);
+                if (!ConvertSidToStringSidW(sid, out IntPtr sidString))
+                    throw new System.ComponentModel.Win32Exception();
+
+                try { return System.Runtime.InteropServices.Marshal.PtrToStringUni(sidString); }
+                finally { LocalFree(sidString); }
+            }
+            finally
+            {
+                if (buffer != IntPtr.Zero)
+                    System.Runtime.InteropServices.Marshal.FreeHGlobal(buffer);
+                CloseHandle(token);
             }
         }
 #else

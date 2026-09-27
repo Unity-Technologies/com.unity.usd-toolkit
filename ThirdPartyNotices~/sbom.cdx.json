@@ -1,0 +1,782 @@
+{
+  "$schema": "http://cyclonedx.org/schema/bom-1.6.schema.json",
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.6",
+  "serialNumber": "urn:uuid:be79a3c4-e4f6-5da6-a33c-af9f045e97ba",
+  "version": 1,
+  "metadata": {
+    "lifecycles": [
+      {
+        "phase": "build"
+      }
+    ],
+    "tools": {
+      "components": [
+        {
+          "type": "application",
+          "name": "Native~/generate_sbom.py",
+          "version": "1"
+        }
+      ]
+    },
+    "supplier": {
+      "name": "Unity Technologies",
+      "url": [
+        "https://unity.com"
+      ]
+    },
+    "component": {
+      "bom-ref": "com.unity.usd-toolkit",
+      "type": "library",
+      "name": "com.unity.usd-toolkit",
+      "version": "0.7.2-exp.1",
+      "description": "Runtime USD toolkit for Unity applications using a custom native OpenUSD wrapper. A C# integration layer for connecting Unity to NVIDIA's Omniverse/OpenUSD ecosystem. Wraps Pixar's OpenUSD 26.05 native binaries via P/Invoke so Unity can read, write, and round-trip USD stages.",
+      "licenses": [
+        {
+          "license": {
+            "name": "Unity Companion License / see LICENSE.md"
+          }
+        }
+      ]
+    },
+    "properties": [
+      {
+        "name": "unity:securityTicket",
+        "value": "SECURITY-282834"
+      },
+      {
+        "name": "unity:provenanceNote",
+        "value": "Every OpenUSD payload is built from the public v26.05 tag (commit 2095faf) with the flags recorded on the OpenUSD component. The builds are not bit-reproducible: no SOURCE_DATE_EPOCH, absolute build paths are embedded, and the macOS payload is post-processed with install_name_tool and codesign. The SHA-256 values here identify what shipped; they do not prove upstream authenticity."
+      }
+    ]
+  },
+  "components": [
+    {
+      "bom-ref": "openusd-source",
+      "type": "library",
+      "name": "OpenUSD",
+      "version": "26.05",
+      "scope": "required",
+      "description": "The source every shipped OpenUSD payload is built from: public tag v26.05, commit 2095faf (\"Merge release v26.05\"), monolithic, the same flags on every platform.",
+      "purl": "pkg:github/PixarAnimationStudios/OpenUSD@v26.05",
+      "licenses": [
+        {
+          "license": {
+            "name": "Tomorrow Open Source Technology License 1.0"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "unity:sourceTag",
+          "value": "v26.05"
+        },
+        {
+          "name": "unity:sourceCommit",
+          "value": "2095faf"
+        },
+        {
+          "name": "unity:buildFlags",
+          "value": "--build-variant release --build-monolithic --no-python --no-imaging --no-usdview --no-examples --no-tutorials --no-tests --no-materialx"
+        },
+        {
+          "name": "unity:licenseText",
+          "value": "ThirdPartyNotices~/licenses/OpenUSD-LICENSE.txt"
+        },
+        {
+          "name": "unity:noticeText",
+          "value": "ThirdPartyNotices~/licenses/OpenUSD-NOTICE.txt"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/PixarAnimationStudios/OpenUSD"
+        },
+        {
+          "type": "distribution",
+          "url": "https://github.com/PixarAnimationStudios/OpenUSD/releases/tag/v26.05"
+        }
+      ],
+      "components": [
+        {
+          "bom-ref": "cli11",
+          "type": "library",
+          "name": "CLI11",
+          "version": "2.3.1",
+          "scope": "required",
+          "description": "Vendored inside OpenUSD as pxr/base/tf/pxrCLI11.",
+          "purl": "pkg:github/CLIUtils/CLI11@v2.3.1",
+          "licenses": [
+            {
+              "license": {
+                "id": "BSD-3-Clause"
+              }
+            }
+          ],
+          "properties": [
+            {
+              "name": "unity:licenseText",
+              "value": "ThirdPartyNotices~/licenses/CLI11-LICENSE.txt"
+            }
+          ],
+          "externalReferences": [
+            {
+              "type": "vcs",
+              "url": "https://github.com/CLIUtils/CLI11"
+            }
+          ]
+        },
+        {
+          "bom-ref": "double-conversion",
+          "type": "library",
+          "name": "double-conversion",
+          "version": "3.3.0",
+          "scope": "required",
+          "description": "Vendored inside OpenUSD as pxr/base/tf/pxrDoubleConversion.",
+          "purl": "pkg:github/google/double-conversion@v3.3.0",
+          "licenses": [
+            {
+              "license": {
+                "id": "BSD-3-Clause"
+              }
+            }
+          ],
+          "properties": [
+            {
+              "name": "unity:licenseText",
+              "value": "ThirdPartyNotices~/licenses/double-conversion-LICENSE.txt"
+            }
+          ],
+          "externalReferences": [
+            {
+              "type": "vcs",
+              "url": "https://github.com/google/double-conversion"
+            }
+          ]
+        },
+        {
+          "bom-ref": "lz4",
+          "type": "library",
+          "name": "LZ4",
+          "version": "1.9.2",
+          "scope": "required",
+          "description": "Vendored inside OpenUSD as pxr/base/tf/pxrLZ4.",
+          "purl": "pkg:github/lz4/lz4@v1.9.2",
+          "licenses": [
+            {
+              "license": {
+                "id": "BSD-2-Clause"
+              }
+            }
+          ],
+          "properties": [
+            {
+              "name": "unity:licenseText",
+              "value": "ThirdPartyNotices~/licenses/LZ4-LICENSE.txt"
+            }
+          ],
+          "externalReferences": [
+            {
+              "type": "vcs",
+              "url": "https://github.com/lz4/lz4"
+            }
+          ]
+        },
+        {
+          "bom-ref": "tsl-robin-map",
+          "type": "library",
+          "name": "tsl robin-map",
+          "version": "unknown",
+          "scope": "required",
+          "description": "Vendored inside OpenUSD as pxr/base/tf/pxrTslRobinMap. The vendored copy declares no version; it is whatever OpenUSD v26.05 ships.",
+          "licenses": [
+            {
+              "license": {
+                "id": "MIT"
+              }
+            }
+          ],
+          "properties": [
+            {
+              "name": "unity:licenseText",
+              "value": "ThirdPartyNotices~/licenses/tsl-robin-map-LICENSE.txt"
+            }
+          ],
+          "externalReferences": [
+            {
+              "type": "vcs",
+              "url": "https://github.com/Tessil/robin-map"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "bom-ref": "usd-macos",
+      "type": "library",
+      "name": "OpenUSD (monolithic runtime library)",
+      "version": "26.05",
+      "scope": "required",
+      "description": "OpenUSD 26.05 built monolithic for macOS universal.",
+      "purl": "pkg:github/PixarAnimationStudios/OpenUSD@v26.05",
+      "licenses": [
+        {
+          "license": {
+            "name": "Tomorrow Open Source Technology License 1.0"
+          }
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "1582864cd33ff22a9c32b354c8133b3a662b39588cb4f64df67d54e3d697f6da"
+        }
+      ],
+      "properties": [
+        {
+          "name": "unity:shippedPath",
+          "value": "Runtime/Plugins/macOS/libusd_ms.dylib"
+        },
+        {
+          "name": "unity:platform",
+          "value": "macOS universal"
+        },
+        {
+          "name": "unity:toolchain",
+          "value": "macOS 26.6.2 (25G83), Xcode 26.6 (17F113), Apple clang 21.0.0 (clang-2100.1.1.101), CMake 4.3.2, SDK 26.5, x86_64+arm64"
+        },
+        {
+          "name": "unity:sourceCommit",
+          "value": "2095faf"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/PixarAnimationStudios/OpenUSD"
+        },
+        {
+          "type": "distribution",
+          "url": "https://github.com/PixarAnimationStudios/OpenUSD/releases/tag/v26.05"
+        }
+      ]
+    },
+    {
+      "bom-ref": "usd-windows",
+      "type": "library",
+      "name": "OpenUSD (monolithic runtime library)",
+      "version": "26.05",
+      "scope": "required",
+      "description": "OpenUSD 26.05 built monolithic for Windows x64.",
+      "purl": "pkg:github/PixarAnimationStudios/OpenUSD@v26.05",
+      "licenses": [
+        {
+          "license": {
+            "name": "Tomorrow Open Source Technology License 1.0"
+          }
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "583d61ac29dc7cc3ed51a4d1cb7f9b49f17e126242c50c8b70a5e4aad4b230c7"
+        }
+      ],
+      "properties": [
+        {
+          "name": "unity:shippedPath",
+          "value": "Runtime/Plugins/x86_64/Windows/usd_rt.dll"
+        },
+        {
+          "name": "unity:platform",
+          "value": "Windows x64"
+        },
+        {
+          "name": "unity:toolchain",
+          "value": "Windows, VS Build Tools 2022 (MSVC 14.44), Windows SDK 10.0.26100, CMake 4.3.3, x64"
+        },
+        {
+          "name": "unity:sourceCommit",
+          "value": "2095faf"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/PixarAnimationStudios/OpenUSD"
+        },
+        {
+          "type": "distribution",
+          "url": "https://github.com/PixarAnimationStudios/OpenUSD/releases/tag/v26.05"
+        }
+      ]
+    },
+    {
+      "bom-ref": "usd-linux",
+      "type": "library",
+      "name": "OpenUSD (monolithic runtime library)",
+      "version": "26.05",
+      "scope": "required",
+      "description": "OpenUSD 26.05 built monolithic for Linux x64.",
+      "purl": "pkg:github/PixarAnimationStudios/OpenUSD@v26.05",
+      "licenses": [
+        {
+          "license": {
+            "name": "Tomorrow Open Source Technology License 1.0"
+          }
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "ba8f9c294e4afaa338f38d46dc61e522cf65050604360254f537b0cc3a022d73"
+        }
+      ],
+      "properties": [
+        {
+          "name": "unity:shippedPath",
+          "value": "Runtime/Plugins/x86_64/Linux/lib/libusd_ms.so"
+        },
+        {
+          "name": "unity:platform",
+          "value": "Linux x64"
+        },
+        {
+          "name": "unity:toolchain",
+          "value": "Ubuntu 24.04, g++ 13.3.0, CMake 3.28.3, patchelf 0.17, x64 (requires glibc >= 2.38)"
+        },
+        {
+          "name": "unity:sourceCommit",
+          "value": "2095faf"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/PixarAnimationStudios/OpenUSD"
+        },
+        {
+          "type": "distribution",
+          "url": "https://github.com/PixarAnimationStudios/OpenUSD/releases/tag/v26.05"
+        }
+      ]
+    },
+    {
+      "bom-ref": "tbb-macos",
+      "type": "library",
+      "name": "oneTBB",
+      "version": "2020.3",
+      "scope": "required",
+      "description": "oneTBB built from the v2020.3 source tag, as OpenUSD's build_usd.py pins it on macOS.",
+      "purl": "pkg:github/oneapi-src/oneTBB@v2020.3",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "15a2c38d32f8393c44e92a52e4e6b83257f6f967122dd999553f9dfff62fbddc"
+        }
+      ],
+      "properties": [
+        {
+          "name": "unity:shippedPath",
+          "value": "Runtime/Plugins/macOS/libtbb.dylib"
+        },
+        {
+          "name": "unity:platform",
+          "value": "macOS universal"
+        },
+        {
+          "name": "unity:interfaceVersion",
+          "value": "11103"
+        },
+        {
+          "name": "unity:licenseText",
+          "value": "ThirdPartyNotices~/licenses/oneTBB-LICENSE.txt"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/uxlfoundation/oneTBB"
+        }
+      ]
+    },
+    {
+      "bom-ref": "tbbmalloc-macos",
+      "type": "library",
+      "name": "oneTBB",
+      "version": "2020.3",
+      "scope": "required",
+      "description": "oneTBB scalable allocator from the same v2020.3 build.",
+      "purl": "pkg:github/oneapi-src/oneTBB@v2020.3",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "70f39fffcfcb109d1cae10a7c56c77e5aac0e9b9bf16d7dbb83a787c05fcbdcb"
+        }
+      ],
+      "properties": [
+        {
+          "name": "unity:shippedPath",
+          "value": "Runtime/Plugins/macOS/libtbbmalloc.dylib"
+        },
+        {
+          "name": "unity:platform",
+          "value": "macOS universal"
+        },
+        {
+          "name": "unity:interfaceVersion",
+          "value": "11103"
+        },
+        {
+          "name": "unity:licenseText",
+          "value": "ThirdPartyNotices~/licenses/oneTBB-LICENSE.txt"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/uxlfoundation/oneTBB"
+        }
+      ]
+    },
+    {
+      "bom-ref": "tbbmalloc-proxy-macos",
+      "type": "library",
+      "name": "oneTBB",
+      "version": "2020.3",
+      "scope": "required",
+      "description": "oneTBB allocator proxy from the same v2020.3 build.",
+      "purl": "pkg:github/oneapi-src/oneTBB@v2020.3",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "f1e4a15095979ccc5b0ff9dde5783ffa45112cd5787b2de6c37ec8dc1fbada07"
+        }
+      ],
+      "properties": [
+        {
+          "name": "unity:shippedPath",
+          "value": "Runtime/Plugins/macOS/libtbbmalloc_proxy.dylib"
+        },
+        {
+          "name": "unity:platform",
+          "value": "macOS universal"
+        },
+        {
+          "name": "unity:interfaceVersion",
+          "value": "11103"
+        },
+        {
+          "name": "unity:licenseText",
+          "value": "ThirdPartyNotices~/licenses/oneTBB-LICENSE.txt"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/uxlfoundation/oneTBB"
+        }
+      ]
+    },
+    {
+      "bom-ref": "tbb-windows",
+      "type": "library",
+      "name": "oneTBB",
+      "version": "2020.3",
+      "scope": "required",
+      "description": "oneTBB from the prebuilt tbb-2020.3-win.zip release, as OpenUSD's build_usd.py pins it on Windows. Redistributed byte-for-byte, renamed only.",
+      "purl": "pkg:github/oneapi-src/oneTBB@v2020.3",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "692380cecd03181d7fd536e4402783e7f38ea0765b35bb52a3236256959b40cd"
+        }
+      ],
+      "properties": [
+        {
+          "name": "unity:shippedPath",
+          "value": "Runtime/Plugins/x86_64/Windows/tbb_usdrt.dll"
+        },
+        {
+          "name": "unity:platform",
+          "value": "Windows x64"
+        },
+        {
+          "name": "unity:interfaceVersion",
+          "value": "11103"
+        },
+        {
+          "name": "unity:licenseText",
+          "value": "ThirdPartyNotices~/licenses/oneTBB-LICENSE.txt"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/uxlfoundation/oneTBB"
+        }
+      ]
+    },
+    {
+      "bom-ref": "tbb-linux",
+      "type": "library",
+      "name": "oneTBB",
+      "version": "2020.3",
+      "scope": "required",
+      "description": "oneTBB built from the v2020.3.1 point-release source tag, as OpenUSD's build_usd.py pins it on Linux; the library reports 2020.3.",
+      "purl": "pkg:github/oneapi-src/oneTBB@v2020.3",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "0147d53dec4c589f4d90d62343ac6223b955761e28316aa743433a03e4667400"
+        }
+      ],
+      "properties": [
+        {
+          "name": "unity:shippedPath",
+          "value": "Runtime/Plugins/x86_64/Linux/lib/libtbb.so.2"
+        },
+        {
+          "name": "unity:platform",
+          "value": "Linux x64"
+        },
+        {
+          "name": "unity:interfaceVersion",
+          "value": "11103"
+        },
+        {
+          "name": "unity:licenseText",
+          "value": "ThirdPartyNotices~/licenses/oneTBB-LICENSE.txt"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/uxlfoundation/oneTBB"
+        }
+      ]
+    },
+    {
+      "bom-ref": "wrapper-macos",
+      "type": "library",
+      "name": "Unity USD Toolkit native wrapper",
+      "version": "0.7.2-exp.1",
+      "scope": "required",
+      "description": "First-party native wrapper (Native~/src) built for macOS universal.",
+      "licenses": [
+        {
+          "license": {
+            "name": "Unity Companion License / see LICENSE.md"
+          }
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "91700a95a39d5c8acae46326513890776bbe8b5dfca89bb07d20c50ee029bca4"
+        }
+      ],
+      "properties": [
+        {
+          "name": "unity:shippedPath",
+          "value": "Runtime/Plugins/macOS/UnityUSDToolkitNative.dylib"
+        },
+        {
+          "name": "unity:platform",
+          "value": "macOS universal"
+        },
+        {
+          "name": "unity:toolchain",
+          "value": "macOS 26.6.2 (25G83), Xcode 26.6 (17F113), Apple clang 21.0.0 (clang-2100.1.1.101), CMake 4.3.2, SDK 26.5, x86_64+arm64"
+        },
+        {
+          "name": "unity:nativeApiVersion",
+          "value": "5"
+        }
+      ]
+    },
+    {
+      "bom-ref": "wrapper-windows",
+      "type": "library",
+      "name": "Unity USD Toolkit native wrapper",
+      "version": "0.7.2-exp.1",
+      "scope": "required",
+      "description": "First-party native wrapper (Native~/src) built for Windows x64.",
+      "licenses": [
+        {
+          "license": {
+            "name": "Unity Companion License / see LICENSE.md"
+          }
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "bf39fb49a93ddb68e8400eda305fba437266148144a5c501a814ef7d1237858a"
+        }
+      ],
+      "properties": [
+        {
+          "name": "unity:shippedPath",
+          "value": "Runtime/Plugins/x86_64/Windows/UnityUSDToolkitNative.dll"
+        },
+        {
+          "name": "unity:platform",
+          "value": "Windows x64"
+        },
+        {
+          "name": "unity:toolchain",
+          "value": "Windows, VS Build Tools 2022 (MSVC 14.44), Windows SDK 10.0.26100, CMake 4.3.3, x64"
+        },
+        {
+          "name": "unity:nativeApiVersion",
+          "value": "5"
+        }
+      ]
+    },
+    {
+      "bom-ref": "wrapper-linux",
+      "type": "library",
+      "name": "Unity USD Toolkit native wrapper",
+      "version": "0.7.2-exp.1",
+      "scope": "required",
+      "description": "First-party native wrapper (Native~/src) built for Linux x64.",
+      "licenses": [
+        {
+          "license": {
+            "name": "Unity Companion License / see LICENSE.md"
+          }
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "75391e9fc4d85bdee287fc3f895e10fbad19c5befb9e3085e2ee3e4e8349348a"
+        }
+      ],
+      "properties": [
+        {
+          "name": "unity:shippedPath",
+          "value": "Runtime/Plugins/x86_64/Linux/libUnityUSDToolkitNative.so"
+        },
+        {
+          "name": "unity:platform",
+          "value": "Linux x64"
+        },
+        {
+          "name": "unity:toolchain",
+          "value": "Ubuntu 24.04, g++ 13.3.0, CMake 3.28.3, patchelf 0.17, x64 (requires glibc >= 2.38)"
+        },
+        {
+          "name": "unity:nativeApiVersion",
+          "value": "5"
+        }
+      ]
+    }
+  ],
+  "dependencies": [
+    {
+      "ref": "com.unity.usd-toolkit",
+      "dependsOn": [
+        "usd-macos",
+        "usd-windows",
+        "usd-linux",
+        "tbb-macos",
+        "tbbmalloc-macos",
+        "tbbmalloc-proxy-macos",
+        "tbb-windows",
+        "tbb-linux",
+        "wrapper-macos",
+        "wrapper-windows",
+        "wrapper-linux"
+      ]
+    },
+    {
+      "ref": "openusd-source",
+      "dependsOn": [
+        "cli11",
+        "double-conversion",
+        "lz4",
+        "tsl-robin-map"
+      ]
+    },
+    {
+      "ref": "usd-macos",
+      "dependsOn": [
+        "openusd-source",
+        "tbb-macos"
+      ]
+    },
+    {
+      "ref": "usd-windows",
+      "dependsOn": [
+        "openusd-source",
+        "tbb-windows"
+      ]
+    },
+    {
+      "ref": "usd-linux",
+      "dependsOn": [
+        "openusd-source",
+        "tbb-linux"
+      ]
+    },
+    {
+      "ref": "wrapper-macos",
+      "dependsOn": [
+        "usd-macos",
+        "tbb-macos"
+      ]
+    },
+    {
+      "ref": "wrapper-windows",
+      "dependsOn": [
+        "usd-windows",
+        "tbb-windows"
+      ]
+    },
+    {
+      "ref": "wrapper-linux",
+      "dependsOn": [
+        "usd-linux",
+        "tbb-linux"
+      ]
+    }
+  ]
+}

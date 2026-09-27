@@ -247,7 +247,7 @@ git status --porcelain
   Committing regenerated GUIDs breaks every scene and prefab referencing those assets for
   everyone. Never let a `.meta` change ride along with a binary rebuild. Restore them:
   `git checkout -- "*.meta"`
-- **Other OpenUSD DLLs modified** (`usd_rt.dll`, `tbb.dll`, …), or files under `lib/usd`,
+- **Other OpenUSD DLLs modified** (`usd_rt.dll`, `tbb_usdrt.dll`, …), or files under `lib/usd`,
   `plugin/`, `share/`, `resources/` added or removed. That means you built against a *different*
   OpenUSD version than the payload — go back to step 4.
 - **`usd_ms.dll` present** alongside or instead of `usd_rt.dll` — the rename did not happen;

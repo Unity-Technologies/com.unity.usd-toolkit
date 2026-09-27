@@ -14,3 +14,12 @@ DevSamples~/**/*.jpg filter=lfs diff=lfs merge=lfs -text
 DevSamples~/**/*.exr filter=lfs diff=lfs merge=lfs -text
 DevSamples~/**/*.usd filter=lfs diff=lfs merge=lfs -text
 DevSamples~/**/*.png filter=lfs diff=lfs merge=lfs -text
+
+# OpenUSD plugin descriptors are hashed byte-for-byte by the runtime integrity
+# check (SECURITY-282834, CWE-494), so their bytes must be identical on every
+# checkout. Without -text, core.autocrlf=true rewrites them to CRLF on Windows
+# and the digests in Runtime/Native/NativeRuntimeHashes.g.cs stop matching --
+# invisibly, because autocrlf converts back when git compares.
+Runtime/Plugins/**/*.usda         -text
+Runtime/Plugins/**/*.glslfx       -text
+Runtime/Plugins/**/plugInfo.json  -text
