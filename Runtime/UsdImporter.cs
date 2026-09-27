@@ -945,7 +945,61 @@ namespace Unity.USDToolkit
             root = root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) +
                 Path.DirectorySeparatorChar;
 
-            return canonicalPath.StartsWith(root, PathComparison);
+            if (!canonicalPath.StartsWith(root, PathComparison))
+            {
+                return false;
+            }
+
+            // Lexical containment is not containment. Path.GetFullPath normalizes "." and ".."
+            // as text; it does not follow links, so a symlink (or a Windows junction) sitting
+            // inside the stage folder and pointing at /etc/passwd or an SSH key passes the check
+            // above and is then read straight off disk (SECURITY-282834, CWE-59/CWE-22).
+            return !HasLinkBelowRoot(root, canonicalPath);
+        }
+
+        // True when any path component *below* the stage folder is a link. The stage folder
+        // itself and everything above it are deliberately not examined: a project living under a
+        // symlinked path is ordinary -- on macOS /var is itself a link -- and rejecting that
+        // would break normal setups while protecting nothing, since the root is where the stage
+        // legitimately lives.
+        //
+        // Links are refused rather than resolved. Resolving would mean realpath() on POSIX and
+        // GetFinalPathNameByHandle on Windows, neither of which is reachable from .NET Standard
+        // 2.1 without per-platform P/Invoke, and it would still have to answer what a link
+        // pointing inside the folder means. For untrusted stage content, refusing is the
+        // defensible default; a stage that genuinely needs links is what
+        // UsdImportOptions.AllowExternalAssetPaths is for.
+        private static bool HasLinkBelowRoot(string root, string fullPath)
+        {
+            string current = fullPath;
+            while (!string.IsNullOrEmpty(current) && current.Length > root.Length)
+            {
+                try
+                {
+                    // ReparsePoint covers Unix symlinks as well as Windows symlinks and
+                    // junctions. Verified on macOS: a symlinked file reports it.
+                    if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
+                    {
+                        return true;
+                    }
+                }
+                catch (Exception)
+                {
+                    // Cannot classify the component (missing, permissions, malformed): treat it
+                    // as unsafe rather than assume it is fine.
+                    return true;
+                }
+
+                string parent = Path.GetDirectoryName(current);
+                if (string.IsNullOrEmpty(parent) || string.Equals(parent, current, PathComparison))
+                {
+                    break;
+                }
+
+                current = parent;
+            }
+
+            return false;
         }
 
         // Uploads a texture to the GPU, reusing it across materials via the per-import cache.

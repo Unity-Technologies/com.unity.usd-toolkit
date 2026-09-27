@@ -6,3 +6,7 @@ build~/
 # OS / editor junk
 .DS_Store
 Thumbs.db
+
+# Python bytecode from the Native~ build/verification scripts
+__pycache__/
+*.pyc

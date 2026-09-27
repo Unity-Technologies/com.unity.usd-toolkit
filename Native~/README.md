@@ -49,13 +49,19 @@ macOS. Each is a two-step process: build OpenUSD once, then build this wrapper.
 **macOS:**
 1. Build OpenUSD (monolithic, universal) — see repo-root `README.md`
    ("Build Native Runtime -> macOS"), e.g. via `Build~/build_openusd_macos.sh`.
+   **Export `MACOSX_DEPLOYMENT_TARGET=12.0` for that build.** Nothing in OpenUSD's build sets a
+   deployment target, so its dylibs otherwise take the SDK default — the build machine's own
+   macOS version — and dyld refuses them on anything older. 12.0 is Unity 6.3's minimum for a
+   macOS player. The wrapper's own `--deployment-target` does not reach them.
 2. From the package root:
    ```bash
+   MACOSX_DEPLOYMENT_TARGET=12.0 Build~/build_openusd_macos.sh ...   # step 1
    ./Native~/build_macos.sh --openusd-root "<OpenUSD install>" --arch universal
    ```
    Installs `UnityUSDToolkitNative.dylib` + payload into `Runtime/Plugins/macOS/`.
 3. Restart the Unity Editor.
-4. Verify export as above; `otool -L` the dylib to confirm `@loader_path` RPATHs.
+4. Verify export as above; `otool -L` the dylib to confirm `@loader_path` RPATHs, and
+   `otool -l <dylib> | grep -A2 LC_BUILD_VERSION` to confirm `minos 12.0` on both slices.
 
 After rebuilding, commit the updated `Runtime/Plugins/x86_64/Windows/` or
 `Runtime/Plugins/macOS/` payload (the large `.dll`/`.dylib` are tracked with Git

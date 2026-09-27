@@ -10,10 +10,14 @@ This is not a general-purpose USD interchange package, it's built specifically t
 
 ## Current Scope
 
-- Windows x64 runtime target
-- macOS Standalone runtime target when a macOS OpenUSD/native payload is built
+- Windows x64 runtime target — Windows 10 version 21H1 or newer
+- macOS Standalone runtime target when a macOS OpenUSD/native payload is built —
+  macOS 12.0 (Monterey) or newer, the deployment target every dylib is built with
 - Linux x64 runtime target (self-contained native payload under
-  `Runtime/Plugins/x86_64/Linux/`; see `Native~/README.md`)
+  `Runtime/Plugins/x86_64/Linux/`; see `Native~/README.md`) — **Ubuntu 24.04 or
+  newer**: that payload is built on 24.04 and needs glibc >= 2.38 and libstdc++
+  with `GLIBCXX_3.4.32`, so it does not run on Ubuntu 22.04 even though Unity 6.3
+  supports it. The minimums apply to players you build, not only to the Editor.
 - Static mesh export from `MeshFilter` + `MeshRenderer`
 - GPU readback export for non-readable meshes (no `Read/Write Enabled` required;
   works in Play mode), with a CPU fallback when `Read/Write` is enabled
@@ -173,8 +177,8 @@ The checked-in Windows payload is intentionally minimal:
 ```text
 Runtime/Plugins/x86_64/Windows/
   UnityUSDToolkitNative.dll
-  usd_ms.dll
-  tbb.dll
+  usd_rt.dll
+  tbb_usdrt.dll
   lib/usd/**/plugInfo.json and schema resources
   plugin/usd/plugInfo.json and shader resources
 ```

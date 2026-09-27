@@ -54,6 +54,32 @@ target_compile_definitions(UnityUSDToolkitNative
         UNITY_USD_TOOLKIT_NATIVE_EXPORTS
 )
 
+# Keep build-machine paths out of the shipped binary. `__FILE__` (OpenUSD's TF_AXIOM / TF_VERIFY
+# macros expand it) and `__PRETTY_FUNCTION__` (a lambda passed as a template argument prints the
+# file it was written in) both embed the absolute path of whatever is being compiled, so a build
+# from a home directory ships the developer's user name inside the plugin. Both come from the
+# compiler's presumed filename, so one flag rewrites both, as well as debug info.
+if(NOT MSVC)
+    include(CheckCXXCompilerFlag)
+    check_cxx_compiler_flag("-ffile-prefix-map=/a=/b" RUSD_HAS_FILE_PREFIX_MAP)
+    if(RUSD_HAS_FILE_PREFIX_MAP)
+        # The package root, so this file's own sources map to /usd-toolkit/..., and the OpenUSD
+        # install, whose headers are the ones that actually reach the binary through those macros.
+        get_filename_component(_RUSD_PACKAGE_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
+        target_compile_options(UnityUSDToolkitNative
+            PRIVATE
+                "-ffile-prefix-map=${_RUSD_PACKAGE_ROOT}=/usd-toolkit"
+        )
+        if(OPENUSD_ROOT)
+            get_filename_component(_RUSD_OPENUSD_ROOT "${OPENUSD_ROOT}" ABSOLUTE)
+            target_compile_options(UnityUSDToolkitNative
+                PRIVATE
+                    "-ffile-prefix-map=${_RUSD_OPENUSD_ROOT}=/openusd"
+            )
+        endif()
+    endif()
+endif()
+
 if(WIN32)
     target_compile_definitions(UnityUSDToolkitNative
         PRIVATE

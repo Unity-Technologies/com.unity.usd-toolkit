@@ -1,8 +1,14 @@
 # Third-Party Notices
 
-This package includes third-party runtime components required for Windows x64
-runtime USD export. These notices apply to the files redistributed in
-`Runtime/Plugins/x86_64/Windows`.
+This package includes third-party runtime components required for USD export and
+import on every supported platform. These notices apply to the files
+redistributed in `Runtime/Plugins/macOS`, `Runtime/Plugins/x86_64/Windows` and
+`Runtime/Plugins/x86_64/Linux`.
+
+A machine-readable inventory of the same components — versions, source commits,
+build flags, per-file SHA-256 — is in `ThirdPartyNotices~/sbom.cdx.json`
+(CycloneDX 1.6). Regenerate it with `python3 Native~/generate_sbom.py` whenever a
+payload is rebuilt.
 
 This file also records third-party products that the package *integrates with*
 but does not redistribute. See [NVIDIA Isaac Sim](#nvidia-isaac-sim) and
@@ -12,14 +18,28 @@ but does not redistribute. See [NVIDIA Isaac Sim](#nvidia-isaac-sim) and
 
 Redistributed files:
 
+- `Runtime/Plugins/macOS/libusd_ms.dylib` (OpenUSD monolithic, universal x86_64 + arm64)
+- `Runtime/Plugins/macOS/lib/usd/**`
+- `Runtime/Plugins/macOS/plugin/usd/**`
 - `Runtime/Plugins/x86_64/Windows/usd_rt.dll` (OpenUSD monolithic, renamed from `usd_ms.dll`)
 - `Runtime/Plugins/x86_64/Windows/lib/usd/**`
 - `Runtime/Plugins/x86_64/Windows/plugin/usd/**`
+- `Runtime/Plugins/x86_64/Linux/lib/libusd_ms.so` (OpenUSD monolithic)
+- `Runtime/Plugins/x86_64/Linux/lib/usd/**`
+- `Runtime/Plugins/x86_64/Linux/plugin/usd/**`
+
+Version:
+
+- OpenUSD **26.05**, public tag `v26.05`, commit `2095faf` ("Merge release v26.05")
+- The same tag and commit on all three platforms, built monolithic with
+  `--build-variant release --build-monolithic --no-python --no-imaging --no-usdview
+  --no-examples --no-tutorials --no-tests --no-materialx`
 
 Source:
 
 - Pixar Animation Studios OpenUSD
 - https://github.com/PixarAnimationStudios/OpenUSD
+- https://github.com/PixarAnimationStudios/OpenUSD/releases/tag/v26.05
 
 License:
 
@@ -44,7 +64,19 @@ Pixar (http://www.pixar.com/).
 
 Redistributed files:
 
-- `Runtime/Plugins/x86_64/Windows/tbb.dll`
+- `Runtime/Plugins/macOS/libtbb.dylib`
+- `Runtime/Plugins/macOS/libtbbmalloc.dylib`
+- `Runtime/Plugins/macOS/libtbbmalloc_proxy.dylib`
+- `Runtime/Plugins/x86_64/Windows/tbb_usdrt.dll` (Intel's `tbb.dll`, renamed only)
+- `Runtime/Plugins/x86_64/Linux/lib/libtbb.so.2`
+
+Version:
+
+- **2020.3** (interface version 11103) on every platform, the version OpenUSD's
+  `build_scripts/build_usd.py` pins for a v26.05 build. That script takes it from
+  a different place per platform: the prebuilt `tbb-2020.3-win.zip` release on
+  Windows, the `v2020.3` source tag on macOS, and the `v2020.3.1` point release on
+  Linux (which still reports itself as 2020.3).
 
 Source:
 
@@ -55,6 +87,27 @@ License:
 
 - Apache License 2.0
 - Full text: `ThirdPartyNotices~/licenses/oneTBB-LICENSE.txt`
+
+## Components vendored inside OpenUSD
+
+These are third-party libraries that live in the OpenUSD source tree and are
+compiled into the monolithic OpenUSD library redistributed above. They ship as
+part of `libusd_ms.dylib` / `usd_rt.dll` / `libusd_ms.so` rather than as separate
+files, at the versions OpenUSD v26.05 vendors.
+
+| Component | Version | License | Full text |
+|---|---|---|---|
+| CLI11 (`pxr/base/tf/pxrCLI11`) | 2.3.1 | BSD-3-Clause | `ThirdPartyNotices~/licenses/CLI11-LICENSE.txt` |
+| double-conversion (`pxr/base/tf/pxrDoubleConversion`) | 3.3.0 | BSD-3-Clause | `ThirdPartyNotices~/licenses/double-conversion-LICENSE.txt` |
+| LZ4 (`pxr/base/tf/pxrLZ4`) | 1.9.2 | BSD-2-Clause | `ThirdPartyNotices~/licenses/LZ4-LICENSE.txt` |
+| tsl robin-map (`pxr/base/tf/pxrTslRobinMap`) | not declared by the vendored copy | MIT | `ThirdPartyNotices~/licenses/tsl-robin-map-LICENSE.txt` |
+
+Sources:
+
+- https://github.com/CLIUtils/CLI11
+- https://github.com/google/double-conversion
+- https://github.com/lz4/lz4
+- https://github.com/Tessil/robin-map
 
 ## Microsoft Visual C++ Runtime
 

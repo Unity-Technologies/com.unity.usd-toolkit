@@ -1,26 +1,57 @@
 #!/usr/bin/env python3
 """Regenerates Runtime/Native/NativeRuntimeHashes.g.cs from the shipped native payload.
 
-The managed loader compares every native binary it finds against the digest recorded here
-before the first P/Invoke, so a swapped or truncated binary fails loudly instead of being
-loaded. Run this after EVERY native rebuild -- the build output is a new binary with a new
-digest, and a stale manifest makes the package refuse its own payload.
+The managed loader compares every native binary AND every plugin descriptor it finds against
+the digest recorded here before the first P/Invoke, so a swapped, truncated or added file fails
+loudly instead of being loaded. Run this after EVERY native rebuild -- the build output is a new
+binary with a new digest, and a stale manifest makes the package refuse its own payload.
 
     python3 Native~/generate_native_hashes.py
+
+Descriptors are covered, not just libraries: OpenUSD decides which library to load from
+plugInfo.json, so hashing only the binaries leaves an attacker free to add a library and
+repoint a descriptor at it (SECURITY-282834, CWE-345).
+
+Entries are keyed by "<platform>/<path relative to that platform's payload root>", because
+descriptor file names repeat across platforms -- every platform ships its own
+lib/usd/ar/resources/plugInfo.json -- and a name-keyed table cannot tell them apart, nor stop a
+file in an unexpected directory from matching an expected entry.
 
 The digests live in a generated C# file rather than a data file next to the binaries on
 purpose: a manifest shipped beside the payload can be edited by anyone who can edit the
 payload, whereas replacing these values means patching a compiled assembly.
+
+    python3 Native~/generate_native_hashes.py --check-attributes
+
+checks something the digests silently depend on: that git hands every hashed file out byte for
+byte. A file git treats as text is rewritten on checkout wherever core.autocrlf is set, and the
+manifest then disagrees with that machine's disk while `git status` stays clean -- which is how
+Windows checkouts came to refuse their own descriptors before .gitattributes marked them -text. The check
+asks git, for each file this script would hash, whether its text attribute is unset, so a new
+descriptor type added below without a matching .gitattributes rule fails CI instead of failing
+on a Windows user's machine.
 """
 
 import hashlib
 import pathlib
+import subprocess
 import sys
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 PAYLOAD = REPO / "Runtime" / "Plugins"
 OUTPUT = REPO / "Runtime" / "Native" / "NativeRuntimeHashes.g.cs"
 
+# Platform id -> payload root, relative to Runtime/Plugins. The id must match
+# NativeRuntimeHashes.PlatformId in the managed loader.
+PLATFORM_ROOTS = {
+    "macOS": pathlib.Path("macOS"),
+    "windows": pathlib.Path("x86_64/Windows"),
+    "linux": pathlib.Path("x86_64/Linux"),
+}
+
+DESCRIPTOR_NAMES = {"plugInfo.json"}
+DESCRIPTOR_SUFFIXES = {".usda", ".glslfx"}
+BINARY_SUFFIXES = {".dll", ".dylib", ".so"}
 
 # A Git LFS pointer is a small text file that begins with this line. Hashing one would record
 # the pointer's digest instead of the binary's, and the loader would then refuse the real file on
@@ -41,28 +72,99 @@ def is_lfs_pointer(path: pathlib.Path) -> bool:
 def is_native_binary(path: pathlib.Path) -> bool:
     if path.suffix == ".meta":
         return False
-    if path.suffix in (".dll", ".dylib", ".so"):
+    if path.suffix in BINARY_SUFFIXES:
         return True
     # libtbb.so.2 and friends: a version suffix after .so
     return ".so." in path.name
 
 
+def is_descriptor(path: pathlib.Path) -> bool:
+    if path.suffix == ".meta":
+        return False
+    return path.name in DESCRIPTOR_NAMES or path.suffix in DESCRIPTOR_SUFFIXES
+
+
+def check_attributes() -> int:
+    """Every file the manifest covers must be exempt from line-ending conversion."""
+    paths = []
+    for relative_root in PLATFORM_ROOTS.values():
+        root = PAYLOAD / relative_root
+        if not root.is_dir():
+            continue
+        for path in sorted(root.rglob("*")):
+            if path.is_file() and (is_native_binary(path) or is_descriptor(path)):
+                paths.append(path.relative_to(REPO).as_posix())
+
+    if not paths:
+        print("error: found no payload files to check", file=sys.stderr)
+        return 1
+
+    result = subprocess.run(["git", "check-attr", "--stdin", "text"], cwd=REPO,
+                            input="\n".join(paths) + "\n", capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"error: git check-attr failed: {result.stderr.strip()}", file=sys.stderr)
+        return 1
+
+    # Output lines are "<path>: text: <state>". Anything but "unset" means git may convert it.
+    exposed = [line for line in result.stdout.splitlines() if not line.endswith(": text: unset")]
+    if exposed:
+        print(f"error: {len(exposed)} hashed payload file(s) are not marked -text in .gitattributes,",
+              file=sys.stderr)
+        print("so core.autocrlf can rewrite them on checkout and the manifest will not match:",
+              file=sys.stderr)
+        for line in exposed[:20]:
+            print(f"  {line}", file=sys.stderr)
+        if len(exposed) > 20:
+            print(f"  ... and {len(exposed) - 20} more", file=sys.stderr)
+        return 1
+
+    print(f"ok: all {len(paths)} hashed payload files are exempt from line-ending conversion")
+    return 0
+
+
 def main() -> int:
+    if len(sys.argv) > 1:
+        if sys.argv[1:] == ["--check-attributes"]:
+            return check_attributes()
+        print(f"usage: {sys.argv[0]} [--check-attributes]", file=sys.stderr)
+        return 2
+
     if not PAYLOAD.is_dir():
         print(f"error: no payload directory at {PAYLOAD}", file=sys.stderr)
         return 1
 
-    candidates = [
-        path for path in sorted(PAYLOAD.rglob("*"))
-        if path.is_file() and is_native_binary(path)
-    ]
+    entries = {}
+    binary_count = 0
+    descriptor_count = 0
+    pointers = []
 
-    pointers = [path for path in candidates if is_lfs_pointer(path)]
+    for platform_id, relative_root in PLATFORM_ROOTS.items():
+        root = PAYLOAD / relative_root
+        if not root.is_dir():
+            print(f"warning: no payload for '{platform_id}' at {root}", file=sys.stderr)
+            continue
+
+        for path in sorted(root.rglob("*")):
+            if not path.is_file():
+                continue
+
+            binary = is_native_binary(path)
+            if not binary and not is_descriptor(path):
+                continue
+
+            if binary:
+                if is_lfs_pointer(path):
+                    pointers.append(path)
+                    continue
+                binary_count += 1
+            else:
+                descriptor_count += 1
+
+            key = f"{platform_id}/{path.relative_to(root).as_posix()}"
+            entries[key] = hashlib.sha256(path.read_bytes()).hexdigest()
+
     if pointers:
-        print(
-            "error: these payload files are Git LFS pointers, not real binaries:",
-            file=sys.stderr,
-        )
+        print("error: these payload files are Git LFS pointers, not real binaries:", file=sys.stderr)
         for path in pointers:
             print(f"  {path.relative_to(REPO)}", file=sys.stderr)
         print(
@@ -75,32 +177,16 @@ def main() -> int:
         )
         return 1
 
-    digests = {}
-    for path in candidates:
-        name = path.name
-        digest = hashlib.sha256(path.read_bytes()).hexdigest()
-        previous = digests.get(name)
-        if previous is not None and previous[0] != digest:
-            # Keyed by file name, so two different files sharing one name would make the
-            # manifest ambiguous. All current payload names are unique across platforms.
-            print(
-                f"error: '{name}' appears twice with different contents "
-                f"({previous[1]} and {path.relative_to(REPO)})",
-                file=sys.stderr,
-            )
-            return 1
-
-        digests[name] = (digest, path.relative_to(REPO))
-
-    if not digests:
-        print(f"error: found no native binaries under {PAYLOAD}", file=sys.stderr)
+    if not entries:
+        print(f"error: found nothing to hash under {PAYLOAD}", file=sys.stderr)
         return 1
 
     lines = [
         "// <auto-generated>",
-        "//     SHA-256 digests of the native runtime files shipped with this package, checked by",
-        "//     UsdExporter before the first P/Invoke so a substituted binary fails loudly rather",
-        "//     than being loaded and executed in-process.",
+        "//     SHA-256 digests of the native runtime files shipped with this package -- both the",
+        "//     libraries and the plugin descriptors that decide which library OpenUSD loads --",
+        "//     checked by UsdExporter before the first P/Invoke so a substituted or added file",
+        "//     fails loudly rather than being loaded and executed in-process.",
         "//",
         "//     Do not edit by hand. Regenerate after every native rebuild:",
         "//         python3 Native~/generate_native_hashes.py",
@@ -113,18 +199,27 @@ def main() -> int:
         "{",
         "    internal static class NativeRuntimeHashes",
         "    {",
-        "        // File name -> SHA-256 (lowercase hex). Keyed by name because every shipped",
-        "        // binary's name is unique across platforms, so one table covers them all and only",
-        "        // the files present on the running platform get compared.",
+        "        // Identifies which platform's entries apply at run time. Must match the keys the",
+        "        // generator writes.",
+        "#if UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX",
+        '        internal const string PlatformId = "macOS";',
+        "#elif UNITY_EDITOR_LINUX || UNITY_STANDALONE_LINUX",
+        '        internal const string PlatformId = "linux";',
+        "#else",
+        '        internal const string PlatformId = "windows";',
+        "#endif",
+        "",
+        "        // \"<platform>/<path relative to that platform's payload root>\" -> SHA-256 (lowercase",
+        "        // hex). Keyed by path, not by file name: every platform ships its own copy of",
+        "        // lib/usd/ar/resources/plugInfo.json, and a name-keyed table could neither tell them",
+        "        // apart nor stop a file in an unexpected directory from matching an expected entry.",
         "        internal static readonly Dictionary<string, string> Expected =",
-        "            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)",
+        "            new Dictionary<string, string>(StringComparer.Ordinal)",
         "        {",
     ]
 
-    for name in sorted(digests):
-        digest, relative = digests[name]
-        lines.append(f'            // {relative.as_posix()}')
-        lines.append(f'            {{ "{name}", "{digest}" }},')
+    for key in sorted(entries):
+        lines.append(f'            {{ "{key}", "{entries[key]}" }},')
 
     lines += [
         "        };",
@@ -135,9 +230,13 @@ def main() -> int:
 
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
     OUTPUT.write_text("\n".join(lines), encoding="utf-8")
-    print(f"wrote {OUTPUT.relative_to(REPO)} with {len(digests)} digest(s):")
-    for name in sorted(digests):
-        print(f"  {digests[name][0]}  {name}")
+    print(
+        f"wrote {OUTPUT.relative_to(REPO)}: {len(entries)} entries "
+        f"({binary_count} binaries, {descriptor_count} descriptors)"
+    )
+    for platform_id in PLATFORM_ROOTS:
+        count = sum(1 for key in entries if key.startswith(platform_id + "/"))
+        print(f"  {platform_id:8s} {count}")
     return 0
 
 

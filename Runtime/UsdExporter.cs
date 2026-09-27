@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using Unity.USDToolkit.Native;
 using UnityEngine;
@@ -1216,8 +1217,20 @@ namespace Unity.USDToolkit
                 ValidateNativeRuntimeFiles(info);
             }
 
-            if (options.VerifyNativeRuntimeIntegrity)
+            // The opt-out is honoured in the Editor and in development builds, where a developer
+            // may be iterating on the native plugin without regenerating the manifest. A release
+            // player verifies regardless: post-distribution substitution is the threat this check
+            // exists for, and a shipped build is precisely where it applies (SECURITY-282834).
+            if (options.VerifyNativeRuntimeIntegrity || IsReleasePlayer)
             {
+                if (!options.VerifyNativeRuntimeIntegrity)
+                {
+                    Debug.LogWarning(
+                        "Unity USD Toolkit: UsdExportOptions.VerifyNativeRuntimeIntegrity was set " +
+                        "to false, but this is a release player, where the native payload is " +
+                        "always verified.");
+                }
+
                 VerifyNativeRuntimeIntegrity(info);
             }
 
@@ -1244,6 +1257,9 @@ namespace Unity.USDToolkit
             info.PluginSearchPath = pluginSearchPath;
             if (!string.IsNullOrWhiteSpace(pluginSearchPath))
             {
+                // Checked before the variable is written, because writing it is what lets OpenUSD
+                // act on these descriptors.
+                ValidatePluginDescriptorLibraryPaths(info);
                 Environment.SetEnvironmentVariable("PXR_PLUGINPATH_NAME", pluginSearchPath);
             }
 
@@ -1318,13 +1334,29 @@ namespace Unity.USDToolkit
         // loaded process without it being restarted anyway.
         private static int integrityVerified;
 
-        // Compares every native binary in the payload against the digest recorded in
-        // NativeRuntimeHashes at build time. ValidateNativeRuntimeFiles above only asks whether a
-        // file of the right name exists, which cannot tell a genuine binary from a substituted
-        // one; this reads the contents. It is not a defence against someone who already has write
-        // access to the payload (they could rebuild the package too) -- it catches a binary that
-        // was swapped or corrupted in distribution, and it makes the payload auditable: anyone can
-        // hash the shipped files and compare.
+        // A built, non-development player. UNITY_EDITOR covers the Editor; DEVELOPMENT_BUILD is
+        // defined only in a development player.
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+        private const bool IsReleasePlayer = false;
+#else
+        private const bool IsReleasePlayer = true;
+#endif
+
+        // Verifies the payload against the digests recorded in NativeRuntimeHashes at build time.
+        // ValidateNativeRuntimeFiles above only asks whether a file of the right name exists, which
+        // cannot tell a genuine file from a substituted one; this reads the contents.
+        //
+        // Descriptors are covered, not only libraries. OpenUSD decides which library to load from
+        // plugInfo.json, so hashing binaries alone left an attacker free to add a library and
+        // repoint a descriptor at it, with the check still reporting OK (SECURITY-282834,
+        // CWE-345). For the same reason an *unlisted* file inside the plugin resource trees is a
+        // failure, not a warning: those trees are entirely ours, so anything extra in them was
+        // added by someone else.
+        //
+        // This is still not a defence against someone who already has write access to the package
+        // -- they could patch this assembly too. It catches substitution and addition in
+        // distribution, and it makes the payload auditable: anyone can hash the shipped files and
+        // compare them against the manifest.
         private static void VerifyNativeRuntimeIntegrity(NativeRuntimeInfo info)
         {
             if (!UsdNative.IsSupportedPlatform || Volatile.Read(ref integrityVerified) != 0)
@@ -1332,11 +1364,118 @@ namespace Unity.USDToolkit
                 return;
             }
 
+            string root = ResolveVerificationRoot(info);
+            if (string.IsNullOrEmpty(root))
+            {
+                // No payload root to check. ValidateNativeRuntimeFiles reports a missing payload
+                // properly when it is enabled; staying silent here avoids a second, vaguer error.
+                return;
+            }
+
             var mismatches = new List<string>();
+            var added = new List<string>();
             var unverified = new List<string>();
-            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             int verified = 0;
 
+            foreach (string file in Directory.GetFiles(root, "*", SearchOption.AllDirectories))
+            {
+                string name = Path.GetFileName(file);
+                bool binary = IsNativeBinaryName(name);
+                if (!binary && !IsPluginDescriptorName(name))
+                {
+                    continue;
+                }
+
+                string key = NativeRuntimeHashes.PlatformId + "/" + ToPayloadRelativePath(root, file);
+                if (!NativeRuntimeHashes.Expected.TryGetValue(key, out string expected))
+                {
+                    if (IsInsidePluginResourceTree(root, file))
+                    {
+                        // We ship these trees whole, so an entry we do not know is an added file --
+                        // exactly what a descriptor-redirect attack needs.
+                        added.Add(key);
+                    }
+                    else
+                    {
+                        // The payload root can be a folder shared with other packages in a player
+                        // build, so an unknown file beside ours is reported, not fatal.
+                        unverified.Add(key);
+                    }
+
+                    continue;
+                }
+
+                string actual;
+                try
+                {
+                    actual = ComputeSha256(file);
+                }
+                catch (Exception exception)
+                {
+                    mismatches.Add(key + " (could not be read: " + exception.Message + ")");
+                    continue;
+                }
+
+                if (string.Equals(actual, expected, StringComparison.OrdinalIgnoreCase))
+                {
+                    ++verified;
+                }
+                else
+                {
+                    mismatches.Add(key + " (expected " + expected + ", found " + actual + ")");
+                }
+            }
+
+            if (mismatches.Count > 0 || added.Count > 0)
+            {
+                var builder = new StringBuilder();
+                builder.Append("Unity USD Toolkit native runtime payload does not match the digests recorded ");
+                builder.Append("for this package. The native code and the plugin descriptors that decide which ");
+                builder.Append("library to load are read in-process, so a payload that does not match its ");
+                builder.Append("manifest is refused.");
+
+                if (mismatches.Count > 0)
+                {
+                    builder.Append(" Changed: ").Append(string.Join("; ", mismatches)).Append('.');
+                }
+
+                if (added.Count > 0)
+                {
+                    builder.Append(" Not in the manifest but present in a plugin resource tree: ")
+                        .Append(string.Join(", ", added)).Append('.');
+                }
+
+                builder.Append(" If you rebuilt the native plugin yourself, regenerate the manifest with ");
+                builder.Append("'python3 Native~/generate_native_hashes.py'; otherwise re-acquire the package. ");
+                builder.Append("Set UsdExportOptions.VerifyNativeRuntimeIntegrity to false to skip this check.");
+
+                throw new UsdExportException(builder.ToString(), info.ToDiagnosticString());
+            }
+
+            if (unverified.Count > 0)
+            {
+                Debug.LogWarning(
+                    "Unity USD Toolkit: no recorded digest for " + string.Join(", ", unverified) +
+                    "; those files sit beside the payload rather than inside it, so their contents " +
+                    "were not verified.");
+            }
+
+            if (verified == 0)
+            {
+                // Nothing matched at all, which means the payload is missing rather than tampered.
+                return;
+            }
+
+            Volatile.Write(ref integrityVerified, 1);
+        }
+
+        // The payload root to verify: the base path that actually holds the toolkit library. The
+        // other base paths are search locations for the dynamic loader, and on Linux one of them
+        // (.../Linux/lib) sits inside another, which would make the same file appear under two
+        // different relative keys.
+        private static string ResolveVerificationRoot(NativeRuntimeInfo info)
+        {
+            string[] toolkitNames = GetToolkitNativeFileNames();
             foreach (string basePath in info.BasePaths)
             {
                 if (string.IsNullOrEmpty(basePath) || !Directory.Exists(basePath))
@@ -1344,76 +1483,137 @@ namespace Unity.USDToolkit
                     continue;
                 }
 
-                foreach (string file in Directory.GetFiles(basePath))
+                foreach (string toolkitName in toolkitNames)
                 {
-                    string name = Path.GetFileName(file);
-                    if (!IsNativeBinaryName(name) || !seen.Add(name))
+                    if (File.Exists(Path.Combine(basePath, toolkitName)))
                     {
-                        // Base paths overlap on some platforms, so each name is checked once.
-                        continue;
-                    }
-
-                    if (!NativeRuntimeHashes.Expected.TryGetValue(name, out string expected))
-                    {
-                        unverified.Add(name);
-                        continue;
-                    }
-
-                    string actual;
-                    try
-                    {
-                        actual = ComputeSha256(file);
-                    }
-                    catch (Exception exception)
-                    {
-                        mismatches.Add(name + " (could not be read: " + exception.Message + ")");
-                        continue;
-                    }
-
-                    if (string.Equals(actual, expected, StringComparison.OrdinalIgnoreCase))
-                    {
-                        ++verified;
-                    }
-                    else
-                    {
-                        mismatches.Add(name + " (expected " + expected + ", found " + actual + ")");
+                        return Path.GetFullPath(basePath);
                     }
                 }
             }
 
-            if (mismatches.Count > 0)
+            return null;
+        }
+
+        // Path relative to the payload root, with forward slashes, matching the keys the
+        // generator writes.
+        private static string ToPayloadRelativePath(string root, string file)
+        {
+            string full = Path.GetFullPath(file);
+            string prefix = root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) +
+                Path.DirectorySeparatorChar;
+            string relative = full.StartsWith(prefix, PathComparison)
+                ? full.Substring(prefix.Length)
+                : Path.GetFileName(full);
+            return relative.Replace('\\', '/');
+        }
+
+        // The OpenUSD plugin resource trees, which this package ships in their entirety.
+        private static readonly string[] PluginResourceTrees = { "lib/usd", "plugin/usd", "share/usd" };
+
+        private static bool IsInsidePluginResourceTree(string root, string file)
+        {
+            string relative = ToPayloadRelativePath(root, file);
+            foreach (string tree in PluginResourceTrees)
             {
-                throw new UsdExportException(
-                    "Unity USD Toolkit native runtime files do not match the digests recorded for " +
-                    "this package: " + string.Join("; ", mismatches) +
-                    ". The native code is loaded and executed in-process, so a payload that does " +
-                    "not match its manifest is refused. If you rebuilt the native plugin " +
-                    "yourself, regenerate the manifest with " +
-                    "'python3 Native~/generate_native_hashes.py'; otherwise re-acquire the " +
-                    "package. Set UsdExportOptions.VerifyNativeRuntimeIntegrity to false to skip " +
-                    "this check.",
-                    info.ToDiagnosticString());
+                if (relative.StartsWith(tree + "/", StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
             }
 
-            if (unverified.Count > 0)
-            {
-                // Not fatal: a payload may legitimately carry a file the manifest predates.
-                Debug.LogWarning(
-                    "Unity USD Toolkit: no recorded digest for native file(s) " +
-                    string.Join(", ", unverified) +
-                    "; their contents were not verified. Regenerate the manifest with " +
-                    "'python3 Native~/generate_native_hashes.py'.");
-            }
+            return false;
+        }
 
-            if (verified == 0 && unverified.Count == 0)
+        private static int descriptorLibraryPathsValidated;
+
+        // Every plugInfo.json names the library OpenUSD should load for that plugin, and OpenUSD
+        // loads it in-process. A descriptor that points outside this package's own payload is
+        // therefore arbitrary code execution, so each LibraryPath is resolved and confined before
+        // PXR_PLUGINPATH_NAME is set (SECURITY-282834, CWE-345). The digest check above notices a
+        // descriptor that was *edited*; this notices one that points somewhere it should not,
+        // which also covers the case where the check is switched off.
+        //
+        // This package's payload is a monolithic OpenUSD build, so every shipped LibraryPath is
+        // empty -- the code lives in the one library already loaded. A non-empty value is
+        // therefore unusual enough to be worth confining rather than trusting.
+        private static void ValidatePluginDescriptorLibraryPaths(NativeRuntimeInfo info)
+        {
+            if (!UsdNative.IsSupportedPlatform ||
+                Volatile.Read(ref descriptorLibraryPathsValidated) != 0)
             {
-                // Nothing was found to check, which means the payload is missing entirely.
-                // ValidateNativeRuntimeFiles reports that properly when it is enabled.
                 return;
             }
 
-            Volatile.Write(ref integrityVerified, 1);
+            string root = ResolveVerificationRoot(info);
+            if (string.IsNullOrEmpty(root))
+            {
+                return;
+            }
+
+            var offenders = new List<string>();
+            foreach (string descriptor in Directory.GetFiles(root, "plugInfo.json", SearchOption.AllDirectories))
+            {
+                string text;
+                try
+                {
+                    text = File.ReadAllText(descriptor);
+                }
+                catch (Exception exception)
+                {
+                    offenders.Add(ToPayloadRelativePath(root, descriptor) +
+                        " (could not be read: " + exception.Message + ")");
+                    continue;
+                }
+
+                foreach (Match match in LibraryPathPattern.Matches(text))
+                {
+                    string value = match.Groups[1].Value;
+                    if (value.Length == 0)
+                    {
+                        continue;
+                    }
+
+                    // OpenUSD anchors a relative LibraryPath on the descriptor's own folder.
+                    string candidate = value.Replace('/', Path.DirectorySeparatorChar);
+                    string resolved;
+                    try
+                    {
+                        resolved = Path.IsPathRooted(candidate)
+                            ? Path.GetFullPath(candidate)
+                            : Path.GetFullPath(Path.Combine(Path.GetDirectoryName(descriptor) ?? root, candidate));
+                    }
+                    catch (Exception)
+                    {
+                        offenders.Add(ToPayloadRelativePath(root, descriptor) + " -> '" + value + "' (unusable path)");
+                        continue;
+                    }
+
+                    string prefix = root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) +
+                        Path.DirectorySeparatorChar;
+                    if (!resolved.StartsWith(prefix, PathComparison))
+                    {
+                        offenders.Add(ToPayloadRelativePath(root, descriptor) + " -> '" + value + "'");
+                    }
+                }
+            }
+
+            if (offenders.Count > 0)
+            {
+                throw new UsdExportException(
+                    "Unity USD Toolkit refused to configure OpenUSD plugin discovery: " +
+                    string.Join("; ", offenders) +
+                    ". A plugInfo.json names the library OpenUSD loads in-process, so a descriptor " +
+                    "pointing outside this package's native payload is not loaded. Re-acquire the " +
+                    "package if you did not edit these files yourself.",
+                    info.ToDiagnosticString());
+            }
+
+            Volatile.Write(ref descriptorLibraryPathsValidated, 1);
         }
+
+        private static readonly Regex LibraryPathPattern =
+            new Regex("\"LibraryPath\"\\s*:\\s*\"([^\"]*)\"", RegexOptions.Compiled);
 
         private static bool IsNativeBinaryName(string name)
         {
@@ -1427,6 +1627,19 @@ namespace Unity.USDToolkit
                 name.EndsWith(".so", StringComparison.OrdinalIgnoreCase) ||
                 // libtbb.so.2 and friends: a version suffix after .so
                 name.IndexOf(".so.", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        // The files that tell OpenUSD which library to load and what it provides.
+        private static bool IsPluginDescriptorName(string name)
+        {
+            if (string.IsNullOrEmpty(name) || name.EndsWith(".meta", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            return string.Equals(name, "plugInfo.json", StringComparison.OrdinalIgnoreCase) ||
+                name.EndsWith(".usda", StringComparison.OrdinalIgnoreCase) ||
+                name.EndsWith(".glslfx", StringComparison.OrdinalIgnoreCase);
         }
 
         private static string ComputeSha256(string path)
@@ -1686,7 +1899,10 @@ namespace Unity.USDToolkit
 #elif UNITY_EDITOR_LINUX || UNITY_STANDALONE_LINUX
             return new[] { "libtbb.so", "libtbb.so.2", "libtbb.so.12" };
 #else
-            return new[] { "tbb.dll" };
+            // tbb_usdrt.dll is Intel's TBB renamed so the Windows loader cannot hand us the
+            // Editor's own tbb.dll instead (SECURITY-282834). tbb.dll stays in the list because a
+            // payload built before that rename is still a valid payload.
+            return new[] { "tbb_usdrt.dll", "tbb.dll" };
 #endif
         }
 
@@ -1777,6 +1993,16 @@ namespace Unity.USDToolkit
             var message = new StringBuilder();
             message.Append("Unity USD Toolkit could not load the native plugin or one of its OpenUSD dependencies. ");
             message.Append("Confirm the platform native payload contains the UnityUSDToolkitNative plugin, OpenUSD dylib/DLLs, TBB dylib/DLLs, and the OpenUSD plugin resource folders.");
+
+            // The payload being present is the usual cause, but not the only one: a loader can
+            // also refuse a library that is there and intact because the host OS is older than
+            // the one it was built for. That reads as "file not found" and sends people looking
+            // for a missing file, so name the OS requirement here.
+#if UNITY_STANDALONE_LINUX || UNITY_EDITOR_LINUX
+            message.Append(" On Linux the payload is built on Ubuntu 24.04 and requires glibc 2.38 or newer and a libstdc++ providing GLIBCXX_3.4.32; Ubuntu 22.04 (glibc 2.35) cannot load it. Run `ldd --version` to check.");
+#elif UNITY_STANDALONE_OSX || UNITY_EDITOR_OSX
+            message.Append(" On macOS the payload requires macOS 12.0 or newer.");
+#endif
             return new UsdExportException(message.ToString(), exception, nativeRuntime.ToDiagnosticString());
         }
 
