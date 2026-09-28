@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **An image too large for the managed PNG decoder can no longer reach `Texture2D.LoadImage`
+  anyway** (SECURITY-282834, CWE-400). `UsdPngDecoder` refuses a header claiming more than
+  16384 px a side or 64 M pixels, but a PNG it declined — for being too large, or 16-bit,
+  interlaced or paletted — kept its raw bytes and was handed to `LoadImage`, which has no limits.
+  So the caps only guarded the path that obeyed them: a few-dozen-byte PNG whose header claims
+  20000×25000 went straight to the uncapped decoder. JPEG never touched the managed decoder at all.
+  `UsdImageLimits` now holds the limits once, and sizes every image headed for `LoadImage` from its
+  PNG `IHDR` or JPEG start-of-frame header first; anything over the limits, or not a PNG or JPEG
+  with a readable size, is refused with a warning and that texture alone is dropped. The check runs
+  on the decode pass (off the main thread for `ImportAsync`, freeing the bytes early) and again at
+  `CreateTextureViaLoadImage` itself. Texture files larger than 512 MB — the most a 16-bit RGBA
+  image at the pixel cap could need — are refused before they are read, and packaged `.usdz`
+  textures as soon as the resolver returns them.
+
+  Verified in Unity 6000.4.10f1 against a stage with four textures: a 45-byte PNG claiming
+  20000×25000 and a 23-byte JPEG claiming 30000×10 are both refused; a real 333×333 PNG and a real
+  777×777 JPEG, which goes through the `LoadImage` fallback, both still import. The same stage on
+  the previous code reached `LoadImage` with the hostile bytes.
+
 - **CI now fails if a hashed payload file could have its line endings rewritten**
   (SECURITY-282834, CWE-494). `.gitattributes` marking the plugin descriptors `-text` fixed the
   Windows checkout that refused its own payload, but nothing stopped the next descriptor type from

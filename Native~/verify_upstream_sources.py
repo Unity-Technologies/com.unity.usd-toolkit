@@ -51,9 +51,11 @@ tbb_usdrt.dll, which changes no bytes).
 import argparse
 import hashlib
 import json
+import os
 import pathlib
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
@@ -225,8 +227,25 @@ def write_stamp(install_root: pathlib.Path, platform: str, rows, scans_verified:
         "sources": [{k: row[k] for k in ("component", "version", "url", "sha256", "git_commit")}
                     for row in rows],
     }
-    (install_root / STAMP_NAME).write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-    print(f"ok   wrote {install_root / STAMP_NAME}")
+    # The directory comes from the command line; the file name never does. A symlink planted at
+    # the stamp's path would otherwise redirect this write wherever it points, so it is refused,
+    # and the stamp is written beside its final name and swapped in so no half-written stamp is
+    # ever read as a verification result.
+    stamp = install_root / STAMP_NAME
+    if stamp.is_symlink():
+        sys.exit(f"{stamp} is a symbolic link; refusing to write the stamp through it.")
+    handle, temporary = tempfile.mkstemp(prefix=f"{STAMP_NAME}.", suffix=".tmp", dir=install_root)
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            stream.write(json.dumps(payload, indent=2) + "\n")
+        os.replace(temporary, stamp)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
+    print(f"ok   wrote {stamp}")
 
 
 def check_stamp(install_root: pathlib.Path, platform: str, rows) -> bool:

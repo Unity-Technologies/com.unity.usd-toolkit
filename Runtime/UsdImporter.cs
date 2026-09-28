@@ -576,6 +576,14 @@ namespace Unity.USDToolkit
             if (data.PackageAssets.TryGetValue(path, out string authoredPath))
             {
                 byte[] packaged = UsdNative.ReadImportAsset(context, authoredPath);
+                if (packaged != null && packaged.LongLength > UsdImageLimits.MaxFileBytes)
+                {
+                    data.TextureBytes[path] = null;
+                    Debug.LogWarning(
+                        $"USD import: refused packaged texture {path}: {packaged.LongLength} bytes exceeds the {UsdImageLimits.MaxFileBytes}-byte limit.");
+                    return;
+                }
+
                 data.TextureBytes[path] = packaged;
                 if (packaged == null || packaged.Length == 0)
                 {
@@ -596,6 +604,16 @@ namespace Unity.USDToolkit
 
             try
             {
+                // Refused before reading, so an oversized file is never held in memory.
+                long length = new FileInfo(readPath).Length;
+                if (length > UsdImageLimits.MaxFileBytes)
+                {
+                    data.TextureBytes[path] = null;
+                    Debug.LogWarning(
+                        $"USD import: refused texture {path}: {length} bytes exceeds the {UsdImageLimits.MaxFileBytes}-byte limit.");
+                    return;
+                }
+
                 data.TextureBytes[path] = File.ReadAllBytes(readPath);
             }
             catch (Exception exception)
@@ -607,7 +625,9 @@ namespace Unity.USDToolkit
 
         // Decodes each unique PNG to raw pixels. Runs inside ReadStageData, so for ImportAsync it
         // executes on a worker thread (off the main thread) — this is the expensive step that
-        // used to freeze the editor. Unsupported PNGs leave a null entry → main-thread LoadImage.
+        // used to freeze the editor. Unsupported PNGs leave a null entry → main-thread LoadImage,
+        // but only if their header is within UsdImageLimits: the managed decoder's own caps used to
+        // be advisory, because an image it declined for being too large went to LoadImage anyway.
         private static void DecodeUniqueTextures(StageData data)
         {
             var paths = new List<string>(data.TextureBytes.Keys);
@@ -620,6 +640,12 @@ namespace Unity.USDToolkit
                 {
                     decoded = new DecodedImage { Width = w, Height = h, Rgba = rgba };
                     data.TextureBytes[path] = null; // decoded form supersedes the raw bytes
+                }
+                else if (bytes != null && bytes.Length > 0 &&
+                         !UsdImageLimits.PermitsLoadImage(bytes, out string reason))
+                {
+                    data.TextureBytes[path] = null; // never reaches LoadImage, and frees the bytes now
+                    Debug.LogWarning($"USD import: refused texture {path}: {reason}.");
                 }
 
                 data.DecodedTextures[path] = decoded;
@@ -1048,6 +1074,15 @@ namespace Unity.USDToolkit
 
         private static Texture2D CreateTextureViaLoadImage(byte[] bytes, bool linear, string name)
         {
+            // Re-checked at the sink (SECURITY-282834, CWE-400). LoadImage applies no size limit
+            // of its own, and DecodeUniqueTextures already refused what fails this -- this keeps
+            // that true if another caller is ever added.
+            if (!UsdImageLimits.PermitsLoadImage(bytes, out string reason))
+            {
+                Debug.LogWarning($"USD import: refused texture '{name}': {reason}.");
+                return null;
+            }
+
             var texture = new Texture2D(2, 2, TextureFormat.RGBA32, true, linear) { name = name };
             if (!texture.LoadImage(bytes))
             {
@@ -1340,6 +1375,139 @@ namespace Unity.USDToolkit
         }
     }
 
+    // The texture size limits, and the header check that enforces them on the Texture2D.LoadImage
+    // fallback (SECURITY-282834, CWE-400). UsdPngDecoder obeys these on the managed path; LoadImage
+    // obeys nothing, so every image headed there -- a PNG the managed decoder declined, or a JPEG,
+    // which it never handles -- is sized from its header first. LoadImage reads PNG and JPEG only,
+    // so anything whose header is neither is refused without losing a texture that would have loaded.
+    // Touches no Unity API, so it is safe on the import worker thread.
+    internal static class UsdImageLimits
+    {
+        public const int MaxDimension = 16384;
+        public const long MaxPixelCount = 64L * 1024 * 1024;
+
+        // The largest decoded payload the pixel cap admits -- 16-bit RGBA, 8 bytes a pixel. A
+        // texture file bigger than the biggest image it could legitimately hold is not one.
+        public const long MaxFileBytes = MaxPixelCount * 8;
+
+        public static bool IsWithin(int width, int height)
+        {
+            return width > 0 && height > 0 &&
+                   width <= MaxDimension && height <= MaxDimension &&
+                   (long)width * height <= MaxPixelCount;
+        }
+
+        public static bool PermitsLoadImage(byte[] data, out string reason)
+        {
+            if (!TryReadSize(data, out int width, out int height, out string format))
+            {
+                reason = "not a PNG or JPEG with a readable size in its header";
+                return false;
+            }
+
+            if (!IsWithin(width, height))
+            {
+                reason = $"{format} header claims {width}x{height}, outside the limits of 1-{MaxDimension}px a side and {MaxPixelCount} pixels";
+                return false;
+            }
+
+            reason = null;
+            return true;
+        }
+
+        // Reads width and height from a PNG IHDR or a JPEG start-of-frame segment without
+        // decoding anything. Every offset is bounds-checked against the buffer.
+        public static bool TryReadSize(byte[] data, out int width, out int height, out string format)
+        {
+            width = 0;
+            height = 0;
+            format = null;
+            if (data == null)
+            {
+                return false;
+            }
+
+            // PNG: signature, then IHDR must be the first chunk (length 13).
+            if (data.Length >= 24 &&
+                data[0] == 137 && data[1] == 80 && data[2] == 78 && data[3] == 71 &&
+                data[4] == 13 && data[5] == 10 && data[6] == 26 && data[7] == 10)
+            {
+                if (BigEndian32(data, 8) != 13 ||
+                    data[12] != (byte)'I' || data[13] != (byte)'H' || data[14] != (byte)'D' || data[15] != (byte)'R')
+                {
+                    return false;
+                }
+
+                width = BigEndian32(data, 16);
+                height = BigEndian32(data, 20);
+                format = "PNG";
+                return true;
+            }
+
+            // JPEG: walk the marker segments to the first start-of-frame, which carries the size.
+            if (data.Length >= 4 && data[0] == 0xFF && data[1] == 0xD8)
+            {
+                int pos = 2;
+                while (pos + 4 <= data.Length)
+                {
+                    if (data[pos] != 0xFF)
+                    {
+                        return false;
+                    }
+
+                    byte marker = data[pos + 1];
+                    if (marker == 0xFF)
+                    {
+                        pos++; // fill byte
+                        continue;
+                    }
+
+                    pos += 2;
+                    if (marker == 0x01 || (marker >= 0xD0 && marker <= 0xD8))
+                    {
+                        continue; // standalone markers carry no length
+                    }
+
+                    if (marker == 0xD9 || marker == 0xDA)
+                    {
+                        return false; // end of image, or scan data, before any frame header
+                    }
+
+                    int length = (data[pos] << 8) | data[pos + 1];
+                    if (length < 2 || (long)pos + length > data.Length)
+                    {
+                        return false;
+                    }
+
+                    // SOF0..SOF15, except DHT (C4), JPG (C8) and DAC (CC), which share the range.
+                    bool startOfFrame = marker >= 0xC0 && marker <= 0xCF &&
+                                        marker != 0xC4 && marker != 0xC8 && marker != 0xCC;
+                    if (startOfFrame)
+                    {
+                        if (length < 7)
+                        {
+                            return false;
+                        }
+
+                        height = (data[pos + 3] << 8) | data[pos + 4];
+                        width = (data[pos + 5] << 8) | data[pos + 6];
+                        format = "JPEG";
+                        return true;
+                    }
+
+                    pos += length;
+                }
+            }
+
+            return false;
+        }
+
+        private static int BigEndian32(byte[] d, int o)
+        {
+            return (d[o] << 24) | (d[o + 1] << 16) | (d[o + 2] << 8) | d[o + 3];
+        }
+    }
+
     // Minimal, thread-safe PNG decoder used to move texture decoding off Unity's main thread
     // during async import (touches no Unity API). Supports 8-bit, non-interlaced PNGs of color
     // types 0/2/4/6 with filter types 0–4 — the common case for the toolkit's exported PNGs and
@@ -1349,10 +1517,11 @@ namespace Unity.USDToolkit
         // Hard caps on the attacker-controlled IHDR dimensions. A malicious .usd/.usdz can
         // reference a few-hundred-byte PNG whose header claims an enormous image, and those
         // numbers drive every allocation below. Anything past these bounds is refused before
-        // memory is reserved; the false return sends the file down the Texture2D.LoadImage
-        // fallback exactly like any other PNG this decoder declines.
-        private const int MaxDimension = 16384;
-        private const long MaxPixelCount = 64L * 1024 * 1024;
+        // memory is reserved. The false return is not the end of it: a declined PNG goes to the
+        // Texture2D.LoadImage fallback, which is why the same limits live in UsdImageLimits and
+        // are checked again there -- on their own these caps only guarded the path that obeyed them.
+        private const int MaxDimension = UsdImageLimits.MaxDimension;
+        private const long MaxPixelCount = UsdImageLimits.MaxPixelCount;
         private const long MaxDecodedBytes = 512L * 1024 * 1024;
 
         // On success, rgba is width*height*4 bytes in Unity layout (row 0 = bottom), matching
