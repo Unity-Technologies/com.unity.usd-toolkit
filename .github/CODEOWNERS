@@ -1,0 +1,20 @@
+# Code owners for com.unity.usd-toolkit.
+# https://docs.github.com/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+#
+# The last matching pattern wins, so every rule below repeats the full owner list rather than
+# adding to the default. Further owners are listed alongside the maintainer so a code-owner review is
+# always possible: GitHub does not let a pull request's author approve their own change.
+
+# Default: everything in the package.
+*                                   @danielbierwirth-unity @yoonseokchoi-gif @Unity-Technologies/industrial-solutions-engineering
+
+# Supply chain and trust boundary: native payload, its build scripts, pinned upstream sources,
+# recorded digests and scans, and the managed code that loads and verifies the payload.
+/Native~/                           @danielbierwirth-unity @yoonseokchoi-gif @Unity-Technologies/industrial-solutions-engineering
+/Runtime/Plugins/                   @danielbierwirth-unity @yoonseokchoi-gif @Unity-Technologies/industrial-solutions-engineering
+/Runtime/Native/                    @danielbierwirth-unity @yoonseokchoi-gif @Unity-Technologies/industrial-solutions-engineering
+
+# Repository configuration, including this file and any CI workflows.
+/.github/                           @danielbierwirth-unity @yoonseokchoi-gif @Unity-Technologies/industrial-solutions-engineering
+/.gitattributes                     @danielbierwirth-unity @yoonseokchoi-gif @Unity-Technologies/industrial-solutions-engineering
+/package.json                       @danielbierwirth-unity @yoonseokchoi-gif @Unity-Technologies/industrial-solutions-engineering

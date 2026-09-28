@@ -28,19 +28,64 @@ success -- so a rebuild that re-runs it is safe. It refuses anything it does not
 rather than writing a half-patched binary, and re-parses the file afterwards to confirm the import
 table still reads correctly.
 
+The target is confined. The only files this script has any business rewriting are the payload's
+own DLLs, so it refuses a path that does not resolve to a regular .dll file inside this
+repository's Runtime/Plugins -- which also rules out a symlink planted at the target, whose write
+would otherwise land wherever the link points. The rewrite goes to a temporary file in the same
+directory and is swapped in with os.replace, so a failure part-way leaves the original intact
+rather than a half-written DLL.
+
 What this does NOT do: touch the renamed DLL itself. The file keeps its bytes, so a third-party
 signature on it stays valid -- Authenticode covers a PE's contents, not its filename. That matters
 here, because the file being renamed on Windows is Intel's signed TBB build (SECURITY-282834).
 """
 
 import argparse
+import os
 import pathlib
 import struct
 import sys
+import tempfile
+
+REPO = pathlib.Path(__file__).resolve().parent.parent
+PAYLOAD = (REPO / "Runtime" / "Plugins").resolve()
 
 
 class PEError(Exception):
     pass
+
+
+def payload_dll(argument: pathlib.Path) -> pathlib.Path:
+    """The resolved path of a payload DLL, or PEError if the argument is anything else."""
+    # Checked before resolving: resolve() follows a link, and the question is whether the path
+    # the caller named is itself one.
+    if argument.is_symlink():
+        raise PEError(f"{argument} is a symbolic link; refusing to write through it")
+    target = argument.resolve()
+    if not target.is_relative_to(PAYLOAD):
+        raise PEError(f"{target} is outside {PAYLOAD}; this script only patches payload DLLs")
+    if target.suffix.lower() != ".dll":
+        raise PEError(f"{target.name} is not a .dll")
+    if not target.is_file():
+        raise PEError(f"{target} is not a regular file")
+    return target
+
+
+def replace_atomically(target: pathlib.Path, data: bytes) -> None:
+    """Write data beside target, then swap it in, so a failure never leaves a partial file."""
+    handle, temporary = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=target.parent)
+    try:
+        with os.fdopen(handle, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, target)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
 
 
 class PE:
@@ -174,7 +219,7 @@ def patch(path: pathlib.Path, old: str, new: str, quiet: bool = False) -> int:
               f"({names}). Nothing was written.", file=sys.stderr)
         return 1
 
-    path.write_bytes(bytes(data))
+    replace_atomically(path, bytes(data))
     if not quiet:
         print(f"ok   {path.name}: import {old} -> {new}, {where}.")
     return 0
@@ -189,15 +234,13 @@ def main() -> int:
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
 
-    if not args.pe.is_file():
-        print(f"FAIL {args.pe} is not a file.", file=sys.stderr)
-        return 1
     try:
+        target = payload_dll(args.pe)
         if args.list:
-            for _, name, _, _ in PE(bytearray(args.pe.read_bytes())).import_descriptors():
+            for _, name, _, _ in PE(bytearray(target.read_bytes())).import_descriptors():
                 print(name)
             return 0
-        return patch(args.pe, args.old, args.new, args.quiet)
+        return patch(target, args.old, args.new, args.quiet)
     except PEError as exc:
         print(f"FAIL {args.pe.name}: {exc}", file=sys.stderr)
         return 1
