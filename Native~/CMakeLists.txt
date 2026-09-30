@@ -14,6 +14,57 @@ if(NOT DEFINED OPENUSD_ROOT)
     message(FATAL_ERROR "Set OPENUSD_ROOT to the Pixar OpenUSD install directory.")
 endif()
 
+# --- Source provenance gate (SECURITY-282834, trust chain) ---------------------------------
+# The payload is this wrapper plus the OpenUSD install it links against, copied verbatim. What
+# ties that install to a published OpenUSD revision is the stamp Native~/build_openusd.py writes
+# into it after checking the clone and every downloaded archive against
+# Native~/dependency-sources/<platform>.tsv. Requiring it here rather than only in the build
+# scripts means no way of building the wrapper -- a script, or plain CMake as the Linux payload
+# used to be built -- can skip it by accident. It runs at configure time and again on every build,
+# so an install changed after configuring is still caught.
+#
+# -DUSD_TOOLKIT_SKIP_SOURCE_PROVENANCE=ON skips it for local experiments. It is dropped from the
+# cache straight away, so it applies to one configure only and cannot linger in a build tree, and
+# the install step leaves a marker in the payload that makes generate_native_hashes.py refuse it.
+set(_RUSD_SKIP_SOURCE_PROVENANCE OFF)
+if(DEFINED USD_TOOLKIT_SKIP_SOURCE_PROVENANCE)
+    set(_RUSD_SKIP_SOURCE_PROVENANCE "${USD_TOOLKIT_SKIP_SOURCE_PROVENANCE}")
+    unset(USD_TOOLKIT_SKIP_SOURCE_PROVENANCE CACHE)
+endif()
+
+if(APPLE)
+    set(_RUSD_PROVENANCE_PLATFORM macos)
+elseif(WIN32)
+    set(_RUSD_PROVENANCE_PLATFORM windows)
+else()
+    set(_RUSD_PROVENANCE_PLATFORM linux)
+endif()
+
+set(_RUSD_UNVERIFIED_MARKER ".unverified-build")
+
+if(_RUSD_SKIP_SOURCE_PROVENANCE)
+    message(WARNING
+        "USD_TOOLKIT_SKIP_SOURCE_PROVENANCE: building against an OpenUSD install that was never "
+        "verified against Native~/dependency-sources/${_RUSD_PROVENANCE_PLATFORM}.tsv. The payload "
+        "has no chain back to a published revision; the install step marks it "
+        "(${_RUSD_UNVERIFIED_MARKER}) so no manifest can be generated for it.")
+else()
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    set(_RUSD_PROVENANCE_COMMAND
+        "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/verify_upstream_sources.py"
+        --platform "${_RUSD_PROVENANCE_PLATFORM}" --check-stamp "${OPENUSD_ROOT}")
+    execute_process(COMMAND ${_RUSD_PROVENANCE_COMMAND} RESULT_VARIABLE _RUSD_PROVENANCE_RESULT)
+    if(NOT _RUSD_PROVENANCE_RESULT EQUAL 0)
+        message(FATAL_ERROR
+            "Refusing to build against an OpenUSD install of unverified origin: ${OPENUSD_ROOT}")
+    endif()
+    add_custom_target(UsdToolkitSourceProvenance
+        COMMAND ${_RUSD_PROVENANCE_COMMAND}
+        COMMENT "Checking the OpenUSD install's source-provenance stamp"
+        VERBATIM
+    )
+endif()
+
 list(APPEND CMAKE_PREFIX_PATH
     "${OPENUSD_ROOT}"
     "${OPENUSD_ROOT}/lib/cmake"
@@ -183,8 +234,20 @@ if(NOT _RUSD_LINKED_OPENUSD_TARGET)
     endif()
 endif()
 
+if(TARGET UsdToolkitSourceProvenance)
+    add_dependencies(UnityUSDToolkitNative UsdToolkitSourceProvenance)
+endif()
+
 install(TARGETS UnityUSDToolkitNative
     RUNTIME DESTINATION .
     LIBRARY DESTINATION .
     ARCHIVE DESTINATION lib
 )
+
+# The payload root is the install prefix on every platform. A skipped gate marks it; a build that
+# passed the gate clears a marker a previous skipped build left behind.
+if(_RUSD_SKIP_SOURCE_PROVENANCE)
+    install(CODE "file(WRITE \"\${CMAKE_INSTALL_PREFIX}/${_RUSD_UNVERIFIED_MARKER}\" \"Built with USD_TOOLKIT_SKIP_SOURCE_PROVENANCE against ${OPENUSD_ROOT}.\\nNot for commit or release: Native~/generate_native_hashes.py refuses this payload.\\n\")")
+else()
+    install(CODE "file(REMOVE \"\${CMAKE_INSTALL_PREFIX}/${_RUSD_UNVERIFIED_MARKER}\")")
+endif()

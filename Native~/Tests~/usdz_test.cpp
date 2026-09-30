@@ -228,7 +228,7 @@ int main()
     CheckEqual(RUsd_ReadImportAsset(context, material.albedoTexturePath, nullptr, 0, bytes.data(),
                                     static_cast<long long>(bytes.size()), &readCount),
                0, "byte read succeeds");
-    Check(readCount == static_cast<long long>(sizeof(kPng)) &&
+    Check(byteCount == static_cast<long long>(sizeof(kPng)) &&
           std::memcmp(bytes.data(), kPng, sizeof(kPng)) == 0,
           "the bytes read back are the PNG that was packaged");
 

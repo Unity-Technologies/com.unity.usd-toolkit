@@ -23,7 +23,8 @@ param(
 
     # Build against an OpenUSD install that was never verified against
     # Native~/dependency-sources/windows.tsv. For local experiments only: the resulting payload
-    # has no chain back to a published revision and must not be committed or shipped.
+    # has no chain back to a published revision and must not be committed or shipped; the build
+    # marks the payload so generate_native_hashes.py refuses it.
     [switch] $SkipSourceProvenance
 )
 
@@ -49,8 +50,34 @@ if (-not (Test-Path $UsdStageHeader)) {
     throw "OpenUSD headers were not found under $OpenUsdRoot. Expected: $UsdStageHeader"
 }
 
+# --- Source provenance gate (SECURITY-282834, trust chain) ---------------------------------
+# The digest gate below establishes that the tree being copied is the tree that was reviewed. It
+# cannot establish where that tree came from -- by this point OpenUSD has already been fetched and
+# compiled. That earlier link is what the stamp carries: verify_upstream_sources.py writes it into
+# the install root only after checking the clone and the TBB archive against
+# Native~/dependency-sources/windows.tsv, so requiring it here is what ties the payload to a
+# published revision rather than to whatever happened to be on this machine. It runs before CMake
+# so a failure costs nothing; Native~/CMakeLists.txt checks the same stamp again.
+if ($SkipSourceProvenance -and $RecordDependencyDigests) {
+    throw "-RecordDependencyDigests with -SkipSourceProvenance would record a tree of unknown origin as the reviewed baseline. Build the install with Native~\build_openusd.py instead."
+}
+$ProvenanceScript = Join-Path $NativeDir "verify_upstream_sources.py"
+if ($SkipSourceProvenance) {
+    Write-Warning "-SkipSourceProvenance. This payload has no chain back to a published OpenUSD revision."
+    Write-Warning "Do not commit or ship what this build produces."
+} else {
+    & python "$ProvenanceScript" --platform windows --check-stamp "$OpenUsdRoot"
+    if ($LASTEXITCODE -ne 0) {
+        throw "Refusing to build against an OpenUSD install of unverified origin."
+    }
+}
+
 New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+
+# Always passed, ON or OFF: CMake drops it from the cache after each configure, so the skip applies
+# to this build only.
+$SkipProvenanceValue = if ($SkipSourceProvenance) { "ON" } else { "OFF" }
 
 & $CMakeCommand.Source `
     -S $NativeDir `
@@ -58,9 +85,16 @@ New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
     -G $Generator `
     -A x64 `
     -DOPENUSD_ROOT="$OpenUsdRoot" `
-    -DCMAKE_INSTALL_PREFIX="$InstallDir"
+    -DCMAKE_INSTALL_PREFIX="$InstallDir" `
+    -DUSD_TOOLKIT_SKIP_SOURCE_PROVENANCE="$SkipProvenanceValue"
+if ($LASTEXITCODE -ne 0) {
+    throw "CMake configure failed."
+}
 
 & $CMakeCommand.Source --build $BuildDir --config $Configuration --target install --parallel
+if ($LASTEXITCODE -ne 0) {
+    throw "CMake build failed."
+}
 
 $OpenUsdBin = Join-Path $OpenUsdRoot "bin"
 $OpenUsdLib = Join-Path $OpenUsdRoot "lib"
@@ -115,24 +149,6 @@ function Copy-RuntimeDirectory {
     New-Item -ItemType Directory -Force -Path $Destination | Out-Null
     Get-ChildItem $SourceDir -Force | ForEach-Object {
         Copy-Item $_.FullName -Destination $Destination -Recurse -Force
-    }
-}
-
-# --- Source provenance gate (SECURITY-282834, trust chain) ---------------------------------
-# The digest gate below establishes that the tree being copied is the tree that was reviewed. It
-# cannot establish where that tree came from -- by this point OpenUSD has already been fetched and
-# compiled. That earlier link is what the stamp carries: verify_upstream_sources.py writes it into
-# the install root only after checking the clone against the commit pinned in
-# Native~/dependency-sources/windows.tsv, so requiring it here is what ties the payload to a
-# published revision rather than to whatever happened to be on this machine.
-$ProvenanceScript = Join-Path $NativeDir "verify_upstream_sources.py"
-if ($SkipSourceProvenance) {
-    Write-Warning "-SkipSourceProvenance. This payload has no chain back to a published OpenUSD revision."
-    Write-Warning "Do not commit or ship what this build produces."
-} else {
-    & python "$ProvenanceScript" --platform windows --check-stamp "$OpenUsdRoot"
-    if ($LASTEXITCODE -ne 0) {
-        throw "Refusing to build against an OpenUSD install of unverified origin."
     }
 }
 

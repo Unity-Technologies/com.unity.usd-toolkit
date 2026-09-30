@@ -49,7 +49,8 @@ Options:
   --skip-source-provenance   Build against an OpenUSD install that was never verified against
                              Native~/dependency-sources/macos.tsv. For local experiments only:
                              the resulting payload has no chain back to a published revision
-                             and must not be committed or shipped.
+                             and must not be committed or shipped; the build marks the
+                             payload so generate_native_hashes.py refuses it.
   -h, --help                 Show this help.
 USAGE
 }
@@ -159,10 +160,14 @@ if [[ ! -f "${USD_STAGE_HEADER}" ]]; then
     exit 1
 fi
 
-USD_MONOLITHIC_DYLIB="${OPENUSD_ROOT}/lib/libusd_ms.dylib"
-if [[ ! -f "${USD_MONOLITHIC_DYLIB}" && -f "${OPENUSD_ROOT}/build/OpenUSD-dev/libusd_ms.dylib" ]]; then
-    mkdir -p "${OPENUSD_ROOT}/lib"
-    cp -p "${OPENUSD_ROOT}/build/OpenUSD-dev/libusd_ms.dylib" "${USD_MONOLITHIC_DYLIB}"
+# Nothing below writes into ${OPENUSD_ROOT}. Its stamp records the digest of every file this
+# script copies out of it, so an install this script had modified -- as it used to, by re-signing
+# libusd_ms.dylib in place -- would fail its own provenance check on the next build. Signing
+# happens on the copies in the payload, after install_name_tool, where it has to happen anyway.
+if [[ ${SKIP_SOURCE_PROVENANCE} -eq 1 && ${RECORD_DEPENDENCY_DIGESTS} -eq 1 ]]; then
+    echo "--record-dependency-digests with --skip-source-provenance would record a tree of unknown" >&2
+    echo "origin as the reviewed baseline. Build the install with Native~/build_openusd.py instead." >&2
+    exit 2
 fi
 
 # Fail rather than fall back to an unattributable signature: a silent ad-hoc default is how
@@ -179,14 +184,6 @@ if [[ ${SKIP_CODESIGN} -eq 0 ]]; then
     if [[ -z "${CODESIGN_ID}" ]]; then
         CODESIGN_ID="-"
         echo "WARNING: signing ad-hoc. The result carries no publisher identity and must not be released."
-        CODESIGN_TIMESTAMP_ARGS=(--timestamp=none)
-    else
-        # A real identity gets a secure timestamp, so the signature outlives the certificate.
-        CODESIGN_TIMESTAMP_ARGS=(--timestamp)
-    fi
-
-    if [[ -f "${USD_MONOLITHIC_DYLIB}" ]] && command -v codesign >/dev/null 2>&1; then
-        codesign --force --sign "${CODESIGN_ID}" "${CODESIGN_TIMESTAMP_ARGS[@]}" "${USD_MONOLITHIC_DYLIB}" >/dev/null
     fi
 fi
 
@@ -194,9 +191,10 @@ fi
 # The digest gate below establishes that the tree being copied is the tree that was reviewed. It
 # cannot establish where that tree came from -- by this point OpenUSD has already been fetched and
 # compiled. That earlier link is what the stamp carries: verify_upstream_sources.py writes it into
-# the install root only after checking the clone against the commit pinned in
+# the install root only after checking the clone and the TBB archive against
 # Native~/dependency-sources/macos.tsv, so requiring it here is what ties the payload to a
-# published revision rather than to whatever happened to be on this machine.
+# published revision rather than to whatever happened to be on this machine. Native~/CMakeLists.txt
+# checks it again; this copy fails before the digest gate, with the clearer message.
 if [[ ${SKIP_SOURCE_PROVENANCE} -eq 1 ]]; then
     echo "WARNING: --skip-source-provenance. This payload has no chain back to a published" >&2
     echo "         OpenUSD revision. Do not commit or ship what this build produces." >&2
@@ -246,6 +244,14 @@ CMAKE_CONFIGURE_ARGS=(
     -DOPENUSD_ROOT="${OPENUSD_ROOT}"
     -DCMAKE_INSTALL_PREFIX="${INSTALL_DIR}"
 )
+
+# Always passed, ON or OFF: CMake drops it from the cache after each configure, so leaving it out
+# is also OFF -- but saying so here keeps the two gates visibly in step.
+if [[ ${SKIP_SOURCE_PROVENANCE} -eq 1 ]]; then
+    CMAKE_CONFIGURE_ARGS+=(-DUSD_TOOLKIT_SKIP_SOURCE_PROVENANCE=ON)
+else
+    CMAKE_CONFIGURE_ARGS+=(-DUSD_TOOLKIT_SKIP_SOURCE_PROVENANCE=OFF)
+fi
 
 if [[ -n "${CMAKE_ARCHS}" ]]; then
     CMAKE_CONFIGURE_ARGS+=("-DCMAKE_OSX_ARCHITECTURES=${CMAKE_ARCHS}")

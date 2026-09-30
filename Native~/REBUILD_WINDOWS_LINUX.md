@@ -10,9 +10,17 @@ already built and verified; do not touch `Runtime/Plugins/macOS/`.
 One machine per platform: Windows needs Visual Studio, Linux needs a glibc old enough for your
 target distros. Nothing here is cross-compiled.
 
+> **Rebuilding for the LZ4 patch (branch `security/lz4-1.10.0`)?** Start from
+> `Native~/HANDOFF_LZ4_WINDOWS_LINUX.md`. It is the task, in order, for both machines, with the
+> commands, the expected output and the pitfalls; it points back here for the gates.
+
 ---
 
 ## 1. Why this is needed
+
+> **Superseded status (2026-09-30):** both platforms are now ABI 5 and carry the LZ4 1.10.0
+> OpenUSD patch — see `Native~/HANDOFF_LZ4_WINDOWS_LINUX.md` §0. The table below is the state
+> *before* those rebuilds, kept for what each feature row means.
 
 The two platforms are at different points, so read the column that applies to you:
 
@@ -106,15 +114,15 @@ Linux:
 git clone https://github.cds.internal.unity3d.com/unity/com.unity.usd-toolkit.git
 cd com.unity.usd-toolkit
 git lfs install
-git checkout security_fix                 # or the branch/tag carrying the SECURITY-282834 fixes
+git checkout security/lz4-1.10.0          # or the branch/tag carrying the SECURITY-282834 fixes
 git lfs pull
 ```
 
-**Gate 1 — you have the right source.** All nine must be true:
+**Gate 1 — you have the right source.** All eleven must be true:
 
 ```bash
 grep -c 'kApiVersion = 5'            Native~/src/UsdExporter.cpp   # 1
-grep -c 'RUSD_MAX_UV_SETS'           Native~/include/unity_usd_toolkit_native.h  # >= 3
+grep -c '#define RUSD_MAX_UV_SETS 3' Native~/include/unity_usd_toolkit_native.h  # 1
 grep -c 'RUsd_GetImportMaterialOpacity' Native~/include/unity_usd_toolkit_native.h  # >= 1
 grep -c 'RUsd_CreateUsdzPackage'     Native~/include/unity_usd_toolkit_native.h  # >= 1
 grep -c 'VtValueHoldsType'           Native~/src/UsdExporter.cpp   # >= 3
@@ -128,11 +136,17 @@ grep -cE 'IsHolding<(Sdf|Gf|Vt|Tf|Usd)'  Native~/src/UsdExporter.cpp   # must be
 grep -c 'int64_t cursor'                   Native~/src/UsdExporter.cpp   # 1  (topology overflow)
 grep -c 'IsResolvedAssetInsideStageRoot'   Native~/src/UsdExporter.cpp   # >= 2 (asset confinement)
 grep -c 'MinimumApiVersion = 5'            Runtime/Native/UsdNative.cs   # 1  (ABI gate tightened)
+
+# SECURITY-282834 — the OpenUSD patch (LZ4 1.10.0 + TfFastCompression bounds). It changes OpenUSD,
+# not this source, so check it is pinned for your platform; Gate 10's lz4_bounds_test then proves
+# it reached the binary.
+grep -c '^OpenUSD-patch'                  Native~/dependency-sources/<platform>.tsv   # 1
+grep -c 'LZ4_VERSION_MINOR   10'           Native~/patches/openusd-26.05-lz4-1.10.0.patch   # 1
 ```
 
 If the `IsHolding<(Sdf|Gf|Vt|Tf|Usd)` count is non-zero, **stop**: you are on the wrong revision
 (see §2). If any of the
-three SECURITY-282834 lines is 0, **stop** — you would ship a payload missing the security
+SECURITY-282834 lines is 0, **stop** — you would ship a payload missing the security
 fixes, and Gate 9's `security_test` is the only thing that would catch it, after the build.
 
 ## 5. Build OpenUSD (once per machine)
@@ -142,13 +156,35 @@ Monolithic, no Python, no imaging. **All three platforms use the public `v26.05`
 every payload is reproducible from a published commit (SECURITY-282834). Do not substitute a
 different tag: matching versions across platforms is what makes the provenance claim checkable.
 
-**The clone and the download are gated.** `Native~/dependency-sources/<platform>.tsv` pins the
-OpenUSD commit and the TBB archive each payload is built from, and
-`Native~/verify_upstream_sources.py` checks a build against it. Run it before `build_usd.py` and
-again afterwards to stamp the install root — `build_macos.sh` and `build_windows.ps1` refuse an
-install root without that stamp. The download half is not belt and braces: `build_usd.py` passes
-`expectedSHA256` for Boost and for nothing else, so TBB arrives over HTTPS with no integrity
-check of its own.
+**Build it with `Native~/build_openusd.py`, not with `build_usd.py` directly.**
+`Native~/dependency-sources/<platform>.tsv` pins the OpenUSD commit, the TBB archive and the Unity
+patch to OpenUSD each payload is built from. `build_usd.py` passes `expectedSHA256` for Boost and for nothing else, so run
+on its own it downloads TBB and compiles it before anything has looked at the archive — a check
+afterwards only reports what has already run (SECURITY-282834, CWE-494). `build_openusd.py` puts
+the check first:
+
+1. the clone is verified: the pinned commit, from the recorded remote, unmodified — and the Unity
+   patch `Native~/patches/openusd-26.05-lz4-1.10.0.patch` against its recorded SHA-256. The
+   patch is applied to a worktree of the pinned commit inside the install (`openusd-src`), never
+   to the clone. It replaces the LZ4 1.9.2 OpenUSD vendors with 1.10.0 and bounds-checks the
+   sizes OpenUSD passes to it (SECURITY-282834, CVE-2021-3520);
+2. every pinned archive is downloaded into the directory `build_usd.py` downloads into and checked
+   against its recorded SHA-256 — a mismatch stops here, before anything is built;
+3. `build_usd.py` runs with the recorded flags and finds the archive already there. Its downloads
+   go through an unreachable proxy, so if it tries to fetch anything else the build fails;
+4. afterwards the archives are re-checked, the download directory must hold nothing unpinned, the
+   clone must still be clean, and the worktree must still be the pinned commit plus exactly the
+   pinned patch;
+5. only then is the install stamped. The stamp records that the archives were checked before the
+   build, that the patch was applied, and the SHA-256 of every file a wrapper build copies out of
+   the install.
+
+The install directory must be new or empty: `build_usd.py` reuses an extracted archive or an
+installed dependency it finds there without looking at it. `build_macos.sh`, `build_windows.ps1`,
+`build_linux.sh` and `Native~/CMakeLists.txt` all refuse an install without a valid stamp, and
+re-hash its files, so an install changed after its build is refused too. Stamps written before
+this (version 1, by the old `verify_upstream_sources.py --stamp`, and version 2, from before the
+patch) are refused: rebuild the install.
 
 **Windows** (x64 Native Tools prompt):
 
@@ -157,57 +193,54 @@ git clone https://github.com/PixarAnimationStudios/OpenUSD.git C:\Dev\OpenUSD
 cd C:\Dev\OpenUSD
 git checkout v26.05
 
-:: The clone is the pinned commit, unmodified, from the recorded remote.
-python <package>\Native~\verify_upstream_sources.py --platform windows ^
-  --openusd-src C:\Dev\OpenUSD
-
-python build_scripts\build_usd.py --build-variant release --build-monolithic ^
-  --no-python --no-imaging --no-usdview --no-examples --no-tutorials --no-tests ^
-  --no-materialx C:\USD\OpenUSD-26.05-win-x64
-
-:: What build_usd.py downloaded is the recorded archive, and the install root is stamped
-:: with that result so the wrapper build can require it.
-python <package>\Native~\verify_upstream_sources.py --platform windows ^
-  --archive C:\USD\OpenUSD-26.05-win-x64\src\tbb-2020.3-win.zip
-python <package>\Native~\verify_upstream_sources.py --platform windows ^
-  --openusd-src C:\Dev\OpenUSD --require-scan --stamp C:\USD\OpenUSD-26.05-win-x64
+python <package>\Native~\build_openusd.py --platform windows ^
+  --openusd-src C:\Dev\OpenUSD --install C:\USD\OpenUSD-26.05-win-x64 --require-scan
 ```
-
-Drop `--require-scan` for local experiments and the stamp records that it was dropped, which
-makes the wrapper build warn. A payload that will be committed needs it: it checks that
-`Native~/security-scans/` holds a record for every pinned version, which is the review's
-"scan the source before compiling it" requirement. See that directory's README.
 
 **Linux:**
 
 Build from a path that contains **no user name** — `__FILE__` and `__PRETTY_FUNCTION__` bake the
 absolute source and install paths into `libusd_ms.so` (536 strings), so a build under `$HOME`
 ships the developer's user name to everyone who unpacks the package. Not `/tmp` either: the path
-is permanent in the binary and `/tmp` is not. `/opt/usd-26.05` is what the shipped payload used:
+is permanent in the binary and `/tmp` is not. `/opt/usd-26.05` is what the shipped payload used,
+and `build_openusd.py` refuses a path under the home directory or `/tmp` on Linux:
 
 ```bash
 sudo mkdir -p /opt/usd-26.05 && sudo chown "$(id -u):$(id -g)" /opt/usd-26.05
 git clone --branch v26.05 \
   https://github.com/PixarAnimationStudios/OpenUSD.git /opt/usd-26.05/src
 cd /opt/usd-26.05/src && git log -1 --format=%h        # 2095faf
-python3 <package>/Native~/verify_upstream_sources.py --platform linux \
-  --openusd-src /opt/usd-26.05/src
 
-python3 build_scripts/build_usd.py --build-variant release --build-monolithic \
-  --no-python --no-imaging --no-usdview --no-examples --no-tutorials --no-tests \
-  --no-materialx /opt/usd-26.05/install
+python3 <package>/Native~/build_openusd.py --platform linux \
+  --openusd-src /opt/usd-26.05/src --install /opt/usd-26.05/install --require-scan
 strings -a /opt/usd-26.05/install/lib/libusd_ms.so | grep -c '/home/'   # must be 0
-
-python3 <package>/Native~/verify_upstream_sources.py --platform linux \
-  --archive /opt/usd-26.05/install/src/v2020.3.1.zip
-python3 <package>/Native~/verify_upstream_sources.py --platform linux \
-  --openusd-src /opt/usd-26.05/src --require-scan --stamp /opt/usd-26.05/install
 ```
 
-The Linux wrapper is built with plain CMake (next section), not through a script, so nothing
-enforces the stamp for you here — the two commands above are the gate. `build_linux.sh` is left
-out of this on purpose: it targets the packman + Python layout, whose OpenUSD is not the pinned
-v26.05 at all.
+**macOS:**
+
+```bash
+python3 <package>/Native~/build_openusd.py --platform macos \
+  --openusd-src /Users/Shared/usd-26.05/src --install /Users/Shared/usd-26.05/install \
+  --build-target universal --require-scan
+```
+
+It sets `MACOSX_DEPLOYMENT_TARGET=12.0` (`--deployment-target`), the value `build_macos.sh` builds
+the wrapper with. The same no-user-name rule applies as on Linux — clang bakes the path into
+`libusd_ms.dylib` 1134 times — so the script refuses an install under the home directory or `/tmp`;
+`/Users/Shared/usd-26.05` is what the shipped payload uses. (The OpenUSD clone may live anywhere:
+with the patch, what is compiled is the worktree inside the install.)
+
+Drop `--require-scan` for local experiments and the stamp records that it was dropped, which
+makes the wrapper build warn. A payload that will be committed needs it: it checks that
+`Native~/security-scans/` holds a record for every pinned version, which is the review's
+"scan the source before compiling it" requirement. See that directory's README.
+
+If the build machine cannot reach GitHub directly, download the archive the record pins another
+way and pass it with `--archive <file>`; it is checked against the record exactly as a download
+would be. GitHub generates source archives on demand and has changed their compression before, so
+a mismatch on a `github-archive` row is not by itself proof of tampering — but it still stops the
+build, and the record is re-pinned deliberately, in review, after comparing the contents with the
+pinned commit.
 
 **Gate 2 — the right OpenUSD, from the pinned source.** `PXR_VERSION` must read `2605`, the
 monolithic library must exist, and the install root must carry the provenance stamp:
@@ -220,8 +253,8 @@ python3 Native~/verify_upstream_sources.py --platform <platform> \
 ```
 
 A version number says which release this claims to be; the stamp says which revision it was
-actually built from. Only the second is evidence, which is why the wrapper build scripts check
-it and not `PXR_VERSION`.
+actually built from and what the install held when it was. Only the second is evidence, which is
+why the wrapper build scripts and `Native~/CMakeLists.txt` check it and not `PXR_VERSION`.
 
 ## 6. Build the wrapper — clean, every time
 
@@ -243,39 +276,35 @@ another package's OpenUSD (e.g. `com.unity.pixyz.sdk-plus`), which otherwise win
 causes `DllNotFound` / `PROC_NOT_FOUND`. Expect the line
 `Renamed OpenUSD monolithic usd_ms.dll -> usd_rt.dll ...` in the output.
 
-**Linux** — use the CMake path below, **not** `build_linux.sh`. That script targets the
-packman + Python layout (Isaac/Omniverse) and ships a much larger closure (libpython, boost).
+**Linux:**
 
 ```bash
-rm -rf Native~/build~
-cmake -S Native~ -B Native~/build~ -DCMAKE_BUILD_TYPE=Release \
-  -DOPENUSD_ROOT=/opt/usd-26.05/install
-cmake --build Native~/build~ -j
+Native~/build_linux.sh --openusd-root /opt/usd-26.05/install
 ```
 
-`Native~/CMakeLists.txt` adds `-ffile-prefix-map` for the package root (`/usd-toolkit`) and
-`OPENUSD_ROOT` (`/openusd`), so the wrapper's own strings are neutral wherever the clone lives;
-after assembling, `strings -a <each .so> | grep -c '/home/'` must print `0` for all three files.
-
-Then assemble the payload under `Runtime/Plugins/x86_64/Linux/` exactly in this shape (match the
-committed layout — the managed layer points `PXR_PLUGINPATH_NAME` at `lib/usd` and `plugin/usd`):
+The script used to be a list of manual commands here, which left the provenance check to whoever
+ran them; it now enforces the same gates as the other two platforms. It checks the stamp and the
+dependency digests, deletes and reconfigures `Native~/build~/linux-x64` (clean every time), builds
+with CMake, and assembles the payload under `Runtime/Plugins/x86_64/Linux/` in the committed shape
+— the managed layer points `PXR_PLUGINPATH_NAME` at `lib/usd` and `plugin/usd`:
 
 ```
 libUnityUSDToolkitNative.so        rpath $ORIGIN:$ORIGIN/lib
 lib/libusd_ms.so                   rpath $ORIGIN
 lib/libtbb.so.2
-lib/usd/**/plugInfo.json           (drop usd/resources/codegenTemplates)
-plugin/usd/**/plugInfo.json
+lib/usd/**                         (without usd/resources/codegenTemplates)
+plugin/usd/**
 ```
 
-```bash
-patchelf --set-rpath '$ORIGIN:$ORIGIN/lib' Runtime/Plugins/x86_64/Linux/libUnityUSDToolkitNative.so
-patchelf --set-rpath '$ORIGIN'             Runtime/Plugins/x86_64/Linux/lib/libusd_ms.so
-strip --strip-unneeded Runtime/Plugins/x86_64/Linux/libUnityUSDToolkitNative.so \
-                       Runtime/Plugins/x86_64/Linux/lib/libusd_ms.so \
-                       Runtime/Plugins/x86_64/Linux/lib/libtbb.so.2
-ldd Runtime/Plugins/x86_64/Linux/libUnityUSDToolkitNative.so   # no "not found", no build paths
-```
+It then sets those rpaths with `patchelf`, runs `strip --strip-unneeded` on the three binaries, and
+fails if `ldd` reports anything "not found" or if any of the three contains a `/home/` path.
+`Native~/CMakeLists.txt` adds `-ffile-prefix-map` for the package root (`/usd-toolkit`) and
+`OPENUSD_ROOT` (`/openusd`), so the wrapper's own strings are neutral wherever the clone lives;
+a `/home/` hit means OpenUSD itself was built under a home directory. Unity `.meta` files in the
+payload are left in place.
+
+It no longer builds the packman + Python layout (Isaac/Omniverse) it once targeted; that layout
+was never what the package shipped, and its OpenUSD is not the pinned v26.05.
 
 **Gate 3 — the build produced the binary.** Exit code 0 and:
 
@@ -423,7 +452,7 @@ Unity sets it itself at runtime, so this is a harness-only requirement.
 
    | check | expected |
    | --- | --- |
-   | meshes / vertices / triangles | 23 / 1385 / 880 |
+   | meshes / vertices / triangles | 23 / 1760 / 880 (McUsd authors 1760 points with no sharing; an earlier 1385 here was wrong) |
    | meshes with per-vertex UVs | **23 / 23** (was 7/23 before the fix) |
    | meshes with per-vertex normals | **23 / 23** (was 0/23) |
    | materials with `_BaseMap` | 23 / 23 |
@@ -498,6 +527,11 @@ result — the diff is what makes a substitution visible in review:
     -SigningCertificateThumbprint <thumbprint>
 ```
 
+A first record is trust-on-first-use, so recording requires the tree to carry a valid stamp from
+`build_openusd.py` — the verifier's `--record` refuses anything else, and the build scripts refuse
+`--record-dependency-digests` together with `--skip-source-provenance`. What becomes the reviewed
+baseline is therefore always a tree whose origin was checked.
+
 ### Recording without a build
 
 A record can also be taken straight from a dependency tree, with no compile and no change to the
@@ -522,7 +556,7 @@ rebuilt, so `Runtime/Native/NativeRuntimeHashes.g.cs` and the SBOM stay as they 
 
 Swap `--record` for `--verify` to check a tree against the committed record the same way a build
 would. The scan rules live in `SCAN_RULES` in the verifier and mirror what each build copies —
-for Linux that is the monolithic assembly in section 6, **not** `build_linux.sh`. They were
+`build_linux.sh` verifies with `--scan`, so for Linux they are the build's own list. They were
 checked against the macOS record, which they reproduce exactly (89/89 files, same digests, no
 build); the Windows rules are structurally identical but have not been run against a real tree,
 so read the file count in the output before committing. If the rules ever drift from what a build
@@ -547,6 +581,11 @@ its own payload:
 python3 Native~/generate_native_hashes.py   # macOS or Linux only -- see below
 git diff --stat Runtime/Native/NativeRuntimeHashes.g.cs   # your platform's entries only
 ```
+
+A payload built with the provenance gate skipped carries a `.unverified-build` marker in its
+platform root, written by the CMake install step, and the generator refuses to write a manifest
+while any platform has one — so does CI, which runs the same script. The next build that passes
+the gate removes the marker.
 
 **Generate the manifest on macOS or Linux, never on Windows** — even for a Windows rebuild. The
 digests are of the bytes on disk, and a Windows checkout has a history of not holding the bytes
@@ -582,6 +621,17 @@ Also re-run the security regression test against the new payload:
 cd Native~/Tests~   # build per the header comment in security_test.cpp
 ./security_test security_fixture.usda        # must print PASS (9 checks)
 ```
+
+and the LZ4 bounds test, which proves the OpenUSD patch is in the shipped `libusd_ms` — the
+wrapper tests above cannot, because the patch changes OpenUSD, not the wrapper:
+
+```bash
+cd Native~/Tests~   # build per the header comment in lz4_bounds_test.cpp
+./lz4_bounds_test                            # must print PASS (8 cases)
+```
+
+Against a payload built without the patch it fails four cases, three of them by faulting on the
+guard page placed after the hostile buffer.
 
 ## 10. Commit and push
 

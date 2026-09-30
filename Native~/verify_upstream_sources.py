@@ -16,24 +16,27 @@ Under the flags this package builds OpenUSD with
 `build_usd.py` resolves exactly one downloaded dependency, TBB; everything else in the payload is
 compiled from the OpenUSD tree itself, including the four libraries OpenUSD vendors in
 (`pxr/base/tf/pxrCLI11`, `pxrDoubleConversion`, `pxrLZ4`, `pxrTslRobinMap`). So the whole payload
-is pinned by two things per platform, and that is what the records in Native~/dependency-sources
-hold: the OpenUSD commit, and the TBB archive.
+is pinned by three things per platform, and that is what the records in Native~/dependency-sources
+hold: the OpenUSD commit, the TBB archive, and the Unity patch applied to that commit before it is
+built (Native~/patches -- it replaces the vendored LZ4 1.9.2 with 1.10.0, SECURITY-282834).
 
-    # before running build_usd.py: the clone is the pinned revision, unmodified, from the
-    # recorded remote
+    # the clone is the pinned revision, unmodified, from the recorded remote
     python3 Native~/verify_upstream_sources.py --platform linux --openusd-src /opt/usd-26.05/src
 
-    # the archive build_usd.py downloaded is the recorded one
+    # an archive is the recorded one
     python3 Native~/verify_upstream_sources.py --platform windows --archive ~/Downloads/tbb-2020.3-win.zip
 
-    # after OpenUSD is installed: leave a stamp the wrapper build can require
-    python3 Native~/verify_upstream_sources.py --platform macos --openusd-src /Users/Shared/usd-26.05/src \
-        --stamp /Users/Shared/usd-26.05/install
-
-    # what the wrapper build scripts call
+    # what the wrapper build scripts and Native~/CMakeLists.txt call
     python3 Native~/verify_upstream_sources.py --platform macos --check-stamp <openusd-root>
 
     python3 Native~/verify_upstream_sources.py --platform windows --list
+
+The stamp itself is written only by Native~/build_openusd.py, which is the one way to build the
+OpenUSD install a payload links against. That script checks every recorded archive against its
+pin *before* `build_usd.py` runs -- `build_usd.py` pins Boost and nothing else, so TBB would
+otherwise be unpacked and compiled before anything looked at it -- and records the digest of every
+file in the finished install. `--check-stamp` re-hashes those files, so a stamp says something
+about the tree it sits in rather than only about the run that wrote it.
 
 What this does NOT do: prove the pinned revision is free of malicious code. A pin makes the source
 identical for everyone who checks it; it says nothing about what the source contains. That is the
@@ -58,10 +61,19 @@ import sys
 import tempfile
 from datetime import datetime, timezone
 
+import verify_dependency_digests
+
 REPO = pathlib.Path(__file__).resolve().parent.parent
 RECORD_DIR = REPO / "Native~" / "dependency-sources"
 SCAN_DIR = REPO / "Native~" / "security-scans"
 STAMP_NAME = ".unity-usd-toolkit-source-provenance.json"
+# 1 recorded only which sources were checked. 2 added which archives were checked before
+# build_usd.py ran and the digest of every file in the install. 3 adds which Unity patches were
+# applied to the pinned tree before the build, and is the only one accepted.
+STAMP_VERSION = 3
+# A row whose artifact is this pins a Unity patch to the pinned OpenUSD tree: `url` is the patch's
+# path in this repository, `sha256` its digest and `git_commit` the commit it applies to.
+PATCH_ARTIFACT = "patch"
 
 FIELDS = ("component", "version", "artifact", "url", "sha256", "git_commit", "evidence", "recorded")
 
@@ -183,8 +195,41 @@ def verify_archive(row: Row, path: pathlib.Path) -> bool:
     return True
 
 
+def git_rows(rows):
+    """The rows that pin a git revision."""
+    return [r for r in rows if r.sha256 == "-"]
+
+
+def patch_rows(rows):
+    """The rows that pin a Unity patch applied to the pinned tree."""
+    return [r for r in rows if r.artifact == PATCH_ARTIFACT]
+
+
+def patch_path(row: Row) -> pathlib.Path:
+    path = (REPO / row.url).resolve()
+    if not path.is_relative_to(REPO / "Native~" / "patches"):
+        sys.exit(f"{row.label}: a patch row must point into Native~/patches, not {row.url}.")
+    return path
+
+
+def verify_patch(row: Row) -> bool:
+    """The patch file in this repository is the one the record pins."""
+    path = patch_path(row)
+    if not path.is_file():
+        print(f"FAIL {row.label}: {row.url} is missing.")
+        return False
+    actual = sha256_of(path)
+    if actual != row.sha256:
+        print(f"FAIL {row.label}: {row.url} is {actual}")
+        print(f"     the record pins   {row.sha256}")
+        print("     A patch changes what is compiled; re-pin it deliberately, in review.")
+        return False
+    print(f"ok   {row.label}: {path.name} matches the recorded digest.")
+    return True
+
+
 def match_archive(rows, path: pathlib.Path, component):
-    candidates = [r for r in rows if r.sha256 != "-"]
+    candidates = archive_rows(rows)
     if component:
         candidates = [r for r in candidates if r.component.lower() == component.lower()]
     if len(candidates) == 1:
@@ -201,7 +246,9 @@ def scan_record(row: Row) -> pathlib.Path:
 
 def verify_scan(rows) -> bool:
     ok = True
-    for row in rows:
+    # A patch is scanned as part of the tree it is applied to, so it needs no record of its own;
+    # the OpenUSD record has to say it covers the patched tree.
+    for row in [r for r in rows if r.artifact != PATCH_ARTIFACT]:
         path = scan_record(row)
         if path.is_file():
             print(f"ok   {row.label}: source scan recorded in {path.relative_to(REPO)}.")
@@ -213,10 +260,40 @@ def verify_scan(rows) -> bool:
     return ok
 
 
-def write_stamp(install_root: pathlib.Path, platform: str, rows, scans_verified: bool) -> None:
+def archive_rows(rows):
+    """The rows that pin a downloaded file."""
+    return [r for r in rows if r.sha256 != "-" and r.artifact != PATCH_ARTIFACT]
+
+
+def install_digests(install_root: pathlib.Path, platform: str) -> dict:
+    """Digest of every file a wrapper build copies out of this install, keyed by relative path.
+
+    The same enumeration verify_dependency_digests.py checks against the committed record, so the
+    stamp and the record describe one set of files: the stamp says this tree came out of a
+    verified build on this machine, the record says it is the tree that was reviewed.
+    """
+    # collect() resolves every file, so the root has to be resolved too or a path reached through a
+    # symlink (macOS /tmp, a mounted volume) would key the same file differently at stamp and check.
+    root = install_root.resolve()
+    return verify_dependency_digests.collect(root, verify_dependency_digests.scan(root, platform))
+
+
+def write_stamp(install_root: pathlib.Path, platform: str, rows, scans_verified: bool,
+                archives_verified: list, patches_applied: list) -> None:
+    """Called by build_openusd.py once build_usd.py has finished and every check has passed.
+
+    `archives_verified` lists the archive rows whose files were checked against their pin before
+    build_usd.py was allowed to run, and `patches_applied` the patch rows applied to the tree it
+    built. check_stamp requires every archive and every patch row to be in them.
+    """
     if not install_root.is_dir():
-        sys.exit(f"--stamp expects the OpenUSD install root; {install_root} is not a directory.")
+        sys.exit(f"The stamp needs the OpenUSD install root; {install_root} is not a directory.")
+    digests = install_digests(install_root, platform)
+    if not digests:
+        sys.exit(f"{install_root} holds none of the files a {platform} wrapper build copies; "
+                 "refusing to stamp an empty install.")
     payload = {
+        "stamp_version": STAMP_VERSION,
         "platform": platform,
         "verified_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
         "record": str(record_path(platform).relative_to(REPO)),
@@ -226,6 +303,11 @@ def write_stamp(install_root: pathlib.Path, platform: str, rows, scans_verified:
         "scans_verified": scans_verified,
         "sources": [{k: row[k] for k in ("component", "version", "url", "sha256", "git_commit")}
                     for row in rows],
+        "archives_verified_before_build": [{"component": r.component, "sha256": r.sha256}
+                                           for r in archives_verified],
+        "patches_applied": [{"component": r.component, "sha256": r.sha256}
+                            for r in patches_applied],
+        "install_digests": digests,
     }
     # The directory comes from the command line; the file name never does. A symlink planted at
     # the stamp's path would otherwise redirect this write wherever it points, so it is refused,
@@ -237,7 +319,7 @@ def write_stamp(install_root: pathlib.Path, platform: str, rows, scans_verified:
     handle, temporary = tempfile.mkstemp(prefix=f"{STAMP_NAME}.", suffix=".tmp", dir=install_root)
     try:
         with os.fdopen(handle, "w", encoding="utf-8") as stream:
-            stream.write(json.dumps(payload, indent=2) + "\n")
+            stream.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
         os.replace(temporary, stamp)
     except BaseException:
         try:
@@ -245,32 +327,94 @@ def write_stamp(install_root: pathlib.Path, platform: str, rows, scans_verified:
         except OSError:
             pass
         raise
-    print(f"ok   wrote {stamp}")
+    print(f"ok   wrote {stamp} ({len(digests)} install files recorded)")
+
+
+def rebuild_hint(platform: str, install_root: pathlib.Path) -> None:
+    print("     Build the install with the script that writes the stamp:")
+    print(f"       python3 Native~/build_openusd.py --platform {platform} \\")
+    print(f"           --openusd-src <clone> --install {install_root}")
 
 
 def check_stamp(install_root: pathlib.Path, platform: str, rows) -> bool:
     path = install_root / STAMP_NAME
-    if not path.is_file():
+    if path.is_symlink() or not path.is_file():
         print(f"FAIL {install_root} carries no source-provenance stamp ({STAMP_NAME}).")
         print("     This OpenUSD install was not verified against Native~/dependency-sources, so the")
-        print("     payload built from it would have no chain back to a published revision. Run:")
-        print(f"       python3 Native~/verify_upstream_sources.py --platform {platform} \\")
-        print(f"           --openusd-src <clone> --stamp {install_root}")
+        print("     payload built from it would have no chain back to a published revision.")
+        rebuild_hint(platform, install_root)
         return False
     try:
         stamped = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         print(f"FAIL {path} is not readable JSON: {exc}")
+        return False
+    if not isinstance(stamped, dict):
+        print(f"FAIL {path} is not a stamp.")
+        return False
+
+    if stamped.get("stamp_version") != STAMP_VERSION:
+        print(f"FAIL {path} is a version {stamped.get('stamp_version', 1)} stamp; version "
+              f"{STAMP_VERSION} is required.")
+        print("     Earlier stamps did not record whether TBB was checked before build_usd.py compiled")
+        print("     it, which patches the tree carried, or what the install contained, so they cannot")
+        print("     vouch for this tree.")
+        rebuild_hint(platform, install_root)
         return False
 
     expected = {(r.component, r.version, r.git_commit, r.sha256) for r in rows}
     found = {(s.get("component"), s.get("version"), s.get("git_commit"), s.get("sha256"))
-             for s in stamped.get("sources", [])}
+             for s in stamped.get("sources", []) if isinstance(s, dict)}
     if stamped.get("platform") != platform or expected != found:
         print(f"FAIL {path} was written for a different source record than {record_path(platform).name}.")
-        print("     Re-verify and re-stamp, or the payload and the record disagree about its origin.")
+        print("     Rebuild and re-stamp, or the payload and the record disagree about its origin.")
         return False
-    print(f"ok   {install_root.name}: source provenance stamped {stamped.get('verified_at')}.")
+
+    prebuilt = {(a.get("component"), a.get("sha256"))
+                for a in stamped.get("archives_verified_before_build", []) if isinstance(a, dict)}
+    unchecked = [r for r in archive_rows(rows) if (r.component, r.sha256) not in prebuilt]
+    if unchecked:
+        for row in unchecked:
+            print(f"FAIL {row.label}: the stamp does not say this archive was checked before build_usd.py")
+            print("     compiled it. Checking afterwards is too late: the archive's build logic has")
+            print("     already run and its output is already linked in.")
+        rebuild_hint(platform, install_root)
+        return False
+
+    applied = {(a.get("component"), a.get("sha256"))
+               for a in stamped.get("patches_applied", []) if isinstance(a, dict)}
+    missing_patches = [r for r in patch_rows(rows) if (r.component, r.sha256) not in applied]
+    if missing_patches:
+        for row in missing_patches:
+            print(f"FAIL {row.label}: the stamp does not say {row.url} was applied before the build.")
+        rebuild_hint(platform, install_root)
+        return False
+
+    recorded = stamped.get("install_digests")
+    if not isinstance(recorded, dict) or not recorded:
+        print(f"FAIL {path} records no install digests.")
+        return False
+    current = install_digests(install_root, platform)
+    changed = sorted(k for k in current if k in recorded and recorded[k] != current[k])
+    added = sorted(k for k in current if k not in recorded)
+    missing = sorted(k for k in recorded if k not in current)
+    if changed or added or missing:
+        print(f"FAIL {install_root} no longer holds the tree that was stamped:")
+        for key in changed[:20]:
+            print(f"     changed:  {key}")
+        for key in added[:20]:
+            print(f"     added:    {key}")
+        for key in missing[:20]:
+            print(f"     missing:  {key}")
+        extra = len(changed) + len(added) + len(missing) - 60
+        if extra > 0:
+            print(f"     ... and up to {extra} more")
+        print("     Something modified the install after its verified build. Rebuild it rather than")
+        print("     re-stamping it: the stamp is only evidence if it describes what the build produced.")
+        return False
+
+    print(f"ok   {install_root.name}: source provenance stamped {stamped.get('verified_at')}, "
+          f"{len(current)} install files unchanged since.")
     if not stamped.get("scans_verified"):
         print("WARN this install root was verified without --require-scan, so nothing here says the")
         print("     upstream source was scanned before it was compiled. Fine for local work; a")
@@ -286,14 +430,23 @@ def main() -> int:
     parser.add_argument("--archive", type=pathlib.Path,
                         help="Downloaded dependency archive to verify against its recorded digest.")
     parser.add_argument("--component", help="Disambiguate --archive when the record has several.")
-    parser.add_argument("--stamp", type=pathlib.Path, metavar="INSTALL_ROOT",
-                        help="Write the verification result into an OpenUSD install root.")
+    # Kept only to explain where it went: a stamp written after build_usd.py has already
+    # compiled an unchecked archive would vouch for exactly the build it cannot vouch for.
+    parser.add_argument("--stamp", type=pathlib.Path, help=argparse.SUPPRESS)
     parser.add_argument("--check-stamp", type=pathlib.Path, metavar="INSTALL_ROOT",
-                        help="Require a stamp written by --stamp for this platform's record.")
+                        help="Require the stamp Native~/build_openusd.py wrote into this install, "
+                             "and that the install still holds what it recorded.")
     parser.add_argument("--require-scan", action="store_true",
                         help="Also require a Native~/security-scans record for every pinned version.")
     parser.add_argument("--list", action="store_true", help="Print the record and exit.")
     args = parser.parse_args()
+
+    if args.stamp:
+        print("--stamp is gone. The stamp is written by Native~/build_openusd.py, which checks every")
+        print("recorded archive before build_usd.py runs rather than after it has compiled them:")
+        print(f"    python3 Native~/build_openusd.py --platform {args.platform} "
+              f"--openusd-src <clone> --install {args.stamp}")
+        return 2
 
     rows = load(args.platform)
 
@@ -301,6 +454,8 @@ def main() -> int:
         width = max(len(r.label) for r in rows)
         for row in rows:
             pin = row.git_commit if row.sha256 == "-" else f"sha256:{row.sha256}"
+            if row.artifact == PATCH_ARTIFACT:
+                pin += f" onto {row.git_commit[:12]}"
             print(f"{row.label:<{width}}  {row.artifact:<15} {pin}")
             print(f"{'':<{width}}  {row.url}")
             print(f"{'':<{width}}  upstream evidence: {row.evidence}")
@@ -312,11 +467,12 @@ def main() -> int:
     ok = True
 
     if args.openusd_src:
-        git_rows = [r for r in rows if r.sha256 == "-"]
-        if not git_rows:
+        if not git_rows(rows):
             sys.exit(f"The {args.platform} record pins no git source.")
-        for row in git_rows:
+        for row in git_rows(rows):
             ok &= verify_git(row, args.openusd_src)
+        for row in patch_rows(rows):
+            ok &= verify_patch(row)
 
     if args.archive:
         if not args.archive.is_file():
@@ -328,12 +484,6 @@ def main() -> int:
 
     if args.check_stamp:
         ok &= check_stamp(args.check_stamp, args.platform, rows)
-
-    if args.stamp:
-        if not ok:
-            print("Refusing to stamp an install root whose sources did not verify.")
-            return 1
-        write_stamp(args.stamp, args.platform, rows, args.require_scan)
 
     return 0 if ok else 1
 

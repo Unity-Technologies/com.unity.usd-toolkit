@@ -1009,10 +1009,19 @@ namespace Unity.USDToolkit
                         return true;
                     }
                 }
+                catch (Exception e) when (e is FileNotFoundException || e is DirectoryNotFoundException)
+                {
+                    // A component that does not exist is not a link, so move on to its parent,
+                    // which still gets checked. This is the normal case for a texture packaged in
+                    // a .usdz: "0/tex.png" names nothing on disk, and refusing it here blocked every
+                    // packaged texture before the resolver below could read it out of the package.
+                    // Nothing is read off disk for such a path -- File.Exists fails -- and the
+                    // native resolver it falls through to confines with TfRealPath on its own.
+                }
                 catch (Exception)
                 {
-                    // Cannot classify the component (missing, permissions, malformed): treat it
-                    // as unsafe rather than assume it is fine.
+                    // Cannot classify the component (permissions, malformed): treat it as unsafe
+                    // rather than assume it is fine.
                     return true;
                 }
 

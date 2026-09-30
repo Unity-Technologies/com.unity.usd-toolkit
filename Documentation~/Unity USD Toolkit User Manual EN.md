@@ -453,11 +453,14 @@ Most users should keep the payload that ships with the package. Rebuilding is on
 - macOS:
 
 ```bash
-./Build~/build_openusd_macos.sh --arch universal \
-  --install-dir "$PWD/Build~/OpenUSDInstall/macos-universal"
+python3 Native~/build_openusd.py --platform macos --openusd-src <OpenUSD v26.05 clone> \
+  --install /Users/Shared/usd-26.05/install --build-target universal --require-scan
 bash Native~/build_macos.sh \
-  --openusd-root "$PWD/Build~/OpenUSDInstall/macos-universal" --arch universal
+  --openusd-root /Users/Shared/usd-26.05/install --arch universal \
+  --codesign-id "<Developer ID>"
 ```
+
+Build OpenUSD with `Native~/build_openusd.py` on every platform, never with `build_usd.py` directly: it checks the pinned TBB archive before `build_usd.py` compiles it and stamps the install, and every wrapper build refuses an install without that stamp.
 
 After any rebuild you **must**:
 

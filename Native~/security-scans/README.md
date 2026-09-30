@@ -43,6 +43,11 @@ cycode -v scan -t sast repository /opt/usd-26.05/src        # the verified OpenU
 Scan the clone **after** `verify_upstream_sources.py --openusd-src` has passed on it. Scanning an
 unverified tree measures whatever happened to be on the machine.
 
+What is compiled is that commit **with the Unity patches in `Native~/patches` applied**, so scan
+the patched tree — the `openusd-src` worktree `build_openusd.py` leaves inside the install — and
+say so in the OpenUSD record, with the patch's SHA-256. A patch has no record of its own; it is
+covered by the record of the tree it is applied to.
+
 Two things are worth settling with AppSec (`#support-appsec-tools`) rather than assuming: whether
 a Cycode SAST run over third-party source is what they want here or whether a different tool is
 prescribed, and whether `ThirdPartyNotices~/sbom.cdx.json` can be ingested for CVE tracking, which
@@ -61,14 +66,14 @@ Enough for someone else to repeat the run and reach the same conclusion:
 
 ## Recording it in the build
 
-`verify_upstream_sources.py --require-scan` checks that a record exists for every pinned version,
-and `--stamp` writes whether it was used into the install root. A stamp written without it makes
-the wrapper build print a warning: the payload can still be produced, but nothing claims its
-source was scanned. A release build should use both:
+`build_openusd.py --require-scan` checks that a record exists for every pinned version before
+anything is built, and the stamp it writes into the install root records whether it was used. A
+stamp written without it makes the wrapper build print a warning: the payload can still be
+produced, but nothing claims its source was scanned. A release build should use it:
 
 ```bash
-python3 Native~/verify_upstream_sources.py --platform linux \
-  --openusd-src /opt/usd-26.05/src --require-scan --stamp /opt/usd-26.05/install
+python3 Native~/build_openusd.py --platform linux \
+  --openusd-src /opt/usd-26.05/src --install /opt/usd-26.05/install --require-scan
 ```
 
 A record existing is not the same as a scan passing — the gate checks that someone did the work
