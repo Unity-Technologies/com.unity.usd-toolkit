@@ -12,18 +12,33 @@ rather than an oversight. Each line is verifiable from the repository.
 **What holds today**
 
 - *Provenance of the third-party code.* All three payloads are built from the public OpenUSD
-  `v26.05` tag, commit `2095faf`, with identical flags, and the build environment of each platform
-  — OS, compiler, CMake, SDK, build root — is recorded per payload below. A third party can
-  rebuild from the same published source and compare what the binary contains.
+  `v26.05` tag, commit `2095faf`, with one Unity patch applied and identical flags, and the build
+  environment of each platform — OS, compiler, CMake, SDK, build root — is recorded per payload
+  below. A third party can rebuild from the same published source plus the patch and compare what
+  the binary contains.
+- *The one change to that source.* `Native~/patches/openusd-26.05-lz4-1.10.0.patch` replaces the
+  LZ4 1.9.2 OpenUSD vendors in `pxr/base/tf/pxrLZ4` with upstream 1.10.0 — Pixar's nine namespace
+  edits re-applied, no other line changed — and makes `TfFastCompression::DecompressFromBuffer`
+  check the chunk count and every size it passes to LZ4, all of which come from the `.usdc` being
+  read (SECURITY-282834, CVE-2021-3520: the crate reader's 64-bit section sizes reached LZ4 as
+  negative ints above `INT_MAX`). The patch is pinned by SHA-256 next to the commit it applies to,
+  applied to a worktree rather than the clone, and recorded in the SBOM's pedigree.
+  `Native~/Tests~/lz4_bounds_test.cpp` checks the shipped `libusd_ms` carries it. Upstream still
+  vendors 1.9.2.
 - *The pin is enforced, not just written down.* `Native~/dependency-sources/<platform>.tsv`
   records the OpenUSD commit and the TBB archive a build may use;
   `Native~/verify_upstream_sources.py` checks a clone against it — pinned commit, recorded remote,
-  unmodified worktree, a tag upstream has not moved — verifies the downloaded archive's digest,
-  and stamps the OpenUSD install root. `build_macos.sh` and `build_windows.ps1` refuse an install
-  root without that stamp. Under this package's flags TBB is the only dependency `build_usd.py`
-  downloads at all; everything else, the four vendored libraries included, comes from the OpenUSD
-  tree and is covered by the commit pin. Worth knowing when reading that: `build_usd.py` passes
-  `expectedSHA256` for Boost and for nothing else.
+  unmodified worktree, a tag upstream has not moved. Under this package's flags TBB is the only
+  dependency `build_usd.py` downloads at all; everything else, the four vendored libraries
+  included, comes from the OpenUSD tree and is covered by the commit pin. `build_usd.py` passes
+  `expectedSHA256` for Boost and for nothing else, so OpenUSD is built with
+  `Native~/build_openusd.py` instead of calling it directly: that script downloads the TBB archive
+  and checks it against the pin *before* `build_usd.py` runs, runs `build_usd.py` with downloads
+  blocked, and then stamps the install with that result and the SHA-256 of every file a wrapper
+  build copies out of it. `build_macos.sh`, `build_windows.ps1`, `build_linux.sh` and
+  `Native~/CMakeLists.txt` refuse an install whose stamp is missing or no longer matches its
+  files, and a wrapper built with that check skipped is marked so no manifest can be generated
+  for it.
 - *Inventory.* `ThirdPartyNotices~/sbom.cdx.json` (CycloneDX 1.6) lists every component in the
   payload with version, source and per-file SHA-256, including the four libraries OpenUSD vendors
   into the monolithic build.
@@ -127,9 +142,39 @@ source contains, which is step 1's scan — see `Native~/security-scans/`.
 - *Smaller items carried to the next rebuild of each platform:* the oneTBB build-host stamp (see
   below), and lowering the Linux floor to Ubuntu 22.04 by building in a 22.04 container.
 
-## Current state (2026-09-22)
+## Current state (2026-09-30)
 
 - **Package version:** `0.7.2-exp.1`
+- **LZ4 1.10.0 in all three payloads (SECURITY-282834, CVE-2021-3520), 2026-09-29/30.** Each
+  platform's OpenUSD was rebuilt from `v26.05` (`2095faf`) plus
+  `Native~/patches/openusd-26.05-lz4-1.10.0.patch` with `Native~/build_openusd.py` into a new
+  install (stamp v3, without `--require-scan`: no upstream scan is recorded yet — see *What is
+  still weak*), and the payload rebuilt against it with `--record-dependency-digests`.
+  `Native~/HANDOFF_LZ4_WINDOWS_LINUX.md` is the runbook and holds the full per-platform results.
+  - *macOS* — `/Users/Shared/usd-26.05-lz4/install`, toolchain as in the macOS entry below.
+    `macos.sha256`: 4 of 89 entries changed, the four compiled dylibs; wrapper byte-identical.
+  - *Windows* — `C:\USD\u2605lz4`; VS Build Tools 2022 (MSVC 14.44), Windows SDK 10.0.26100,
+    CMake 4.3.3, Python 3.11.9. `windows.sha256`: 20 of 91 changed — `lib/usd_ms.dll` plus 19
+    text files whose previous record was a CRLF checkout (now LF, equal to their blobs at
+    `2095faf`); `tbb_usdrt.dll` unchanged and still Intel-signed. Wrapper rebuilt.
+  - *Linux* — `/opt/usd-26.05-lz4/install`; Ubuntu 24.04.5, g++ 13.3.0, CMake 3.28.3, patchelf
+    0.17.2, Python 3.12.3. `linux.sha256`: 2 of 88 changed, `lib/libusd_ms.so` and
+    `lib/libtbb.so.2`; wrapper byte-identical. glibc floor unchanged (see the Linux entry).
+    First real run of the rewritten `build_linux.sh`; it needed no fix.
+  - *Gates, on every platform:* 1, 3, 4 (25 `RUsd_*`), 5, 6 (`import_uv_test` `API 5` PASS,
+    `usdz_test` PASS), `security_test` 9/9, and `lz4_bounds_test` **8/8 on the shipped
+    `libusd_ms`** (the pre-patch macOS payload failed 4, three by faulting). `Invalid chunk count`
+    — a string only the patch adds — is in each shipped OpenUSD library. `NativeRuntimeHashes.g.cs`
+    and the SBOM were regenerated once, on Linux, after all three payloads were in: only the
+    rebuilt binaries' entries moved, no descriptor.
+  - *Gate 7 (Editor):* macOS done (Unity 6000.4.10f1, Built-in, headless, at `0920d0d`): McUsd
+    23 / 1760 / 880, 23/23 UVs, normals and textures, 8 cutout, 1 blended; `.usdz` re-import
+    23/23 textures with no warning; `.usdc` round trip identical; a symlinked `McUsd_materials`,
+    dangling texture links and links to files outside all refuse every texture (handoff §11).
+    Windows done (Unity 6000.4.10f1; handoff §9). Linux done
+    (Unity 6000.4.11f1, headless): McUsd 23 / 1760 / 880, 23/23 UVs, normals and textures, 8
+    cutout, 1 blended; `.usdz` re-import 23/23 textures with no warning; `.usdc` round trip
+    identical; a symlinked `McUsd_materials` refuses all textures (handoff §10).
 - **Native ABI version:** `5` (`RUsd_GetApiVersion()` in C++), and `UsdNative.MinimumApiVersion`
   is now **`5` as well** — an exact match with the source. It was `2` while the Windows and Linux
   payloads lagged: ABI 3, 4 and 5 only *added* entry points, so an older plugin still loaded and
@@ -272,7 +317,11 @@ source contains, which is step 1's scan — see `Native~/security-scans/`.
   patchelf 0.17.2, Python 3.12.3 for `build_usd.py`; wrapper BuildID
   `b38890c4531608a3ff545befaec094ebca389f71`. Shipped digests: wrapper `75391e9f…9348a`
   (213,000 bytes), `libusd_ms.so` `ba8f9c29…22d73` (43,501,936 bytes), `libtbb.so.2`
-  `0147d53d…67400` (277,968 bytes).
+  `0147d53d…67400` (277,968 bytes). **Superseded 2026-09-30 by the LZ4 rebuild** (same
+  toolchain, OpenUSD from `/opt/usd-26.05-lz4/install`): wrapper unchanged, `libusd_ms.so`
+  `708420d8…166a6` (43,514,224 bytes), `libtbb.so.2` `9e3b7de8…9d21f` (277,968 bytes); floor
+  still `GLIBC_2.38` / `GLIBCXX_3.4.32`; 0 `/home/` strings, and the 536 source paths in
+  `libusd_ms.so` now sit under `/opt/usd-26.05-lz4/`.
   **Build location: `/opt/usd-26.05`, never a home directory.** Same defect and same remedy as
   the macOS entry above: `__FILE__` and `__PRETTY_FUNCTION__` embed the absolute path of what is
   being compiled, so the previous Linux payload — built under `/home/<user>/…` — carried 536
@@ -422,11 +471,11 @@ Run from an **x64 Native Tools Command Prompt for Visual Studio**.
    git clone https://github.com/PixarAnimationStudios/OpenUSD.git C:\Dev\OpenUSD
    cd C:\Dev\OpenUSD
    git checkout v26.05
-   python build_scripts\build_usd.py --build-variant release --build-monolithic ^
-     --no-python --no-imaging --no-usdview --no-examples --no-tutorials --no-tests ^
-     --no-materialx C:\USD\OpenUSD-26.05-win-x64
+   python <pkg>\Native~\build_openusd.py --platform windows ^
+     --openusd-src C:\Dev\OpenUSD --install C:\USD\OpenUSD-26.05-win-x64 --require-scan
    ```
-   Requires Python 3.x on PATH plus CMake and an x64 MSVC toolset. Only external dep is TBB.
+   Requires Python 3.x on PATH plus CMake and an x64 MSVC toolset. Only external dep is TBB,
+   which `build_openusd.py` checks against the pin before `build_usd.py` runs.
 2. Build this package's native wrapper:
    ```powershell
    cd <pkg>\Native~
@@ -438,36 +487,33 @@ Run from an **x64 Native Tools Command Prompt for Visual Studio**.
 
 ## Rebuild for Linux (x64)
 
-The shipped Linux payload was built with the **monolithic + CMake** path below (the same
-`usd_ms` link path as Windows/macOS), **not** `build_linux.sh`. `build_linux.sh` targets the
-alternative **packman component + Python** layout (Isaac/Omniverse), which ships a much larger
-closure (libpython, libboost_python). Prefer the monolithic path for a minimal payload.
+The shipped Linux payload is the **monolithic + CMake** build (the same `usd_ms` link path as
+Windows/macOS), and `build_linux.sh` is now the script that produces it. It used to target the
+packman component + Python layout (Isaac/Omniverse) and leave the shipped build to manual
+commands, which is how the Linux path came to have no provenance check; it no longer does.
 
-1. Build OpenUSD monolithic (public `v26.05` — there is no public `v26.08`):
+1. Build OpenUSD monolithic (public `v26.05` — there is no public `v26.08`) outside the home
+   directory, since its paths are embedded in the library:
    ```bash
-   git clone --depth 1 --branch v26.05 \
-     https://github.com/PixarAnimationStudios/OpenUSD.git /tmp/OpenUSD-src
-   python build_scripts/build_usd.py --build-variant release --build-monolithic \
-     --no-python --no-imaging --no-usdview --no-examples --no-tutorials --no-tests \
-     --no-materialx /path/to/OpenUSD-26.05-linux-x64
+   git clone --branch v26.05 \
+     https://github.com/PixarAnimationStudios/OpenUSD.git /opt/usd-26.05/src
+   python3 Native~/build_openusd.py --platform linux \
+     --openusd-src /opt/usd-26.05/src --install /opt/usd-26.05/install --require-scan
    ```
    Needs CMake, g++ (C++17), and a Python 3.x with `setuptools` to run `build_usd.py`. Only
-   external dep is TBB (built by the script).
-2. Build this package's native wrapper via CMake (links `usd_ms`):
+   external dep is TBB, which `build_openusd.py` checks against the pin before the build.
+2. Build and assemble the **self-contained** payload under `Runtime/Plugins/x86_64/Linux/`:
    ```bash
-   cmake -S Native~ -B Native~/build~ -DCMAKE_BUILD_TYPE=Release \
-     -DOPENUSD_ROOT=/path/to/OpenUSD-26.05-linux-x64
-   cmake --build Native~/build~ -j
+   Native~/build_linux.sh --openusd-root /opt/usd-26.05/install
    ```
-3. Assemble the **self-contained** payload under `Runtime/Plugins/x86_64/Linux/`:
    - `libUnityUSDToolkitNative.so` at the root (rpath `$ORIGIN:$ORIGIN/lib`).
    - `lib/libusd_ms.so` (rpath `$ORIGIN`) + `lib/libtbb.so.2`.
-   - USD schema plugins under `lib/usd` (drop `usd/resources/codegenTemplates`) and shader
+   - USD schema plugins under `lib/usd` (without `usd/resources/codegenTemplates`) and shader
      plugins under `plugin/usd`.
-   Resolve via `$ORIGIN` (`ldd` must show no "not found" and no absolute build paths), `strip
-   --strip-unneeded` the `.so`s (keeps the `RUsd_*` dynamic exports), and **do not** ship a
-   Python-enabled or unstripped build. `patchelf` (e.g. `pip install patchelf`) sets the rpaths.
-   The C# layer sets `PXR_PLUGINPATH_NAME` to `lib/usd` + `plugin/usd` at runtime.
+   The script checks the stamp and the dependency digests first, sets the rpaths with
+   `patchelf`, runs `strip --strip-unneeded` (keeps the `RUsd_*` dynamic exports), and fails if
+   `ldd` shows "not found" or a binary contains a `/home/` path. The C# layer sets
+   `PXR_PLUGINPATH_NAME` to `lib/usd` + `plugin/usd` at runtime.
 
 ## Verify (per platform)
 

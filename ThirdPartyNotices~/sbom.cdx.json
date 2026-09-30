@@ -46,7 +46,7 @@
       },
       {
         "name": "unity:provenanceNote",
-        "value": "Every OpenUSD payload is built from the public v26.05 tag (commit 2095faf) with the flags recorded on the OpenUSD component. The builds are not bit-reproducible: no SOURCE_DATE_EPOCH, absolute build paths are embedded, and the macOS payload is post-processed with install_name_tool and codesign. The SHA-256 values here identify what shipped; they do not prove upstream authenticity."
+        "value": "Every OpenUSD payload is built from the public v26.05 tag (commit 2095faf) with one Unity patch applied (recorded in the OpenUSD component's pedigree) and the flags recorded on that component. The builds are not bit-reproducible: no SOURCE_DATE_EPOCH, absolute build paths are embedded, and the macOS payload is post-processed with install_name_tool and codesign. The SHA-256 values here identify what shipped; they do not prove upstream authenticity."
       }
     ]
   },
@@ -57,7 +57,7 @@
       "name": "OpenUSD",
       "version": "26.05",
       "scope": "required",
-      "description": "The source every shipped OpenUSD payload is built from: public tag v26.05, commit 2095faf (\"Merge release v26.05\"), monolithic, the same flags on every platform.",
+      "description": "The source every shipped OpenUSD payload is built from: public tag v26.05, commit 2095faf (\"Merge release v26.05\"), with the Unity patch in this component's pedigree applied, monolithic, the same flags on every platform.",
       "purl": "pkg:github/PixarAnimationStudios/OpenUSD@v26.05",
       "licenses": [
         {
@@ -74,6 +74,14 @@
         {
           "name": "unity:sourceCommit",
           "value": "2095faf"
+        },
+        {
+          "name": "unity:patch",
+          "value": "Native~/patches/openusd-26.05-lz4-1.10.0.patch"
+        },
+        {
+          "name": "unity:patchSha256",
+          "value": "23a70a125e3d55486139738297cd1ec93f419b7d9be04296a36be2a6744cc565"
         },
         {
           "name": "unity:buildFlags",
@@ -98,6 +106,32 @@
           "url": "https://github.com/PixarAnimationStudios/OpenUSD/releases/tag/v26.05"
         }
       ],
+      "pedigree": {
+        "patches": [
+          {
+            "type": "unofficial",
+            "diff": {
+              "url": "Native~/patches/openusd-26.05-lz4-1.10.0.patch"
+            },
+            "resolves": [
+              {
+                "type": "security",
+                "id": "CVE-2021-3520",
+                "source": {
+                  "name": "NVD",
+                  "url": "https://nvd.nist.gov/vuln/detail/CVE-2021-3520"
+                },
+                "name": "LZ4 1.9.2 memmove() with a negative size; OpenUSD's crate reader could pass an output size above INT_MAX"
+              },
+              {
+                "type": "security",
+                "id": "SECURITY-282834",
+                "name": "TfFastCompression::DecompressFromBuffer did not check chunk count or chunk sizes read from the file against the buffer"
+              }
+            ]
+          }
+        ]
+      },
       "components": [
         {
           "bom-ref": "cli11",
@@ -159,10 +193,10 @@
           "bom-ref": "lz4",
           "type": "library",
           "name": "LZ4",
-          "version": "1.9.2",
+          "version": "1.10.0",
           "scope": "required",
-          "description": "Vendored inside OpenUSD as pxr/base/tf/pxrLZ4.",
-          "purl": "pkg:github/lz4/lz4@v1.9.2",
+          "description": "Vendored inside OpenUSD as pxr/base/tf/pxrLZ4. OpenUSD v26.05 vendors 1.9.2; the Unity patch replaces it with upstream v1.10.0, keeping Pixar's namespace edits.",
+          "purl": "pkg:github/lz4/lz4@v1.10.0",
           "licenses": [
             {
               "license": {
@@ -181,7 +215,41 @@
               "type": "vcs",
               "url": "https://github.com/lz4/lz4"
             }
-          ]
+          ],
+          "pedigree": {
+            "ancestors": [
+              {
+                "type": "library",
+                "name": "LZ4",
+                "version": "1.9.2",
+                "purl": "pkg:github/lz4/lz4@v1.9.2"
+              }
+            ],
+            "patches": [
+              {
+                "type": "unofficial",
+                "diff": {
+                  "url": "Native~/patches/openusd-26.05-lz4-1.10.0.patch"
+                },
+                "resolves": [
+                  {
+                    "type": "security",
+                    "id": "CVE-2021-3520",
+                    "source": {
+                      "name": "NVD",
+                      "url": "https://nvd.nist.gov/vuln/detail/CVE-2021-3520"
+                    },
+                    "name": "LZ4 1.9.2 memmove() with a negative size; OpenUSD's crate reader could pass an output size above INT_MAX"
+                  },
+                  {
+                    "type": "security",
+                    "id": "SECURITY-282834",
+                    "name": "TfFastCompression::DecompressFromBuffer did not check chunk count or chunk sizes read from the file against the buffer"
+                  }
+                ]
+              }
+            ]
+          }
         },
         {
           "bom-ref": "tsl-robin-map",
@@ -230,7 +298,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "1582864cd33ff22a9c32b354c8133b3a662b39588cb4f64df67d54e3d697f6da"
+          "content": "6909762c6605503fbd2228faec9c4879de99278b10a99cf767e13b3e06f1062a"
         }
       ],
       "properties": [
@@ -280,7 +348,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "583d61ac29dc7cc3ed51a4d1cb7f9b49f17e126242c50c8b70a5e4aad4b230c7"
+          "content": "96879f4c69033811eee75e0a506283f7a01493e2dea4455512967aebfea61b90"
         }
       ],
       "properties": [
@@ -330,7 +398,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "ba8f9c294e4afaa338f38d46dc61e522cf65050604360254f537b0cc3a022d73"
+          "content": "708420d8b009b4754c98c16dda30b2bcc52894038bc5bfc39d85ecaac0b166a6"
         }
       ],
       "properties": [
@@ -380,7 +448,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "15a2c38d32f8393c44e92a52e4e6b83257f6f967122dd999553f9dfff62fbddc"
+          "content": "d915411ca5e148f320cbec708c17762e0cf6b7a90ee52f554b2dc0da31993e2b"
         }
       ],
       "properties": [
@@ -426,7 +494,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "70f39fffcfcb109d1cae10a7c56c77e5aac0e9b9bf16d7dbb83a787c05fcbdcb"
+          "content": "9af651df7c60897dffc9296960d20bd189c21f6f1c279e2eadee6072b72402df"
         }
       ],
       "properties": [
@@ -472,7 +540,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "f1e4a15095979ccc5b0ff9dde5783ffa45112cd5787b2de6c37ec8dc1fbada07"
+          "content": "1293975a77ac06f7dcc64c5ae9f4deaa7ad31a14321056545d5f8e4aa6ffd434"
         }
       ],
       "properties": [
@@ -564,7 +632,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "0147d53dec4c589f4d90d62343ac6223b955761e28316aa743433a03e4667400"
+          "content": "9e3b7de888e5d9aaa14725f7d7984231889f3cf32ec74c5de9ed25ed08d9d21f"
         }
       ],
       "properties": [
@@ -648,7 +716,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "bf39fb49a93ddb68e8400eda305fba437266148144a5c501a814ef7d1237858a"
+          "content": "4728734ddee28359c4983e1b95f6a3fb55257ef599692c6caccbacbe9fe1aa77"
         }
       ],
       "properties": [

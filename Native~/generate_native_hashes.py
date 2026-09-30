@@ -59,6 +59,12 @@ BINARY_SUFFIXES = {".dll", ".dylib", ".so"}
 # would silently break the other two platforms. Refuse instead of guessing.
 LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec/"
 
+# Left in a platform's payload root by Native~/CMakeLists.txt when the wrapper was built with the
+# source-provenance gate skipped, and removed again by the next build that passes it. Hashing such
+# a payload would record digests the loader then trusts, so the one step that makes a payload
+# loadable -- and the CI jobs that run it -- refuses instead (SECURITY-282834, CWE-345).
+UNVERIFIED_MARKER = ".unverified-build"
+
 
 def is_lfs_pointer(path: pathlib.Path) -> bool:
     # Pointers are a few hundred bytes; a real binary never is.
@@ -99,8 +105,12 @@ def check_attributes() -> int:
         print("error: found no payload files to check", file=sys.stderr)
         return 1
 
+    # Bytes, not text=True: on Windows a text-mode pipe writes "\n" as "\r\n", git then looks up
+    # "<path>\r", finds no attributes, and every file is reported as exposed.
     result = subprocess.run(["git", "check-attr", "--stdin", "text"], cwd=REPO,
-                            input="\n".join(paths) + "\n", capture_output=True, text=True)
+                            input=("\n".join(paths) + "\n").encode("utf-8"), capture_output=True)
+    result.stdout = result.stdout.decode("utf-8")
+    result.stderr = result.stderr.decode("utf-8", "replace")
     if result.returncode != 0:
         print(f"error: git check-attr failed: {result.stderr.strip()}", file=sys.stderr)
         return 1
@@ -131,6 +141,21 @@ def main() -> int:
 
     if not PAYLOAD.is_dir():
         print(f"error: no payload directory at {PAYLOAD}", file=sys.stderr)
+        return 1
+
+    unverified = [PAYLOAD / root / UNVERIFIED_MARKER for root in PLATFORM_ROOTS.values()
+                  if (PAYLOAD / root / UNVERIFIED_MARKER).exists()]
+    if unverified:
+        print("error: these payloads were built with the source-provenance gate skipped:", file=sys.stderr)
+        for path in unverified:
+            print(f"  {path.relative_to(REPO)}", file=sys.stderr)
+        print(
+            "\nA payload with no chain back to a published OpenUSD revision is for local experiments\n"
+            "only, so no manifest is written for it. Rebuild against an install that\n"
+            "Native~/build_openusd.py stamped, without --skip-source-provenance, and the marker goes\n"
+            "away with the rebuild.",
+            file=sys.stderr,
+        )
         return 1
 
     entries = {}

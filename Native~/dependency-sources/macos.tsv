@@ -1,12 +1,15 @@
 # Where the third-party source in the macOS payload comes from, and what pins it.
 #
-# One row per upstream artifact a build fetches. Everything else in the payload is compiled from
-# the OpenUSD tree at the pinned commit, including the four libraries OpenUSD vendors in
-# (pxr/base/tf/pxrCLI11, pxrDoubleConversion, pxrLZ4, pxrTslRobinMap), so those need no row of
-# their own. Verified by Native~/verify_upstream_sources.py; see its docstring for what a pin
+# One row per upstream artifact a build fetches, plus one per Unity patch applied to the OpenUSD
+# tree before it is built (artifact "patch": url is the patch's path in this repository, git_commit
+# the commit it applies to). Everything else in the payload is compiled from the OpenUSD tree at
+# the pinned commit, including the four libraries OpenUSD vendors in (pxr/base/tf/pxrCLI11,
+# pxrDoubleConversion, pxrLZ4, pxrTslRobinMap), so those need no row of their own -- except where
+# a patch replaces one, as openusd-26.05-lz4-1.10.0.patch does pxrLZ4 (SECURITY-282834). Verified by Native~/verify_upstream_sources.py; see its docstring for what a pin
 # does and does not establish.
 #
 # Tab-separated: component, version, artifact, url, sha256, git_commit, upstream_evidence, recorded
 # A sha256 of "-" means the row pins a revision rather than a file.
 OpenUSD	26.05	git-clone	https://github.com/PixarAnimationStudios/OpenUSD.git	-	2095fafafd033fa23386d7ec6d58c7cc33974518	none published: v26.05 is a lightweight tag and commit 2095faf is unsigned	2026-09-25
 oneTBB	2020.3	github-archive	https://github.com/oneapi-src/oneTBB/archive/refs/tags/v2020.3.zip	208a6b413cb6e6133c51493b8257a7cffadeb40ced0c3e29b07748ad838e0dd9	eca91f16d7490a8abfdee652dadf457ec820cc37	none published: the v2020.3 release carries no checksum; digest observed 2026-09-25	2026-09-25
+OpenUSD-patch	lz4-1.10.0	patch	Native~/patches/openusd-26.05-lz4-1.10.0.patch	23a70a125e3d55486139738297cd1ec93f419b7d9be04296a36be2a6744cc565	2095fafafd033fa23386d7ec6d58c7cc33974518	Unity patch, reviewed in this repository: LZ4 1.9.2 -> 1.10.0 and bounds checks in TfFastCompression (CVE-2021-3520)	2026-09-29

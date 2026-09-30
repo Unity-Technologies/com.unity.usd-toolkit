@@ -9,6 +9,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **OpenUSD's vendored LZ4 is 1.10.0, and the sizes OpenUSD hands it are checked**
+  (SECURITY-282834, CWE-1104, CVE-2021-3520). OpenUSD v26.05 — and upstream `dev` still —
+  vendors LZ4 1.9.2, whose decoder calls `memmove()` with a negative size when given a negative
+  output capacity; the fix is upstream commit `8301a21`, first released in **1.9.4**, not 1.9.3.
+  OpenUSD's `.usdc` reader could supply exactly that: `TfFastCompression::DecompressFromBuffer`
+  converted the crate's 64-bit section sizes to `int`, so a tokens section claiming 2 GiB became a
+  negative capacity. It also never checked a chunk size against the buffer, and read the chunk
+  count as a signed `char`, so a first byte of `0x80` or more made the loop walk off the end.
+  `Native~/patches/openusd-26.05-lz4-1.10.0.patch` replaces `pxr/base/tf/pxrLZ4` with upstream
+  1.10.0 (Pixar's nine namespace edits re-applied, nothing else changed) and checks the count and
+  every size before LZ4 sees it; valid files decode exactly as before. The patch is pinned by
+  SHA-256 in every `dependency-sources/<platform>.tsv`, applied by `build_openusd.py` to a
+  worktree of the pinned commit (the clone stays unmodified), required by the stamp (now version
+  3), and recorded in the SBOM's `pedigree`. `Native~/Tests~/lz4_bounds_test.cpp` drives the
+  shipped `libusd_ms` with each hostile input behind a guard page: the previous macOS payload
+  fails four of its eight cases, three by faulting. The worktree is checked out and patched with
+  `core.autocrlf` off, since Git for Windows' default would check OpenUSD's C++ out with CRLF and
+  the patch would not apply. `build_openusd.py` now also refuses a macOS install under the home
+  directory, as it already did on Linux: the first patched build went there and baked the user
+  name into `libusd_ms.dylib` 1134 times; the shipped one is built under `/Users/Shared`. macOS is
+  rebuilt; Windows and Linux follow `Native~/HANDOFF_LZ4_WINDOWS_LINUX.md`, and the branch is not
+  mergeable until they have.
+- **TBB is checked against its pin before `build_usd.py` compiles it, not after**
+  (SECURITY-282834, CWE-494). `build_usd.py` passes `expectedSHA256` for Boost and nothing else,
+  so the documented flow downloaded, unpacked, compiled and linked TBB and only then compared the
+  archive with `dependency-sources/<platform>.tsv` — a manual step that reports what has already
+  run. OpenUSD is now built with `Native~/build_openusd.py`: it verifies the clone, downloads the
+  pinned archive into the directory `build_usd.py` downloads into and checks it (a mismatch stops
+  before anything is built), runs `build_usd.py` with its downloads pointed at an unreachable
+  proxy so it cannot fetch anything else, re-checks the archive, the download directory and the
+  clone afterwards, and only then stamps the install. It refuses a non-empty install directory,
+  because `build_usd.py` reuses an extracted archive or an installed dependency it finds there
+  without looking at it, and sets `PYTHONDONTWRITEBYTECODE` so `build_usd.py` does not leave
+  `__pycache__` in the clone — which made the documented post-build clone check fail every time.
+  The manual `verify_upstream_sources.py --stamp` is gone.
+- **The Linux build enforces the source-provenance gate like the other two platforms**
+  (SECURITY-282834, CWE-345). The shipped Linux payload was built with plain CMake from manual
+  commands, and `build_linux.sh` targeted a different (packman + Python) layout, so nothing on
+  Linux required the stamp. `build_linux.sh` is now the shipping path — monolithic 26.05 via
+  CMake, the committed payload layout, `patchelf` rpaths, `strip`, and checks for unresolved
+  `ldd` entries and `/home/` paths — with the same provenance and digest gates as
+  `build_macos.sh` and `build_windows.ps1`. `Native~/CMakeLists.txt` also checks the stamp, at
+  configure time and on every build, so no way of building the wrapper skips it by accident.
+- **A provenance stamp now describes the install it sits in** (SECURITY-282834, CWE-345). Stamp
+  version 2 records that each pinned archive was checked before the build, and the SHA-256 of
+  every file a wrapper build copies out of the install; `--check-stamp` requires both and
+  re-hashes the files, so an install modified after its verified build is refused. Version 1
+  stamps are refused — rebuild the install with `build_openusd.py`. `build_macos.sh` no longer
+  re-signs `libusd_ms.dylib` inside the OpenUSD install (the payload copy is signed afterwards
+  anyway), since that modified the tree the stamp describes.
+- **Skipping the provenance gate can no longer produce a releasable payload or a trusted
+  baseline** (SECURITY-282834, CWE-345). A wrapper built with `--skip-source-provenance` /
+  `-SkipSourceProvenance` / `-DUSD_TOOLKIT_SKIP_SOURCE_PROVENANCE=ON` gets a `.unverified-build`
+  marker in its payload root, and `generate_native_hashes.py` — and so CI's `integrity_check` and
+  `pack` — refuses to write a manifest while one exists. The CMake option is dropped from the
+  cache after each configure. `verify_dependency_digests.py --record` refuses a tree without a
+  valid stamp, and the build scripts refuse `--record-dependency-digests` together with the skip,
+  so a first-use record is always of a tree whose origin was checked. Covered by
+  `Native~/Tests~/test_build_provenance.py`, which `integrity_check` runs.
+
 - **An image too large for the managed PNG decoder can no longer reach `Texture2D.LoadImage`
   anyway** (SECURITY-282834, CWE-400). `UsdPngDecoder` refuses a header claiming more than
   16384 px a side or 64 M pixels, but a PNG it declined — for being too large, or 16-bit,
@@ -175,6 +235,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   top of the existing payload checklist. Import failures inherit the same message.
 
 ### Fixed
+
+- **Textures packaged in a `.usdz` load again.** The symlink check added for SECURITY-282834
+  (above) looks at every path component below the stage folder and treated one it could not stat
+  as unsafe. A packaged texture's path — `0/tex.png` next to `scene.usdz` — names nothing on disk,
+  so every texture in every `.usdz` was refused with *"texture path resolves outside the stage
+  folder"* before the resolver that reads it out of the package was consulted: a `.usdz` export
+  re-imported with no textures (0 of 23 for McUsd, 66 warnings). A missing component cannot be a
+  link, so it is now skipped and its parent still checked; any other failure to classify a
+  component is still a refusal. Nothing is read off disk for such a path, and the native resolver
+  it reaches confines the result independently (`IsResolvedAssetInsideStageRoot`, via
+  `TfRealPath`). Verified on Windows: the `.usdz` round trip keeps 23/23 textures with no warning,
+  and a stage whose texture folder is a junction still has all 66 of its textures refused.
 
 - **The macOS payload no longer carries the build machine's user name.** `__FILE__`, which
   OpenUSD's `TF_AXIOM` / `TF_VERIFY` macros expand, and `__PRETTY_FUNCTION__`, which prints the

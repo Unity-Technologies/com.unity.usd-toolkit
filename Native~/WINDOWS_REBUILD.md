@@ -112,19 +112,20 @@ The shipped Windows payload is built against **OpenUSD v26.05** (`pxrInternal_v0
 **same version**. Do not "upgrade" to 26.08 as part of this task: that would change every
 OpenUSD DLL in the payload and turn a one-file fix into a full payload swap.
 
-If `C:\USD\OpenUSD-26.05-win-x64` (or your local equivalent) already exists from the previous
-build, reuse it and skip to step 5.
-
-Otherwise build it once:
+An existing `C:\USD\OpenUSD-26.05-win-x64` can be reused only if `Native~/build_openusd.py` built
+it — the wrapper build refuses an install without that script's stamp. Otherwise build it once,
+into a new directory:
 
 ```bat
 git clone https://github.com/PixarAnimationStudios/OpenUSD.git C:\Dev\OpenUSD
 cd C:\Dev\OpenUSD
 git checkout v26.05
-python build_scripts\build_usd.py --build-variant release --build-monolithic ^
-  --no-python --no-imaging --no-usdview --no-examples --no-tutorials --no-tests ^
-  --no-materialx C:\USD\OpenUSD-26.05-win-x64
+python <package>\Native~\build_openusd.py --platform windows ^
+  --openusd-src C:\Dev\OpenUSD --install C:\USD\OpenUSD-26.05-win-x64 --require-scan
 ```
+
+Do not run `build_usd.py` directly: it compiles the TBB it downloads without checking it (see
+`REBUILD_WINDOWS_LINUX.md` §5).
 
 ---
 

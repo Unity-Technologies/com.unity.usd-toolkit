@@ -449,11 +449,14 @@ Debug.Log(info.ToString());   // API 버전, OpenUSD 버전, 네이티브 경로
 - macOS:
 
 ```bash
-./Build~/build_openusd_macos.sh --arch universal \
-  --install-dir "$PWD/Build~/OpenUSDInstall/macos-universal"
+python3 Native~/build_openusd.py --platform macos --openusd-src <OpenUSD v26.05 clone> \
+  --install /Users/Shared/usd-26.05/install --build-target universal --require-scan
 bash Native~/build_macos.sh \
-  --openusd-root "$PWD/Build~/OpenUSDInstall/macos-universal" --arch universal
+  --openusd-root /Users/Shared/usd-26.05/install --arch universal \
+  --codesign-id "<Developer ID>"
 ```
+
+모든 플랫폼에서 OpenUSD는 `build_usd.py`를 직접 실행하지 말고 `Native~/build_openusd.py`로 빌드합니다. 이 스크립트는 `build_usd.py`가 컴파일하기 전에 고정된 TBB 아카이브를 검증하고 설치 폴더에 stamp를 남기며, wrapper 빌드는 stamp가 없는 설치를 거부합니다.
 
 리빌드 후에는 **반드시** 다음을 수행합니다.
 

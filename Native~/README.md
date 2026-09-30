@@ -33,10 +33,17 @@ layout will not match and export will crash or marshal garbage.
 The native binary cannot be cross-compiled — build Windows on Windows, macOS on
 macOS. Each is a two-step process: build OpenUSD once, then build this wrapper.
 
+OpenUSD is always built with `Native~/build_openusd.py`, never with `build_usd.py` directly:
+it checks the pinned TBB archive *before* `build_usd.py` compiles it and stamps the install,
+and every wrapper build (the three scripts below and `CMakeLists.txt` itself) refuses an
+install without that stamp. See `REBUILD_WINDOWS_LINUX.md` §5.
+
 **Windows (PowerShell, x64 Native Tools Command Prompt for VS):**
-1. Build OpenUSD 26.05 monolithic — see the exact `build_usd.py` command in the
-   repo-root `README.md` ("Build Native Runtime -> Windows"). Install to e.g.
-   `C:\USD\OpenUSD-26.05-win-x64`.
+1. Build OpenUSD 26.05 monolithic from a `v26.05` clone into a new directory:
+   ```powershell
+   python Native~\build_openusd.py --platform windows --openusd-src C:\Dev\OpenUSD `
+       --install C:\USD\OpenUSD-26.05-win-x64 --require-scan
+   ```
 2. From the package's `Native~/` folder:
    ```powershell
    .\build_windows.ps1 -OpenUsdRoot C:\USD\OpenUSD-26.05-win-x64
@@ -47,66 +54,52 @@ macOS. Each is a two-step process: build OpenUSD once, then build this wrapper.
 4. Verify: Play mode -> export with `UsdExportExample` -> `usdchecker` the output.
 
 **macOS:**
-1. Build OpenUSD (monolithic, universal) — see repo-root `README.md`
-   ("Build Native Runtime -> macOS"), e.g. via `Build~/build_openusd_macos.sh`.
-   **Export `MACOSX_DEPLOYMENT_TARGET=12.0` for that build.** Nothing in OpenUSD's build sets a
-   deployment target, so its dylibs otherwise take the SDK default — the build machine's own
-   macOS version — and dyld refuses them on anything older. 12.0 is Unity 6.3's minimum for a
-   macOS player. The wrapper's own `--deployment-target` does not reach them.
+1. Build OpenUSD (monolithic, universal) from a `v26.05` clone into a new directory:
+   ```bash
+   python3 Native~/build_openusd.py --platform macos --openusd-src <clone> \
+       --install /Users/Shared/usd-26.05/install --build-target universal --require-scan
+   ```
+   It sets `MACOSX_DEPLOYMENT_TARGET=12.0` (`--deployment-target`). Nothing in OpenUSD's build
+   sets a deployment target, so its dylibs otherwise take the SDK default — the build machine's
+   own macOS version — and dyld refuses them on anything older. 12.0 is Unity 6.3's minimum for
+   a macOS player. The wrapper's own `--deployment-target` does not reach them.
 2. From the package root:
    ```bash
-   MACOSX_DEPLOYMENT_TARGET=12.0 Build~/build_openusd_macos.sh ...   # step 1
-   ./Native~/build_macos.sh --openusd-root "<OpenUSD install>" --arch universal
+   ./Native~/build_macos.sh --openusd-root /Users/Shared/usd-26.05/install --arch universal \
+       --codesign-id "<Developer ID>"
    ```
    Installs `UnityUSDToolkitNative.dylib` + payload into `Runtime/Plugins/macOS/`.
 3. Restart the Unity Editor.
 4. Verify export as above; `otool -L` the dylib to confirm `@loader_path` RPATHs, and
    `otool -l <dylib> | grep -A2 LC_BUILD_VERSION` to confirm `minos 12.0` on both slices.
 
-After rebuilding, commit the updated `Runtime/Plugins/x86_64/Windows/` or
-`Runtime/Plugins/macOS/` payload (the large `.dll`/`.dylib` are tracked with Git
-LFS — see `.gitattributes`).
+After rebuilding, commit the updated `Runtime/Plugins/x86_64/Windows/`,
+`Runtime/Plugins/x86_64/Linux/` or `Runtime/Plugins/macOS/` payload (the large binaries are
+tracked with Git LFS — see `.gitattributes`).
 
 ## Common requirements
-- An OpenUSD build (headers + libraries). Both monolithic (`usd_ms`) and the component
-  layout (`libusd_usd.so`, `libusd_usdGeom.so`, …) are supported.
-- A C++17 compiler.
-- If the OpenUSD build is Python-enabled, matching Python dev headers/libs (its headers
-  pull in `pyconfig.h`).
+- A monolithic (`usd_ms`), `--no-python` OpenUSD 26.05 install built by `build_openusd.py`.
+- CMake, a C++17 compiler, and Python 3 (the configure step runs the provenance check).
 
 ---
 
 ## Linux
 
 ```bash
-Native~/build_linux.sh \
-  --openusd-root /path/to/openusd \
-  --python-root  /path/to/python3.11
+Native~/build_linux.sh --openusd-root /opt/usd-26.05/install
 ```
 
-Defaults point at the packman OpenUSD/Python that Isaac Sim / Omniverse download
-(`~/.cache/packman/chk/usd.py311.manylinux_2_35_x86_64...` and the matching
-`python/3.11...`), so on a machine that already has Isaac Sim you can often just run:
+This is the path the shipped Linux payload is built with. The script checks the install's
+provenance stamp and the dependency digests, builds with CMake in a clean
+`Native~/build~/linux-x64`, assembles `libUnityUSDToolkitNative.so`, `lib/libusd_ms.so`,
+`lib/libtbb.so.2`, `lib/usd` and `plugin/usd` under `Runtime/Plugins/x86_64/Linux/`, sets the
+`$ORIGIN` rpaths with `patchelf`, strips the binaries, and fails on an unresolved `ldd` entry or
+a `/home/` path in any of them. Needs `cmake`, `patchelf`, `binutils` and `python3`.
 
-```bash
-Native~/build_linux.sh
-```
-
-What the script does:
-1. **Compiles** `libUnityUSDToolkitNative.so`, linking the OpenUSD component libs directly
-   (`find_package` is bypassed) with an `$ORIGIN/lib` rpath. `--disable-new-dtags` is used
-   so the rpath resolves transitive dependencies (e.g. `libpython` needed by `libboost_python`).
-2. **Copies the resolved `.so` dependency closure** into `Runtime/Plugins/x86_64/Linux/lib/`.
-3. **Copies the USD schema plugins** (`lib/usd`) so the runtime can load `UsdGeom` /
-   `UsdShade` / `Sdf` at export time.
-
-The result is **self-contained via `$ORIGIN/lib`** — no `LD_LIBRARY_PATH` is needed at
-runtime. (`libpython` lives next to `libboost_python` in the same flat `lib/` folder, which
-is why the cross-directory dependency that breaks under packman's own layout works here.)
+It no longer builds the packman + Python layout (Isaac Sim / Omniverse) it used to target;
+`--python-root` is refused with a pointer here.
 
 Notes:
-- The packman OpenUSD build is **Python-enabled**, so `--python-root` (Python 3.11 to match
-  the build) is required even though we never call Python ourselves.
 - GPU Resident Drawer / Vulkan are **not** needed to build or run the exporter; they were
   just used in testing. Export works on any graphics backend (and even headless if the
   source meshes have Read/Write enabled).

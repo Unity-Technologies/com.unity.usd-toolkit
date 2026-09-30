@@ -23,7 +23,9 @@ changed, so a substitution has to survive code review instead of passing silentl
 What this does NOT do: prove the dependency tree is authentic upstream code. These are locally
 built artifacts and the build is not bit-reproducible, so a first record of a given tree is
 trust-on-first-use. It exists to make later changes visible, and is meant to sit alongside
-building from a pinned public tag (see BUILD_NOTES.md), not to replace it.
+building from a pinned public tag (see BUILD_NOTES.md), not to replace it. What it does insist on
+is that the first use is of a tree with a known origin: --record refuses a tree that does not
+carry a valid stamp from Native~/build_openusd.py (see verify_upstream_sources.py --check-stamp).
 """
 
 import argparse
@@ -68,9 +70,10 @@ def collect(root: pathlib.Path, files):
 # next real build, not as a silently wrong record:
 #   macos    build_macos.sh, collect_dependency_files()
 #   windows  build_windows.ps1, the $DependencyFiles block
-#   linux    the monolithic CMake assembly in Native~/REBUILD_WINDOWS_LINUX.md section 6 -- NOT
-#            build_linux.sh, which targets the packman + Python layout and ships a much larger
-#            closure than the payload this package ships.
+#   linux    build_linux.sh, which verifies with --scan and so uses these rules directly.
+#
+# verify_upstream_sources.py stamps an install with the digests of exactly this set, so these rules
+# also decide what a stamp covers.
 SCAN_RULES = {
     "macos": {
         "flat": [("lib", "*.dylib*"), ("bin", "*.dylib*")],
@@ -170,6 +173,16 @@ def main() -> int:
         return 1
 
     if args.record:
+        # A first record is trust-on-first-use, so what it trusts has to be something: the tree
+        # must carry a stamp from a verified build_openusd.py run and still match it. Otherwise
+        # --skip-source-provenance plus a record would turn an install of unknown origin into the
+        # reviewed baseline every later build is checked against. No opt-out, on purpose.
+        import verify_upstream_sources
+        if not verify_upstream_sources.check_stamp(root, args.platform,
+                                                   verify_upstream_sources.load(args.platform)):
+            print("error: refusing to record dependency digests for a tree of unverified origin.",
+                  file=sys.stderr)
+            return 1
         DIGEST_DIR.mkdir(parents=True, exist_ok=True)
         lines = [
             f"# SHA-256 of the {args.platform} OpenUSD/TBB files the native build copies into",

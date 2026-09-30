@@ -127,6 +127,13 @@ rebuilt macOS payload for the import API; rebuild the Windows DLL with
 
 Build Pixar OpenUSD first, then build this package's native wrapper.
 
+Build OpenUSD with `Native~/build_openusd.py`, not with Pixar's `build_usd.py` directly.
+`build_usd.py` checks the SHA-256 of Boost and of nothing else, so on its own it compiles the
+TBB it downloads before anything has looked at it. `build_openusd.py` verifies the OpenUSD clone
+and the TBB archive against `Native~/dependency-sources/<platform>.tsv` first, runs `build_usd.py`
+with downloads blocked, and stamps the install; every wrapper build refuses an install without
+that stamp. The full procedure, with its gates, is `Native~/REBUILD_WINDOWS_LINUX.md`.
+
 ### Windows
 
 Run from an x64 Native Tools Command Prompt for Visual Studio.
@@ -137,17 +144,8 @@ Example:
 git clone https://github.com/PixarAnimationStudios/OpenUSD.git C:\Dev\OpenUSD
 cd C:\Dev\OpenUSD
 git checkout v26.05
-python build_scripts\build_usd.py ^
-  --build-variant release ^
-  --build-monolithic ^
-  --no-python ^
-  --no-imaging ^
-  --no-usdview ^
-  --no-examples ^
-  --no-tutorials ^
-  --no-tests ^
-  --no-materialx ^
-  C:\USD\OpenUSD-26.05-win-x64
+python C:\Path\To\com.unity.usd-toolkit\Native~\build_openusd.py --platform windows ^
+  --openusd-src C:\Dev\OpenUSD --install C:\USD\OpenUSD-26.05-win-x64 --require-scan
 ```
 
 Then build this package's native wrapper:
@@ -194,13 +192,14 @@ and Windows Standalone x64 only.
 
 ### macOS
 
-Build Pixar OpenUSD on macOS as a monolithic shared runtime. From the package
-root:
+Build Pixar OpenUSD on macOS as a monolithic shared runtime from a `v26.05` clone.
+From the package root:
 
 ```bash
-./Build~/build_openusd_macos.sh \
-  --arch universal \
-  --install-dir "$PWD/Build~/OpenUSDInstall/macos-universal"
+python3 Native~/build_openusd.py --platform macos \
+  --openusd-src <OpenUSD clone> \
+  --install /Users/Shared/usd-26.05/install \
+  --build-target universal --require-scan
 ```
 
 Then build and install this package's native wrapper plus the OpenUSD dylib and
@@ -208,8 +207,8 @@ resource tree:
 
 ```bash
 ./Native~/build_macos.sh \
-  --openusd-root "$PWD/Build~/OpenUSDInstall/macos-universal" \
-  --arch universal
+  --openusd-root /Users/Shared/usd-26.05/install \
+  --arch universal --codesign-id "<Developer ID>"
 ```
 
 The script installs the macOS runtime payload into:

@@ -35,6 +35,11 @@ USD_BUILD_FLAGS = (
     "--build-variant release --build-monolithic --no-python --no-imaging --no-usdview "
     "--no-examples --no-tutorials --no-tests --no-materialx"
 )
+# The one Unity patch applied to that tree before it is built (SECURITY-282834); pinned by SHA-256
+# in Native~/dependency-sources/<platform>.tsv and applied by Native~/build_openusd.py.
+USD_PATCH = "Native~/patches/openusd-26.05-lz4-1.10.0.patch"
+LZ4_VERSION = "1.10.0"
+LZ4_UPSTREAM_VERSION = "1.9.2"  # what OpenUSD v26.05 itself vendors
 USD_LICENSE = "Tomorrow Open Source Technology License 1.0"
 UNITY_LICENSE = "Unity Companion License / see LICENSE.md"
 
@@ -54,8 +59,9 @@ TOOLCHAIN = {
 }
 
 PROVENANCE_NOTE = (
-    "Every OpenUSD payload is built from the public v26.05 tag (commit 2095faf) with the flags "
-    "recorded on the OpenUSD component. The builds are not bit-reproducible: no SOURCE_DATE_EPOCH, "
+    "Every OpenUSD payload is built from the public v26.05 tag (commit 2095faf) with one Unity "
+    "patch applied (recorded in the OpenUSD component's pedigree) and the flags recorded on that "
+    "component. The builds are not bit-reproducible: no SOURCE_DATE_EPOCH, "
     "absolute build paths are embedded, and the macOS payload is post-processed with "
     "install_name_tool and codesign. The SHA-256 values here identify what shipped; they do not "
     "prove upstream authenticity."
@@ -93,7 +99,7 @@ def named_license(name):
 
 
 def component(bom_ref, name, version, *, shipped_path=None, purl=None, licenses=None,
-              description=None, properties=(), external_refs=None, nested=None):
+              description=None, properties=(), external_refs=None, nested=None, pedigree=None):
     entry = {"bom-ref": bom_ref, "type": "library", "name": name, "version": version,
              "scope": "required"}
     if description:
@@ -110,6 +116,8 @@ def component(bom_ref, name, version, *, shipped_path=None, purl=None, licenses=
         entry["properties"] = [{"name": key, "value": value} for key, value in props]
     if external_refs:
         entry["externalReferences"] = external_refs
+    if pedigree:
+        entry["pedigree"] = pedigree
     if nested:
         entry["components"] = nested
     return entry
@@ -146,6 +154,27 @@ def wrapper_binary(bom_ref, shipped_path, platform, package_version):
                     ("unity:nativeApiVersion", "5")])
 
 
+CVE_2021_3520 = {
+    "type": "security", "id": "CVE-2021-3520",
+    "source": {"name": "NVD", "url": "https://nvd.nist.gov/vuln/detail/CVE-2021-3520"},
+}
+
+
+def usd_patch():
+    """The CycloneDX description of the Unity patch, with its digest so the record is checkable."""
+    return {
+        "type": "unofficial",
+        "diff": {"url": USD_PATCH},
+        "resolves": [
+            dict(CVE_2021_3520, name=("LZ4 1.9.2 memmove() with a negative size; OpenUSD's "
+                                      "crate reader could pass an output size above INT_MAX")),
+            {"type": "security", "id": "SECURITY-282834",
+             "name": ("TfFastCompression::DecompressFromBuffer did not check chunk count or "
+                      "chunk sizes read from the file against the buffer")},
+        ],
+    }
+
+
 def vendored_components():
     """Third-party code that lives inside the OpenUSD source tree and is linked into the
     monolithic library, so it ships even though it is not a separate file."""
@@ -164,11 +193,18 @@ def vendored_components():
                          "ThirdPartyNotices~/licenses/double-conversion-LICENSE.txt")],
             external_refs=[{"type": "vcs", "url": "https://github.com/google/double-conversion"}]),
         component(
-            "lz4", "LZ4", "1.9.2", purl="pkg:github/lz4/lz4@v1.9.2",
+            "lz4", "LZ4", LZ4_VERSION, purl=f"pkg:github/lz4/lz4@v{LZ4_VERSION}",
             licenses=spdx("BSD-2-Clause"),
-            description="Vendored inside OpenUSD as pxr/base/tf/pxrLZ4.",
+            description=(f"Vendored inside OpenUSD as pxr/base/tf/pxrLZ4. OpenUSD v26.05 vendors "
+                         f"{LZ4_UPSTREAM_VERSION}; the Unity patch replaces it with upstream "
+                         f"v{LZ4_VERSION}, keeping Pixar's namespace edits."),
             properties=[("unity:licenseText", "ThirdPartyNotices~/licenses/LZ4-LICENSE.txt")],
-            external_refs=[{"type": "vcs", "url": "https://github.com/lz4/lz4"}]),
+            external_refs=[{"type": "vcs", "url": "https://github.com/lz4/lz4"}],
+            pedigree={
+                "ancestors": [{"type": "library", "name": "LZ4", "version": LZ4_UPSTREAM_VERSION,
+                               "purl": f"pkg:github/lz4/lz4@v{LZ4_UPSTREAM_VERSION}"}],
+                "patches": [usd_patch()],
+            }),
         component(
             "tsl-robin-map", "tsl robin-map", "unknown", licenses=spdx("MIT"),
             description=("Vendored inside OpenUSD as pxr/base/tf/pxrTslRobinMap. The vendored copy "
@@ -189,13 +225,16 @@ def build_bom():
         purl=f"pkg:github/PixarAnimationStudios/OpenUSD@{USD_TAG}",
         licenses=named_license(USD_LICENSE),
         description=("The source every shipped OpenUSD payload is built from: public tag "
-                     f"{USD_TAG}, commit {USD_COMMIT} (\"Merge release v26.05\"), monolithic, the "
-                     "same flags on every platform."),
+                     f"{USD_TAG}, commit {USD_COMMIT} (\"Merge release v26.05\"), with the Unity "
+                     "patch in this component's pedigree applied, monolithic, the same flags on "
+                     "every platform."),
         properties=[("unity:sourceTag", USD_TAG), ("unity:sourceCommit", USD_COMMIT),
+                    ("unity:patch", USD_PATCH), ("unity:patchSha256", sha256_of(USD_PATCH)),
                     ("unity:buildFlags", USD_BUILD_FLAGS),
                     ("unity:licenseText", "ThirdPartyNotices~/licenses/OpenUSD-LICENSE.txt"),
                     ("unity:noticeText", "ThirdPartyNotices~/licenses/OpenUSD-NOTICE.txt")],
-        external_refs=USD_REFS, nested=vendored)
+        external_refs=USD_REFS, nested=vendored,
+        pedigree={"patches": [usd_patch()]})
 
     components = [
         openusd_source,

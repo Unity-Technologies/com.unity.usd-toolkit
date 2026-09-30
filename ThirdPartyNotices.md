@@ -93,13 +93,15 @@ License:
 These are third-party libraries that live in the OpenUSD source tree and are
 compiled into the monolithic OpenUSD library redistributed above. They ship as
 part of `libusd_ms.dylib` / `usd_rt.dll` / `libusd_ms.so` rather than as separate
-files, at the versions OpenUSD v26.05 vendors.
+files, at the versions OpenUSD v26.05 vendors — except LZ4, which OpenUSD v26.05
+vendors at 1.9.2 and which this package's build replaces with upstream 1.10.0
+(`Native~/patches/openusd-26.05-lz4-1.10.0.patch`, SECURITY-282834 / CVE-2021-3520).
 
 | Component | Version | License | Full text |
 |---|---|---|---|
 | CLI11 (`pxr/base/tf/pxrCLI11`) | 2.3.1 | BSD-3-Clause | `ThirdPartyNotices~/licenses/CLI11-LICENSE.txt` |
 | double-conversion (`pxr/base/tf/pxrDoubleConversion`) | 3.3.0 | BSD-3-Clause | `ThirdPartyNotices~/licenses/double-conversion-LICENSE.txt` |
-| LZ4 (`pxr/base/tf/pxrLZ4`) | 1.9.2 | BSD-2-Clause | `ThirdPartyNotices~/licenses/LZ4-LICENSE.txt` |
+| LZ4 (`pxr/base/tf/pxrLZ4`) | 1.10.0 | BSD-2-Clause | `ThirdPartyNotices~/licenses/LZ4-LICENSE.txt` |
 | tsl robin-map (`pxr/base/tf/pxrTslRobinMap`) | not declared by the vendored copy | MIT | `ThirdPartyNotices~/licenses/tsl-robin-map-LICENSE.txt` |
 
 Sources:
