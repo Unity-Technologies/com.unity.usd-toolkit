@@ -76,12 +76,27 @@ python3 Native~/build_openusd.py --platform linux \
   --openusd-src /opt/usd-26.05/src --install /opt/usd-26.05/install --require-scan
 ```
 
-A record existing is not the same as a scan passing — the gate checks that someone did the work
-and wrote down what they found, not that the finding was zero. Reading the record is the review.
+The gate reads the record rather than only finding it. It fails a record that:
+
+- still has template placeholders, or is missing a field of the header table;
+- names a different component, version or commit (the full SHA) from the pin;
+- does not name the SHA-256 of each patch applied to that commit — the scanned tree has to be the
+  patched one;
+- lacks a numeric count and kept-open figure for each of Critical, High, Medium and Low;
+- keeps any Critical or High finding open — that takes a fix, or an exception AppSec grants;
+- keeps Medium or Low findings open without saying why under "Findings kept open", or leaves the
+  conclusion empty.
+
+Passing the gate is still not the review. Someone has to read the record and agree with it.
+
+Both the release and the stamp record it. `--check-stamp <install> --require-scan` fails an install
+built without `--require-scan`. `Native~/CMakeLists.txt` uses that check to leave `.unscanned-build`
+in a payload whose install was built without it, and `.yamato/pack.yml` requires a passing record
+for every platform's pins and runs `generate_native_hashes.py --release`, which refuses a marked
+payload. A local build or the integrity job only warns, so work goes on while a scan is outstanding;
+the payload just cannot be packed.
 
 ## Status
 
-**No scan has been run yet.** Cycode covers this repository's own code, not the upstream source,
-and the account that would run it against OpenUSD and oneTBB is still waiting on Cycode project
-access. Until a record lands here, the honest position for SECURITY-282834 is that the pins are
-enforced and the scan is outstanding — which is what `BUILD_NOTES.md` says.
+**No scan has been run yet.** Cycode covers this repository's own code, not the upstream source. The three committed
+payloads carry `.unscanned-build` for that reason

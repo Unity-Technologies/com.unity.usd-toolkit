@@ -767,22 +767,13 @@ namespace Unity.USDToolkit.Samples
                 return cached;
             }
 
-            try
-            {
-                var texture = new Texture2D(2, 2, TextureFormat.RGBA32, false);
-                if (!ImageConversion.LoadImage(texture, File.ReadAllBytes(path)))
-                {
-                    Destroy(texture);
-                    return null;
-                }
+            // Through the importer's size limits: a companion image comes from whatever folder was
+            // scanned, and LoadImage alone will allocate whatever its header claims.
+            Texture2D texture = UsdImporter.LoadImageFile(path);
 
-                thumbnailCache[path] = texture;
-                return texture;
-            }
-            catch
-            {
-                return null;
-            }
+            // Cached even when refused, so a bad file is not re-read on every repaint.
+            thumbnailCache[path] = texture;
+            return texture;
         }
 
         private void EnsureStyles()

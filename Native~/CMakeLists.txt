@@ -41,6 +41,8 @@ else()
 endif()
 
 set(_RUSD_UNVERIFIED_MARKER ".unverified-build")
+set(_RUSD_UNSCANNED_MARKER ".unscanned-build")
+set(_RUSD_SCANNED OFF)
 
 if(_RUSD_SKIP_SOURCE_PROVENANCE)
     message(WARNING
@@ -63,6 +65,14 @@ else()
         COMMENT "Checking the OpenUSD install's source-provenance stamp"
         VERBATIM
     )
+    # Whether the install was also built from scanned source (build_openusd.py --require-scan, with a
+    # passing Native~/security-scans record per version). Not required for a local build, but the
+    # install step marks a payload that was not, and the release pack refuses a marked payload.
+    execute_process(COMMAND ${_RUSD_PROVENANCE_COMMAND} --require-scan
+        RESULT_VARIABLE _RUSD_SCAN_RESULT OUTPUT_QUIET ERROR_QUIET)
+    if(_RUSD_SCAN_RESULT EQUAL 0)
+        set(_RUSD_SCANNED ON)
+    endif()
 endif()
 
 list(APPEND CMAKE_PREFIX_PATH
@@ -250,4 +260,13 @@ if(_RUSD_SKIP_SOURCE_PROVENANCE)
     install(CODE "file(WRITE \"\${CMAKE_INSTALL_PREFIX}/${_RUSD_UNVERIFIED_MARKER}\" \"Built with USD_TOOLKIT_SKIP_SOURCE_PROVENANCE against ${OPENUSD_ROOT}.\\nNot for commit or release: Native~/generate_native_hashes.py refuses this payload.\\n\")")
 else()
     install(CODE "file(REMOVE \"\${CMAKE_INSTALL_PREFIX}/${_RUSD_UNVERIFIED_MARKER}\")")
+endif()
+
+# Likewise for the source scan: a payload whose OpenUSD install was not built from scanned source
+# is fine to commit and test, and Native~/generate_native_hashes.py --release -- the pack job --
+# refuses it (SECURITY-282834, CWE-1104).
+if(_RUSD_SCANNED)
+    install(CODE "file(REMOVE \"\${CMAKE_INSTALL_PREFIX}/${_RUSD_UNSCANNED_MARKER}\")")
+else()
+    install(CODE "file(WRITE \"\${CMAKE_INSTALL_PREFIX}/${_RUSD_UNSCANNED_MARKER}\" \"Built against ${OPENUSD_ROOT}, which build_openusd.py did not build with --require-scan.\\nNot for release: Native~/generate_native_hashes.py --release refuses this payload.\\n\")")
 endif()

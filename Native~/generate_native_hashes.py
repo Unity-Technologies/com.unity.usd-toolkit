@@ -21,6 +21,13 @@ The digests live in a generated C# file rather than a data file next to the bina
 purpose: a manifest shipped beside the payload can be edited by anyone who can edit the
 payload, whereas replacing these values means patching a compiled assembly.
 
+    python3 Native~/generate_native_hashes.py --release
+
+is what the pack job runs: it also refuses a payload whose OpenUSD install was not built from
+scanned source, which Native~/CMakeLists.txt marks with .unscanned-build (SECURITY-282834,
+CWE-1104). Without --release such a payload is hashed with a warning, so local builds and the
+integrity job keep working while a scan is outstanding; it cannot be packed.
+
     python3 Native~/generate_native_hashes.py --check-attributes
 
 checks something the digests silently depend on: that git hands every hashed file out byte for
@@ -64,6 +71,10 @@ LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec/"
 # a payload would record digests the loader then trusts, so the one step that makes a payload
 # loadable -- and the CI jobs that run it -- refuses instead (SECURITY-282834, CWE-345).
 UNVERIFIED_MARKER = ".unverified-build"
+
+# Left by Native~/CMakeLists.txt when the OpenUSD install was not built with build_openusd.py
+# --require-scan, so nothing says its upstream source was scanned before it was compiled.
+UNSCANNED_MARKER = ".unscanned-build"
 
 
 def is_lfs_pointer(path: pathlib.Path) -> bool:
@@ -133,11 +144,14 @@ def check_attributes() -> int:
 
 
 def main() -> int:
+    release = False
     if len(sys.argv) > 1:
         if sys.argv[1:] == ["--check-attributes"]:
             return check_attributes()
-        print(f"usage: {sys.argv[0]} [--check-attributes]", file=sys.stderr)
-        return 2
+        if sys.argv[1:] != ["--release"]:
+            print(f"usage: {sys.argv[0]} [--release | --check-attributes]", file=sys.stderr)
+            return 2
+        release = True
 
     if not PAYLOAD.is_dir():
         print(f"error: no payload directory at {PAYLOAD}", file=sys.stderr)
@@ -157,6 +171,24 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
+
+    unscanned = [PAYLOAD / root / UNSCANNED_MARKER for root in PLATFORM_ROOTS.values()
+                 if (PAYLOAD / root / UNSCANNED_MARKER).exists()]
+    if unscanned:
+        print(f"{'error' if release else 'warning'}: these payloads were built from OpenUSD source that "
+              "was not scanned first:", file=sys.stderr)
+        for path in unscanned:
+            print(f"  {path.relative_to(REPO)}", file=sys.stderr)
+        if release:
+            print(
+                "\nThe code-signing review requires each upstream version to be scanned before it is\n"
+                "compiled, so no release manifest is written for these. Record the scan in\n"
+                "Native~/security-scans, rebuild the OpenUSD install with build_openusd.py --require-scan\n"
+                "and the wrapper against it, and the marker goes away with the rebuild.",
+                file=sys.stderr,
+            )
+            return 1
+        print("Fine for local work and CI; the release pack (--release) refuses them.", file=sys.stderr)
 
     entries = {}
     binary_count = 0
