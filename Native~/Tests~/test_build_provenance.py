@@ -165,6 +165,17 @@ class StampTests(TempDirTest):
             sources.write_stamp(self.install, PLATFORM, self.rows, False, [], [])
         self.assertFalse(self.check())
 
+    def test_unscanned_stamp_fails_when_scan_required(self):
+        self.stamp()
+        with quiet():
+            self.assertFalse(sources.check_stamp(self.install, PLATFORM, self.rows, require_scan=True))
+
+    def test_scanned_stamp_passes_when_scan_required(self):
+        with quiet():
+            sources.write_stamp(self.install, PLATFORM, self.rows, True,
+                                sources.archive_rows(self.rows), sources.patch_rows(self.rows))
+            self.assertTrue(sources.check_stamp(self.install, PLATFORM, self.rows, require_scan=True))
+
     def test_manual_stamp_option_is_gone(self):
         with mock.patch.object(sys, "argv", ["verify_upstream_sources.py", "--platform", PLATFORM,
                                              "--stamp", str(self.install)]), quiet():
@@ -218,6 +229,132 @@ class MarkerTests(TempDirTest):
             (root / generate_native_hashes.UNVERIFIED_MARKER).unlink()
             self.assertEqual(generate_native_hashes.main(), 0)
             self.assertTrue(output.exists())
+
+    def test_release_manifest_refuses_unscanned_payload(self):
+        payload = self.tmp / "Plugins"
+        root = payload / "x86_64" / "Linux"
+        root.mkdir(parents=True)
+        (root / "libexample.so").write_bytes(b"\x7fELF not really")
+        (root / generate_native_hashes.UNSCANNED_MARKER).write_text("unscanned")
+        output = self.tmp / "NativeRuntimeHashes.g.cs"
+        with mock.patch.object(generate_native_hashes, "PAYLOAD", payload), \
+                mock.patch.object(generate_native_hashes, "OUTPUT", output), \
+                mock.patch.object(generate_native_hashes, "REPO", self.tmp), quiet():
+            with mock.patch.object(sys, "argv", ["generate_native_hashes.py", "--release"]):
+                self.assertEqual(generate_native_hashes.main(), 1)
+            self.assertFalse(output.exists())
+
+            # Hashed with a warning outside a release, so local builds and CI keep working.
+            with mock.patch.object(sys, "argv", ["generate_native_hashes.py"]):
+                self.assertEqual(generate_native_hashes.main(), 0)
+            self.assertTrue(output.exists())
+
+
+def scan_record_text(component="OpenUSD", version="0.0", commit="a" * 40, patches="none",
+                     counts=None, kept_open="None.", conclusion="Acceptable to compile; decided by test."):
+    counts = counts or {"Critical": (0, 0), "High": (0, 0), "Medium": (0, 0), "Low": (0, 0)}
+    result = "\n".join(f"| {name} | {found} | {kept} |" for name, (found, kept) in counts.items())
+    return textwrap.dedent("""\
+        # {component} {version} -- source scan
+
+        | | |
+        | --- | --- |
+        | Component | {component} |
+        | Version | {version} |
+        | Commit scanned | {commit} |
+        | Source | https://example.invalid/{component}.git |
+        | Scanned by | test |
+        | Date | 2026-10-01 |
+        | Tool | Cycode CLI 0.0, SAST |
+        | Patches covered | {patches} |
+
+        ## Command
+
+        ```bash
+        cycode scan -t sast repository /src
+        ```
+
+        ## Result
+
+        | Severity | Count | Kept open |
+        | --- | --- | --- |
+        {result}
+
+        ## Findings kept open
+
+        {kept_open}
+
+        ## Coverage gaps
+
+        None.
+
+        ## Conclusion
+
+        {conclusion}
+        """).format(component=component, version=version, commit=commit, patches=patches,
+                    result=result.replace("\n", "\n        "), kept_open=kept_open,
+                    conclusion=conclusion)
+
+
+class ScanRecordTests(TempDirTest):
+    def setUp(self):
+        super().setUp()
+        self.rows = rows_for("a" * 40, "https://example.invalid/OpenUSD.git", "b" * 64, "d" * 64)
+        self.openusd = self.rows[0]
+
+    def problems(self, text):
+        return sources.scan_record_problems(self.openusd, self.rows, text)
+
+    def test_complete_record_passes(self):
+        self.assertEqual(self.problems(scan_record_text(patches="d" * 64)), [])
+
+    def test_empty_record_fails(self):
+        self.assertTrue(self.problems(""))
+
+    def test_unfilled_template_fails(self):
+        template = (NATIVE / "security-scans" / "_TEMPLATE.md").read_text(encoding="utf-8")
+        self.assertTrue(self.problems(template))
+
+    def test_other_commit_fails(self):
+        self.assertTrue(self.problems(scan_record_text(commit="c" * 40, patches="d" * 64)))
+
+    def test_abbreviated_commit_fails(self):
+        self.assertTrue(self.problems(scan_record_text(commit="a" * 12, patches="d" * 64)))
+
+    def test_other_version_fails(self):
+        self.assertTrue(self.problems(scan_record_text(version="9.9", patches="d" * 64)))
+
+    def test_unpatched_tree_fails(self):
+        self.assertTrue(self.problems(scan_record_text()))
+
+    def test_missing_count_fails(self):
+        counts = {"Critical": (0, 0), "High": ("", ""), "Medium": (0, 0), "Low": (0, 0)}
+        self.assertTrue(self.problems(scan_record_text(patches="d" * 64, counts=counts)))
+
+    def test_high_finding_kept_open_fails(self):
+        counts = {"Critical": (0, 0), "High": (1, 1), "Medium": (0, 0), "Low": (0, 0)}
+        self.assertTrue(self.problems(scan_record_text(patches="d" * 64, counts=counts,
+                                                       kept_open="rule X in a file not compiled")))
+
+    def test_medium_finding_kept_open_needs_a_reason(self):
+        counts = {"Critical": (0, 0), "High": (0, 0), "Medium": (2, 1), "Low": (0, 0)}
+        self.assertTrue(self.problems(scan_record_text(patches="d" * 64, counts=counts)))
+        self.assertEqual(self.problems(scan_record_text(
+            patches="d" * 64, counts=counts,
+            kept_open="rule X, pxr/imaging/foo.cpp:12: not compiled under --no-imaging.")), [])
+
+    def test_empty_conclusion_fails(self):
+        self.assertTrue(self.problems(scan_record_text(patches="d" * 64, conclusion="<decision>")))
+
+    def test_verify_scan_reads_the_file(self):
+        with mock.patch.object(sources, "SCAN_DIR", self.tmp), \
+                mock.patch.object(sources, "REPO", self.tmp), quiet():
+            (self.tmp / "openusd-0.0.md").write_text("")
+            (self.tmp / "onetbb-0.0.md").write_text(
+                scan_record_text(component="oneTBB", commit="0" * 40))
+            self.assertFalse(sources.verify_scan(self.rows))
+            (self.tmp / "openusd-0.0.md").write_text(scan_record_text(patches="d" * 64))
+            self.assertTrue(sources.verify_scan(self.rows))
 
 
 FAKE_BUILD_USD = textwrap.dedent('''\

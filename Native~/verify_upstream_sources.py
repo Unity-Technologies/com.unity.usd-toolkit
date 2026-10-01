@@ -56,6 +56,7 @@ import hashlib
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -74,6 +75,11 @@ STAMP_VERSION = 3
 # A row whose artifact is this pins a Unity patch to the pinned OpenUSD tree: `url` is the patch's
 # path in this repository, `sha256` its digest and `git_commit` the commit it applies to.
 PATCH_ARTIFACT = "patch"
+# What a Native~/security-scans record has to fill in (see its _TEMPLATE.md), and the severities
+# its result table counts. A finding at a blocking severity cannot be kept open by the record.
+SCAN_FIELDS = ("Component", "Version", "Commit scanned", "Source", "Scanned by", "Date", "Tool")
+SEVERITIES = ("Critical", "High", "Medium", "Low")
+BLOCKING_SEVERITIES = ("Critical", "High")
 
 FIELDS = ("component", "version", "artifact", "url", "sha256", "git_commit", "evidence", "recorded")
 
@@ -244,19 +250,108 @@ def scan_record(row: Row) -> pathlib.Path:
     return SCAN_DIR / f"{row.component.lower()}-{row.version}.md"
 
 
+def table_cells(text: str):
+    """Every Markdown table row in `text` as a list of stripped cells, separator rows left out."""
+    rows = []
+    for line in text.splitlines():
+        line = line.strip()
+        if len(line) > 1 and line.startswith("|") and line.endswith("|") and not set(line) <= set("|-: "):
+            rows.append([cell.strip() for cell in line[1:-1].split("|")])
+    return rows
+
+
+def section(text: str, heading: str) -> str:
+    match = re.search(rf"^## {re.escape(heading)}[ \t]*$(.*?)(?=^## |\Z)", text, re.M | re.S)
+    return match.group(1).strip() if match else ""
+
+
+def is_placeholder(value: str) -> bool:
+    return not value or bool(re.fullmatch(r"<[^>]*>", value.strip()))
+
+
+def scan_record_problems(row: Row, rows, text: str):
+    """What stops this record from vouching for the pinned version; empty when nothing does.
+
+    The record is read, not just found: an empty or half-filled template, a scan of another
+    version or commit, or one that leaves a Critical or High finding open does not pass. Medium
+    and Low findings may stay open, but only with the reason written down -- accepting a Critical
+    or High one is a security exception for AppSec to grant, not a line in this file.
+    """
+    problems = []
+    if "Delete this line" in text:
+        problems.append("still carries the template's instructions")
+
+    fields = {cells[0]: cells[1] for cells in table_cells(text) if len(cells) == 2}
+    for name in SCAN_FIELDS:
+        if is_placeholder(fields.get(name, "")):
+            problems.append(f"'{name}' is not filled in")
+    if problems:
+        return problems
+
+    if fields["Component"].lower() != row.component.lower():
+        problems.append(f"is for {fields['Component']}, not {row.component}")
+    if fields["Version"] != row.version:
+        problems.append(f"is for version {fields['Version']}, the record pins {row.version}")
+    if fields["Commit scanned"] != row.git_commit:
+        problems.append(f"scanned commit {fields['Commit scanned'][:12]}, the record pins {row.git_commit[:12]} "
+                        "(give the full SHA)")
+    try:
+        datetime.strptime(fields["Date"], "%Y-%m-%d")
+    except ValueError:
+        problems.append(f"date '{fields['Date']}' is not YYYY-MM-DD")
+
+    # What is compiled is the pinned tree with its patches applied, so that is what has to have
+    # been scanned -- and the record has to say so by naming each patch it covered.
+    for patch in patch_rows(rows):
+        if patch.git_commit == row.git_commit and patch.sha256 not in text:
+            problems.append(f"does not name {patch.url} (sha256 {patch.sha256[:12]}...) as part of the "
+                            "tree scanned")
+
+    counts = {cells[0]: cells[1:] for cells in table_cells(text) if len(cells) == 3 and cells[0] in SEVERITIES}
+    kept_total = 0
+    for severity in SEVERITIES:
+        if severity not in counts:
+            problems.append(f"the result table has no {severity} row")
+            continue
+        found, kept = counts[severity]
+        if not (found.isdigit() and kept.isdigit()):
+            problems.append(f"{severity}: count and kept-open must both be numbers, '0' included")
+            continue
+        if int(kept) > int(found):
+            problems.append(f"{severity}: {kept} kept open of {found} found")
+        elif int(kept) and severity in BLOCKING_SEVERITIES:
+            problems.append(f"{severity}: {kept} finding(s) kept open; fix them, or get an AppSec exception "
+                            "and record it")
+        kept_total += int(kept)
+
+    kept_section = section(text, "Findings kept open")
+    if kept_total and (is_placeholder(kept_section) or kept_section.lower().rstrip(".") == "none"):
+        problems.append(f"{kept_total} finding(s) kept open, but 'Findings kept open' does not say why")
+    if is_placeholder(section(text, "Conclusion")):
+        problems.append("'Conclusion' is not filled in")
+    return problems
+
+
 def verify_scan(rows) -> bool:
     ok = True
     # A patch is scanned as part of the tree it is applied to, so it needs no record of its own;
-    # the OpenUSD record has to say it covers the patched tree.
+    # the record of that tree has to name it.
     for row in [r for r in rows if r.artifact != PATCH_ARTIFACT]:
         path = scan_record(row)
-        if path.is_file():
-            print(f"ok   {row.label}: source scan recorded in {path.relative_to(REPO)}.")
-        else:
+        if not path.is_file():
             print(f"FAIL {row.label}: no source scan recorded at {path.relative_to(REPO)}.")
             print("     The code-signing review requires each version to be scanned before we compile it.")
             print("     See Native~/security-scans/README.md.")
             ok = False
+            continue
+        problems = scan_record_problems(row, rows, path.read_text(encoding="utf-8"))
+        if problems:
+            print(f"FAIL {row.label}: {path.relative_to(REPO)} does not record a passing scan of this version:")
+            for problem in problems:
+                print(f"     - {problem}")
+            ok = False
+        else:
+            print(f"ok   {row.label}: source scan of {row.git_commit[:12]} recorded in {path.relative_to(REPO)}.")
     return ok
 
 
@@ -336,7 +431,7 @@ def rebuild_hint(platform: str, install_root: pathlib.Path) -> None:
     print(f"           --openusd-src <clone> --install {install_root}")
 
 
-def check_stamp(install_root: pathlib.Path, platform: str, rows) -> bool:
+def check_stamp(install_root: pathlib.Path, platform: str, rows, require_scan: bool = False) -> bool:
     path = install_root / STAMP_NAME
     if path.is_symlink() or not path.is_file():
         print(f"FAIL {install_root} carries no source-provenance stamp ({STAMP_NAME}).")
@@ -416,9 +511,15 @@ def check_stamp(install_root: pathlib.Path, platform: str, rows) -> bool:
     print(f"ok   {install_root.name}: source provenance stamped {stamped.get('verified_at')}, "
           f"{len(current)} install files unchanged since.")
     if not stamped.get("scans_verified"):
+        if require_scan:
+            print(f"FAIL {install_root.name} was built without --require-scan, so nothing says its upstream")
+            print("     source was scanned before it was compiled. Rebuild it with build_openusd.py")
+            print("     --require-scan once Native~/security-scans holds a passing record for each version.")
+            return False
         print("WARN this install root was verified without --require-scan, so nothing here says the")
-        print("     upstream source was scanned before it was compiled. Fine for local work; a")
-        print("     release payload needs the scan. See Native~/security-scans/README.md.")
+        print("     upstream source was scanned before it was compiled. Fine for local work; the wrapper")
+        print("     build marks the payload (.unscanned-build) and the release pack refuses it.")
+        print("     See Native~/security-scans/README.md.")
     return True
 
 
@@ -437,7 +538,8 @@ def main() -> int:
                         help="Require the stamp Native~/build_openusd.py wrote into this install, "
                              "and that the install still holds what it recorded.")
     parser.add_argument("--require-scan", action="store_true",
-                        help="Also require a Native~/security-scans record for every pinned version.")
+                        help="Also require a passing Native~/security-scans record for every pinned "
+                             "version, and with --check-stamp, that the install was built with it.")
     parser.add_argument("--list", action="store_true", help="Print the record and exit.")
     args = parser.parse_args()
 
@@ -483,7 +585,7 @@ def main() -> int:
         ok &= verify_scan(rows)
 
     if args.check_stamp:
-        ok &= check_stamp(args.check_stamp, args.platform, rows)
+        ok &= check_stamp(args.check_stamp, args.platform, rows, args.require_scan)
 
     return 0 if ok else 1
 

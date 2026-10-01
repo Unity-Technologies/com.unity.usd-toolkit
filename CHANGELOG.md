@@ -9,8 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **The source-scan gate reads the record, and a release cannot skip it** 
+ `verify_upstream_sources.py --require-scan` used to pass on any file with the right
+  name, an empty one included. Nothing on the release path ran it either: the wrapper build only
+  printed a warning for an install built without it. Now it checks that the record is filled in,
+  names the pinned commit and each patch applied to it, counts every severity, keeps no Critical
+  or High finding open, and gives a reason for each one it does keep open. `--check-stamp
+  --require-scan` fails an install built without the scan. `Native~/CMakeLists.txt` leaves
+  `.unscanned-build` in a payload built from such an install. The pack job requires a passing
+  record for every platform and runs `generate_native_hashes.py --release`, which refuses a marked
+  payload. The three committed payloads carry the marker, since no scan has been recorded for
+  them yet. `Native~/security-scans/known-vulnerabilities-2026-10-01.md` records a check of the
+  pins against OSV and NVD: no published vulnerability applies.
+- **The import browser sample loads thumbnails within the importer's image limits**
+  `RuntimeImportBrowser` handed each companion image to
+  `Texture2D.LoadImage` unchecked, so a PNG whose header claimed 30000×30000 made it allocate
+  about 3.4 GB. The new `UsdImporter.LoadImageFile` refuses a file over
+  `UsdImageLimits.MaxFileBytes` before reading it, and refuses a header over the dimension limits
+  before decoding. The sample loads its thumbnails through it.
 - **OpenUSD's vendored LZ4 is 1.10.0, and the sizes OpenUSD hands it are checked**
-  (SECURITY-282834, CWE-1104, CVE-2021-3520). OpenUSD v26.05 — and upstream `dev` still —
+  OpenUSD v26.05 — and upstream `dev` still —
   vendors LZ4 1.9.2, whose decoder calls `memmove()` with a negative size when given a negative
   output capacity; the fix is upstream commit `8301a21`, first released in **1.9.4**, not 1.9.3.
   OpenUSD's `.usdc` reader could supply exactly that: `TfFastCompression::DecompressFromBuffer`
@@ -32,7 +50,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rebuilt; Windows and Linux follow `Native~/HANDOFF_LZ4_WINDOWS_LINUX.md`, and the branch is not
   mergeable until they have.
 - **TBB is checked against its pin before `build_usd.py` compiles it, not after**
-  (SECURITY-282834, CWE-494). `build_usd.py` passes `expectedSHA256` for Boost and nothing else,
+  `build_usd.py` passes `expectedSHA256` for Boost and nothing else,
   so the documented flow downloaded, unpacked, compiled and linked TBB and only then compared the
   archive with `dependency-sources/<platform>.tsv` — a manual step that reports what has already
   run. OpenUSD is now built with `Native~/build_openusd.py`: it verifies the clone, downloads the
@@ -45,14 +63,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `__pycache__` in the clone — which made the documented post-build clone check fail every time.
   The manual `verify_upstream_sources.py --stamp` is gone.
 - **The Linux build enforces the source-provenance gate like the other two platforms**
-  (SECURITY-282834, CWE-345). The shipped Linux payload was built with plain CMake from manual
+  The shipped Linux payload was built with plain CMake from manual
   commands, and `build_linux.sh` targeted a different (packman + Python) layout, so nothing on
   Linux required the stamp. `build_linux.sh` is now the shipping path — monolithic 26.05 via
   CMake, the committed payload layout, `patchelf` rpaths, `strip`, and checks for unresolved
   `ldd` entries and `/home/` paths — with the same provenance and digest gates as
   `build_macos.sh` and `build_windows.ps1`. `Native~/CMakeLists.txt` also checks the stamp, at
   configure time and on every build, so no way of building the wrapper skips it by accident.
-- **A provenance stamp now describes the install it sits in** (SECURITY-282834, CWE-345). Stamp
+- **A provenance stamp now describes the install it sits in** Stamp
   version 2 records that each pinned archive was checked before the build, and the SHA-256 of
   every file a wrapper build copies out of the install; `--check-stamp` requires both and
   re-hashes the files, so an install modified after its verified build is refused. Version 1
@@ -60,7 +78,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   re-signs `libusd_ms.dylib` inside the OpenUSD install (the payload copy is signed afterwards
   anyway), since that modified the tree the stamp describes.
 - **Skipping the provenance gate can no longer produce a releasable payload or a trusted
-  baseline** (SECURITY-282834, CWE-345). A wrapper built with `--skip-source-provenance` /
+  baseline**. A wrapper built with `--skip-source-provenance` /
   `-SkipSourceProvenance` / `-DUSD_TOOLKIT_SKIP_SOURCE_PROVENANCE=ON` gets a `.unverified-build`
   marker in its payload root, and `generate_native_hashes.py` — and so CI's `integrity_check` and
   `pack` — refuses to write a manifest while one exists. The CMake option is dropped from the
@@ -70,7 +88,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Native~/Tests~/test_build_provenance.py`, which `integrity_check` runs.
 
 - **An image too large for the managed PNG decoder can no longer reach `Texture2D.LoadImage`
-  anyway** (SECURITY-282834, CWE-400). `UsdPngDecoder` refuses a header claiming more than
+  anyway**. `UsdPngDecoder` refuses a header claiming more than
   16384 px a side or 64 M pixels, but a PNG it declined — for being too large, or 16-bit,
   interlaced or paletted — kept its raw bytes and was handed to `LoadImage`, which has no limits.
   So the caps only guarded the path that obeyed them: a few-dozen-byte PNG whose header claims
@@ -89,7 +107,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the previous code reached `LoadImage` with the hostile bytes.
 
 - **CI now fails if a hashed payload file could have its line endings rewritten**
-  (SECURITY-282834, CWE-494). `.gitattributes` marking the plugin descriptors `-text` fixed the
+  `.gitattributes` marking the plugin descriptors `-text` fixed the
   Windows checkout that refused its own payload, but nothing stopped the next descriptor type from
   arriving without a rule — and `integrity_check` runs on Linux, where the conversion never
   happens. `generate_native_hashes.py --check-attributes` asks git, for every file the manifest
@@ -97,7 +115,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   digests. The runbook's manifest gate now also says to generate on macOS or Linux only.
 
 - **Intel's TBB ships as `tbb_usdrt.dll`, so the Windows loader cannot substitute the Editor's own**
-  (SECURITY-282834, CWE-494). Windows resolves an import by base name against the modules already
+  Windows resolves an import by base name against the modules already
   loaded in the process, and the Unity Editor ships a `tbb.dll` of its own. Whichever loaded first
   won, which meant the payload could run against a TBB build it was not compiled against — the
   same failure this package already fixed once by shipping OpenUSD's monolithic library as
@@ -121,7 +139,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rebuilt locally before this change keeps working.
 
 - **The source scan the review requires has a place, a procedure and a gate — and no results yet**
-  (SECURITY-282834). For code we compile ourselves the rule is to scan each version for security
+  For code we compile ourselves the rule is to scan each version for security
   issues before compiling it. Nothing did: Cycode runs on this repository's pull requests, but
   the OpenUSD and oneTBB source is not committed here, so it has never been looked at.
   `Native~/security-scans/` now states the requirement, which versions need a record, the command
@@ -133,7 +151,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   lists that as an open gap rather than implying otherwise.
 
 - **Windows `tbb.dll` keeps Intel's signature, and the payload's trust argument is written down**
-  (SECURITY-282834). `sign_windows` signed `Windows/*.dll`, which would have re-signed the one
+  `sign_windows` signed `Windows/*.dll`, which would have re-signed the one
   binary in the payload that is redistributed rather than built: `build_usd.py` pins Intel's
   prebuilt `tbb-2020.3-win.zip` on Windows, the shipped `tbb.dll` is byte-identical to
   `tbb/bin/intel64/vc14/tbb.dll` inside that archive, and it already carries Intel Corporation's
@@ -149,7 +167,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Apache 2.0 for oneTBB — permit both the build and the signature.
 
 - **The upstream source every payload is built from is now pinned and gated**
-  (SECURITY-282834, trust chain). `BUILD_NOTES.md` named the OpenUSD tag and commit, but nothing
+  `BUILD_NOTES.md` named the OpenUSD tag and commit, but nothing
   checked them: a build took whatever was in the clone on the build machine, and the chain
   between "public v26.05" and "the bytes in this repository" was a person following a runbook.
   `Native~/dependency-sources/{macos,linux,windows}.tsv` now records, per platform, the OpenUSD
@@ -173,7 +191,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Security
 
 - **Symlinks can no longer walk an imported asset path out of the stage folder**
-  (SECURITY-282834, third round / CWE-59, CWE-22). The confinement added earlier compared paths
+  The confinement added earlier compared paths
   with `Path.GetFullPath`, which normalizes `.` and `..` as *text* and does not follow links. A
   stage folder containing `tex.png -> /etc/passwd` (or an SSH key, or any file the user can read)
   therefore passed the check and was read straight off disk by `File.ReadAllBytes`. The native
@@ -192,7 +210,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Security
 
 - **The package ships a software bill of materials, and the third-party notices now cover every
-  platform** (SECURITY-282834 / CWE-494 remediation 4). `ThirdPartyNotices~/sbom.cdx.json`
+  platform** `ThirdPartyNotices~/sbom.cdx.json`
   (CycloneDX 1.6) lists each native component a consumer loads: OpenUSD `v26.05` with its commit
   (`2095faf`) and build flags, oneTBB 2020.3, the four libraries OpenUSD vendors into the
   monolithic build (CLI11 2.3.1, double-conversion 3.3.0, LZ4 1.9.2, tsl robin-map), the
@@ -236,7 +254,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Textures packaged in a `.usdz` load again.** The symlink check added for SECURITY-282834
+- **Textures packaged in a `.usdz` load again.** The symlink check added
   (above) looks at every path component below the stage folder and treated one it could not stat
   as unsafe. A packaged texture's path — `0/tex.png` next to `scene.usdz` — names nothing on disk,
   so every texture in every `.usdz` was refused with *"texture path resolves outside the stage
@@ -294,7 +312,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   executable in git, as the other build scripts already were.
 
 - **The native build scripts verify the dependency tree they copy, and refuse to ship unsigned
-  by default** (SECURITY-282834, second round / CWE-347). All three scripts copied the local
+  by default**. All three scripts copied the local
   OpenUSD/TBB tree into `Runtime/Plugins` verbatim, so a tampered dependency checkout on the
   build host entered the package unnoticed; macOS additionally defaulted to an ad-hoc
   `--sign '-'` signature, which carries no publisher identity, and Windows and Linux produced
@@ -322,7 +340,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   covered by the manifest, a leftover like this now fails the integrity check instead of being
   recorded as expected content.
 - **The integrity manifest now covers plugin descriptors, is keyed by path, and rejects added
-  files** (SECURITY-282834, second round / CWE-345). The manifest fingerprinted only
+  files**. The manifest fingerprinted only
   `.dll`/`.dylib`/`.so` — 11 files — while the 209 `plugInfo.json`, `.usda` and `.glslfx` files
   that tell OpenUSD *which library to load* were not covered at all. Worse, the verifier walked
   only the top level of each base path, so those descriptors were never even looked at, and a
@@ -336,14 +354,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   merely sitting beside the payload is still only reported, because in a player build that folder
   can be shared with other packages.
 - **Plugin descriptors' `LibraryPath` values are confined before OpenUSD is pointed at them**
-  (SECURITY-282834, second round / CWE-345). Each shipped `plugInfo.json` names the library
+  Each shipped `plugInfo.json` names the library
   OpenUSD loads in-process; a descriptor pointing outside the package's own payload is arbitrary
   code execution. Every `LibraryPath` is now resolved and checked against the payload root before
   `PXR_PLUGINPATH_NAME` is written, and configuration fails if any escapes. This is deliberately
   independent of the digest check above, so it still applies when
   `UsdExportOptions.VerifyNativeRuntimeIntegrity` is switched off.
-- **The macOS payload is rebuilt from the public OpenUSD `v26.05` tag** (SECURITY-282834, second
-  round / CWE-494). It was previously compiled from a non-public 26.08 source drop whose tree
+- **The macOS payload is rebuilt from the public OpenUSD `v26.05` tag** 
+  It was previously compiled from a non-public 26.08 source drop whose tree
   carries no git history, so its exact revision could not be published and nobody outside the
   build could reproduce or inspect it. The review's alternative — publishing the exact commit for
   the 26.08 drop — was not available for that reason, leaving the rebuild as the only route. All
@@ -376,10 +394,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
-Fixes for the importer/exporter findings of security review SECURITY-282834. Version number
+Fixes for the importer/exporter findings. Version number
 still to be decided.
 
-- **Imported texture paths are confined to the stage folder** (SECURITY-282834 / CWE-22). A USD
+- **Imported texture paths are confined to the stage folder** A USD
   stage authors its own `UsdUVTexture` `inputs:file` paths, so an imported file is untrusted
   input — and the importer read whatever those paths named. An absolute path, or one that climbed
   out with `../`, was passed straight to `File.Exists`/`File.ReadAllBytes`, so a crafted `.usd`
@@ -393,8 +411,8 @@ still to be decided.
   unaffected: their authored paths are relative and stay inside the package.
   `UsdImportOptions.AllowExternalAssetPaths` (default `false`) re-enables reads outside the stage
   folder for stages you trust that deliberately reference a shared texture library.
-- **The managed PNG decoder no longer trusts IHDR dimensions** (SECURITY-282834 / CWE-190,
-  CWE-789). `UsdPngDecoder.TryDecode` checked only that width and height were positive, then sized
+- **The managed PNG decoder no longer trusts IHDR dimensions**
+  `UsdPngDecoder.TryDecode` checked only that width and height were positive, then sized
   every allocation from them: a few-hundred-byte PNG claiming 20000x25000 drove a ~2 GB
   `MemoryStream` reservation, and 65536x65536 wrapped the 32-bit `stride` negative — which also
   dragged the `raw.Length` guard negative and let a negative array size through, throwing an
@@ -406,7 +424,7 @@ still to be decided.
   `Texture2D.LoadImage`. The chunk-length guard is also computed in 64-bit: a length near
   `int.MaxValue` used to overflow it and then throw out of `idat.Write`.
 - **The native ABI gate requires an exact match with the source, and now guards the import path
-  too** (SECURITY-282834 / CWE-494 remediation 4). `UsdNative.MinimumApiVersion` accepted anything
+  too**. `UsdNative.MinimumApiVersion` accepted anything
   from API 2 upward, a tolerance that existed so payloads lagging the source kept working while
   Windows and Linux were rebuilt. All three desktop payloads reached API 5, and the tolerance had
   become a hole: fixes that are *not* gated on the ABI version — the topology and asset-path fixes
@@ -416,7 +434,7 @@ still to be decided.
   be loaded — backwards, since the import path is where untrusted file content is parsed. Both
   `UsdImporter.Import`/`ImportAsync`/`GetPreviewInfo` now validate it.
 - **The native payload is verified against recorded digests before the first P/Invoke**
-  (SECURITY-282834 / CWE-494). `ValidateNativeRuntimeFiles` only asked whether a file of the right
+  `ValidateNativeRuntimeFiles` only asked whether a file of the right
   name existed, which cannot tell a genuine binary from a substituted one — and the native code is
   loaded and executed in-process. `Runtime/Native/NativeRuntimeHashes.g.cs` now records the
   SHA-256 of every shipped `.dll`/`.dylib`/`.so`, and the loader compares each binary it finds
@@ -432,8 +450,8 @@ still to be decided.
   editable by anyone who can edit the payload. This is not a defence against someone who already
   has write access to the package — it catches substitution or corruption in distribution, and it
   makes the payload auditable: anyone can hash the shipped files and compare.
-- **Untrusted mesh topology is rejected instead of triangulated** (SECURITY-282834 / CWE-190,
-  native). `BuildImportedSubmeshes` accumulated each face's start offset in a signed 32-bit int,
+- **Untrusted mesh topology is rejected instead of triangulated**
+  `BuildImportedSubmeshes` accumulated each face's start offset in a signed 32-bit int,
   so a stage whose `faceVertexCounts` summed past `INT_MAX` wrapped that accumulator, and the
   corrupted offset then defeated `TriangulateFace`'s own bounds check — which added two
   file-controlled values and so overflowed in turn. `cornerVertices` was then read far outside
@@ -443,7 +461,7 @@ still to be decided.
   reported and skipped rather than trusted. `TriangulateFace`'s guard was rewritten to subtract
   from the known-good buffer length instead of adding two untrusted values.
 - **Asset reads through the native resolver are confined to the stage's folders**
-  (SECURITY-282834 / CWE-22, native). `RUsd_ReadImportAsset` resolves through OpenUSD, which
+  `RUsd_ReadImportAsset` resolves through OpenUSD, which
   honours absolute paths and `..` climbs, so it was a second read path independent of the managed
   guard above. The resolved path is now confined to the directory of any layer that composes the
   stage — not just the root layer's, so a sublayer or reference keeping textures next to itself
@@ -451,7 +469,7 @@ still to be decided.
   contains it. Refusals and read errors name the authored path instead of the resolved location,
   so a blocked attempt no longer discloses local filesystem layout.
 - **`UsdExportOptions.PluginSearchPath` is confined to the package's own native folders**
-  (SECURITY-282834 / CWE-427). The value was written verbatim into `PXR_PLUGINPATH_NAME`, and
+  The value was written verbatim into `PXR_PLUGINPATH_NAME`, and
   OpenUSD's plugin registry loads and executes any library a `plugInfo.json` under that path
   names, in-process. A path outside the package's native runtime folders is now rejected before
   the variable is written — the previous order set the variable first and validated afterwards,
@@ -462,7 +480,7 @@ still to be decided.
   `ValidatePluginSearchPath`'s `plugInfo.json` check stays, but only as a layout diagnostic: a
   manifest being present says nothing about a directory being trustworthy.
 - **The generated Live Sync token is written owner-readable, and the channel is loopback-only**
-  (SECURITY-282834 / CWE-312). The session token was persisted with `File.WriteAllText`, which
+  The session token was persisted with `File.WriteAllText`, which
   creates the file under the process umask — mode 0644 on a typical macOS or Linux host, so every
   other account on a shared machine could read the one secret guarding full scene read and write.
   The token is now written to an unguessably named file that is restricted to the current user
@@ -484,7 +502,7 @@ still to be decided.
   TLS proxy if you need it across machines. **Breaking:** a scene that set `allowNonLoopbackBind`
   loses the field, and a `bindAddress` outside `127.0.0.1`/`::1`/`localhost` now refuses to start.
 - **The Live Sync sample's control channel is authenticated, and stays on this machine**
-  (SECURITY-282834 / CWE-306, CWE-284). `UsdLiveSyncServer` accepted commands from anyone who could
+  `UsdLiveSyncServer` accepted commands from anyone who could
   open its port. The only access control in the channel was the per-object
   `UsdSyncNode.AcceptsRemoteWrites` flag, which does not cover `get_snapshot` — the command that
   returns every tracked prim path and transform — nor `reset`, nor the parser that runs before any
@@ -497,7 +515,7 @@ still to be decided.
   the bundled clients find on their own; comparison is constant-time. `AcceptsRemoteWrites` is unchanged and
   still scopes which objects accept writes — it is layered on authentication, not a substitute.
 - **The Live Sync listener refuses to bind past loopback, and bounds what a client can spend**
-  (SECURITY-282834 / CWE-284, CWE-400). `ResolveBindAddress` passed any parseable address through,
+  `ResolveBindAddress` passed any parseable address through,
   so `0.0.0.0` silently published the channel to the network. The listener is now loopback-only and
   the server refuses to start on any other address, logging why. The port is taken with
   `ExclusiveAddressUse` instead of `ReuseAddress`, so

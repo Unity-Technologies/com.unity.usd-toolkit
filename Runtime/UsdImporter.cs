@@ -95,6 +95,37 @@ namespace Unity.USDToolkit
             }
         }
 
+        // Loads a PNG or JPEG from disk within UsdImageLimits, or returns null. For images that
+        // arrive beside a USD file rather than inside it -- a library browser's thumbnails -- which
+        // would otherwise go to Texture2D.LoadImage unchecked (SECURITY-282834, CWE-400): the file
+        // size is refused before reading and the header's dimensions before decoding. Main thread
+        // only, as it creates a Texture2D.
+        public static Texture2D LoadImageFile(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+            {
+                return null;
+            }
+
+            try
+            {
+                long length = new FileInfo(path).Length;
+                if (length > UsdImageLimits.MaxFileBytes)
+                {
+                    Debug.LogWarning(
+                        $"USD import: refused image {path}: {length} bytes exceeds the {UsdImageLimits.MaxFileBytes}-byte limit.");
+                    return null;
+                }
+
+                return CreateTextureViaLoadImage(File.ReadAllBytes(path), false, Path.GetFileName(path));
+            }
+            catch (Exception exception)
+            {
+                Debug.LogWarning($"USD import: error reading image {path}: {exception.Message}");
+                return null;
+            }
+        }
+
         // ---- Stage read: native + file I/O only; safe to run on a background thread. ----
 
         private static StageData ReadStageData(string fullInputPath, UsdImportOptions options)
