@@ -314,7 +314,7 @@ UsdExportResult result = UsdExporter.ExportGameObjectWithResult(
 | --- | --- | --- |
 | [Export Example](#export-example) | `Samples/Export Example/RuntimeExportExample.unity` | Runtime export with a UI for options and format |
 | [Import Example](#import-example) | `Samples/Import Example/RuntimeImportBrowser.unity` | Folder scan, preview and import of USD files |
-| [USD Live Sync (prototype)](#usd-live-sync-prototype) | `Samples/Live Sync Example/LiveSyncExample.unity` | Transform sync over TCP with a Python client or Isaac Sim 6.0.1 |
+| [USD Live Sync ](#usd-live-sync-prototype) | `Samples/Live Sync Example/LiveSyncExample.unity` | Transform sync over TCP with a Python client or Isaac Sim 6.0.1 |
 
 ### Export Example
 
@@ -352,11 +352,10 @@ Scans a folder for USD files, shows stage statistics, and imports the selected f
 3. Select **Scan**, then **Preview File**, **Import File** or **Import Selected**.
 4. Select **Export Cube** to write a small USD file into the current folder for a self-contained test, and **Clear Imported** to remove imported objects.
 
-### USD Live Sync (prototype)
+### USD Live Sync
 
 A prototype TCP transport that streams transform changes between the Unity Editor and Isaac Sim 6.0.1, with USD as the on-disk record. Verified on localhost only.
 
-<!-- PLACEHOLDER: gif — Unity Editor in Play mode (left) and Isaac Sim 6.0.1 (right) on the same machine. Move PropCube in Unity; the same prim moves in Isaac Sim. Then push a pose back from Isaac and PropCube moves in Unity. 15–20 s, 1920x1080. -->
 ![USD Live Sync prototype: Unity Editor and Isaac Sim side by side on one machine; moving a cube in Unity moves the same prim in Isaac Sim, and a pose pushed from Isaac Sim moves it back in Unity](Documentation~/images/sample-usd-live-sync.gif)
 
 **Demonstrates:**
@@ -408,7 +407,7 @@ Supported for static meshes, transforms and `UsdPreviewSurface` materials. Physi
 
 **Up axis and units are reported, not applied.** The importer converts USD's right-handed basis to Unity's with an X-axis flip, but it does not rotate or scale for the stage's `upAxis` or `metersPerUnit`. Both values are returned in `UsdImportPreviewInfo` and `UsdImportResult` so you can correct for them yourself. Isaac Sim stages are Z-up by default, so they arrive lying on their side in Unity's Y-up world.
 
-None of the samples correct for this on import: the Import Example only displays the two values. The one place the repo handles it is the opposite direction, in the USD Live Sync (prototype) Isaac Sim extension. It loads Unity's Y-up `base_stage.usda` under a dedicated wrapper Xform that carries a `rotateX` of +90° and a `metersPerUnit` scale, so the fix-up is applied once and child transforms stay untouched.
+None of the samples correct for this on import: the Import Example only displays the two values. The one place the repo handles it is the opposite direction, in the USD Live Sync Isaac Sim extension. It loads Unity's Y-up `base_stage.usda` under a dedicated wrapper Xform that carries a `rotateX` of +90° and a `metersPerUnit` scale, so the fix-up is applied once and child transforms stay untouched.
 
 The same pattern works in Unity: import under a dedicated parent and put the correction on that parent. A sketch, not covered by a test in the repo:
 
@@ -439,7 +438,7 @@ wrapper.localScale = Vector3.one * (float)result.MetersPerUnit; // stage units t
 <!-- PLACEHOLDER: image — Workflow diagram: Unity (UsdLiveSyncServer, host) writes base_stage.usda once and streams transform deltas over TCP 127.0.0.1:10000 to clients: usd_live_sync.py and the Isaac Sim Kit extension (mounts base_stage.usda under /World/UnityScene). Arrow back for set_transform where AcceptsRemoteWrites is true. Label "localhost only". 1600x700. -->
 ![Workflow diagram: Unity hosts UsdLiveSyncServer, writes base_stage.usda once, and streams transform changes over loopback TCP to the Python client and the Isaac Sim extension, which can send poses back for objects that accept remote writes](Documentation~/images/workflow-live-sync-isaac.png)
 
-Transforms only, one machine only. See [USD Live Sync (prototype)](#usd-live-sync-prototype).
+Transforms only, one machine only. See [USD Live Sync](#usd-live-sync-prototype).
 
 ## Documentation
 
@@ -908,7 +907,6 @@ Documentation~/images/install-add-from-git-url.png        — Package Manager "A
 Documentation~/images/install-samples-tab.png             — Package Manager Samples tab (blocked until samples are registered in package.json)
 Documentation~/images/sample-export-example.gif           — Export Example run
 Documentation~/images/sample-import-browser.gif           — Import Example run
-Documentation~/images/sample-usd-live-sync.gif            — USD Live Sync (prototype) with Unity and Isaac Sim 6.0.1
 Documentation~/images/workflow-import-isaac-scene.png     — workflow: import an Isaac Sim USD scene into Unity
 Documentation~/images/workflow-export-unity-scene.png     — workflow: export a Unity scene to USD
 Documentation~/images/workflow-live-sync-isaac.png        — workflow: live-sync Editor transforms to Isaac Sim
