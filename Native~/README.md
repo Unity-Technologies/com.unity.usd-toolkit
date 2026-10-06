@@ -28,7 +28,7 @@ layout will not match and export will crash or marshal garbage.
 > need Windows/macOS binaries built against the **0.3.0 ABI**, so rebuild once per
 > OS as below. After that, future C#-only fixes need no native rebuild.
 
-### Runbook for a fresh machine (e.g. open Claude Code on that OS and follow this)
+### Build on a fresh machine
 
 The native binary cannot be cross-compiled — build Windows on Windows, macOS on
 macOS. Each is a two-step process: build OpenUSD once, then build this wrapper.
@@ -129,3 +129,31 @@ Native~/build_macos.sh --openusd-root /path/to/openusd
 Restart the Unity Editor. Unity does **not** hot-reload an already-loaded native plugin, so
 a rebuilt `.so` / `.dll` / `.dylib` — especially after an ABI change — only takes effect on
 a fresh editor launch.
+
+Then:
+
+1. Run `python3 Native~/generate_native_hashes.py` to regenerate the digest manifest.
+2. Run `Native~/Tests~/security_test.cpp` to confirm the security fixes are in the binary.
+3. Check that no `.meta` file was deleted. Unity regenerates a missing `.meta` with a new GUID, which breaks references.
+
+## Validation checklist
+
+1. Confirm `UnityUSDToolkitNative` exists in the platform folder under `Runtime/Plugins/`.
+2. Confirm the same folder contains the OpenUSD libraries, `plugin/usd/plugInfo.json` and `lib/usd/plugInfo.json`.
+3. Open Unity on the target platform and check that the package compiles without errors.
+4. In Play mode, export a Cube or readable mesh with the Export Example sample.
+5. Run `usdchecker <file>` or `usdcat <file>` from the same OpenUSD install.
+6. Build a Windows x64 or macOS player and repeat the export in the built player. If you ship IL2CPP, test an IL2CPP player separately.
+7. Set an invalid `PluginSearchPath` and confirm the exception includes the missing directory and the plugin search diagnostics.
+8. Export a multi-submesh mesh and confirm the `GeomSubset` material bindings with `usdcat`.
+9. Export a mesh with more than 65k vertices and run `usdchecker` on the result.
+10. Export with `TransformPolicy = UsdTransformPolicy.PreserveHierarchy` and confirm nested `Xform` prims and `xformOp:transform` entries with `usdcat`.
+11. Import the exported file back (round trip).
+
+## Release checklist
+
+- The package id is `com.unity.usd-toolkit` and the version is correct.
+- Each platform's native payload is a real binary, not a Git LFS pointer.
+- `python3 Native~/generate_native_hashes.py` produces no diff. A diff means the manifest is stale.
+- `plugin/usd/plugInfo.json` and `lib/usd/plugInfo.json` are included for every platform.
+- The validation checklist above passes on every platform.

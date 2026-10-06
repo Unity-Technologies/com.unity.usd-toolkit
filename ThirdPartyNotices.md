@@ -143,8 +143,8 @@ Redistributed files:
 License:
 
 - The integration code under `Samples/Live Sync Example/Tools~/isaacsim` is
-  proprietary Unity software. See `LICENSE.md` and
-  `Samples/Live Sync Example/Tools~/isaacsim/exts/unity.usd.livesync/LICENSE.md`.
+  Unity code licensed under the Unity Companion License for Unity-dependent
+  projects. See `LICENSE.md`.
 - NVIDIA Isaac Sim, NVIDIA Omniverse, and any NVIDIA components they install are
   licensed to the user solely by NVIDIA under NVIDIA's own terms. Unity grants no
   rights in any NVIDIA software. Obtain Isaac Sim from NVIDIA and review the
@@ -170,9 +170,8 @@ available from the provider of any Third Party Products).
 ## Package Code
 
 The Unity C# API, sample scripts, build scripts, and custom native wrapper code
-in this package are not third-party components. They are proprietary Unity
-software unless a separate written agreement grants additional rights. See
-`LICENSE.md`.
+in this package are not third-party components. They are licensed under the
+Unity Companion License for Unity-dependent projects. See `LICENSE.md`.
 
 ## Trademarks
 

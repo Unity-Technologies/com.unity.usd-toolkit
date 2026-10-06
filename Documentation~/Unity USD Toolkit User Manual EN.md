@@ -1,139 +1,125 @@
 # Unity USD Toolkit User Manual
 
-Runtime USD export and import plugin for Windows / macOS / Linux Standalone
+Read and write OpenUSD stages from Unity at runtime, on Windows, macOS and Linux.
 
-Package version: 0.7.2-exp.1
-Native ABI: API 5
-Minimum Unity version: 2023.1
-Document revised: 2026-09-23
-Audience: developers and technical users adding this package to a Unity project for runtime USD export and import
+| | |
+| --- | --- |
+| **Package version** | 0.7.2-exp.1 |
+| **Unity** | 6.4 and newer |
+| **OpenUSD** | 26.05 |
 
-> Korean edition: `Unity USD Toolkit User Manual KR.md`
+[한국어](Unity%20USD%20Toolkit%20User%20Manual%20KR.md)
 
 ## Contents
 
-1. Overview
-2. Scope and limitations
-3. Adding the package to a Unity project
-4. Checking the native runtime payload
-5. Exporting at runtime
-6. Export options
-7. Importing at runtime
-8. Import options
-9. How untrusted USD files are handled
-10. The Live Sync sample
-11. Using the package in a Standalone build
-12. Inspecting the resulting USD
-13. Troubleshooting
-14. Pre-release checklist
-- Appendix A. Public API summary
-- Appendix B. Rebuilding the native plugin
+1. [Overview](#1-overview)
+2. [Supported platforms and features](#2-supported-platforms-and-features)
+3. [Install the package](#3-install-the-package)
+4. [Export at runtime](#4-export-at-runtime)
+5. [Import at runtime](#5-import-at-runtime)
+6. [Threading](#6-threading)
+7. [Materials and textures](#7-materials-and-textures)
+8. [Untrusted USD files](#8-untrusted-usd-files)
+9. [Build a standalone player](#9-build-a-standalone-player)
+10. [The USD Live Sync sample](#10-the-usd-live-sync-sample)
+11. [Check exported USD files](#11-check-exported-usd-files)
+12. [Troubleshooting](#12-troubleshooting)
+- [Appendix A. API reference](#appendix-a-api-reference)
+- [Appendix B. Verify the package's integrity](#appendix-b-verify-the-packages-integrity)
+- [Appendix C. Rebuild the native plugin](#appendix-c-rebuild-the-native-plugin)
 
 ## 1. Overview
 
-Unity USD Toolkit writes and reads USD files **inside** a built Unity player. It is not an Editor-only tool: while the application runs, it hands GameObject mesh data to a Pixar OpenUSD-based native plugin to produce `.usd`, `.usda`, `.usdc` and `.usdz` files, and reads USD stages back into Unity GameObjects through the same path.
+The Unity USD Toolkit writes and reads USD files inside a running Unity application, in the Editor and in built players. It converts GameObjects to `.usd`, `.usda`, `.usdc` and `.usdz` files, and loads USD stages back into GameObjects.
 
-### How it is put together
+The package has three layers:
 
-- The Unity C# API lives under the `Unity.USDToolkit` namespace.
-- C# calls only the C ABI functions of the `UnityUSDToolkitNative` plugin, through P/Invoke.
-- The native plugin uses the Pixar OpenUSD C++ API to work with stages, meshes, materials and transforms.
-- Nothing here depends on Unity's USD Editor packages, USD.NET, or `com.unity.exporter.usd`.
+- **C# API.** The public API in the `Unity.USDToolkit` namespace.
+- **Native plugin.** `UnityUSDToolkitNative`, a C++ library that wraps the Pixar OpenUSD API behind a C interface. The C# API calls it through P/Invoke.
+- **OpenUSD.** Pixar's OpenUSD 26.05 libraries and oneTBB, built for each platform.
 
-### Native ABI version
+The package does not depend on Unity's other USD packages or on USD.NET.
 
-The managed layer checks the API version the loaded plugin reports and **refuses anything that does not match the package source exactly** (currently API 5). It previously accepted API 2 and upward, but a fix that is not gated on the ABI — a security fix, for instance — is simply absent from an older binary with nothing in the version number to say so. The check runs on **both** the export and the import paths.
+The C# API checks the version of the native plugin when it loads, and refuses a plugin that doesn't match the package exactly. This ensures that every fix in the package is present in the binary that runs.
 
-## 2. Scope and limitations
+## 2. Supported platforms and features
 
 ### Platforms
 
-| Platform | Supported | Minimum OS | Notes |
+| Platform | Editor | Player | Minimum OS |
 | --- | --- | --- | --- |
-| Windows x64 (Editor / Standalone) | Yes | Windows 10 version 21H1 | `Runtime/Plugins/x86_64/Windows` |
-| macOS (Editor / Standalone) | Yes | macOS 12.0 (Monterey) | Universal (x86_64 + arm64), `Runtime/Plugins/macOS` |
-| Linux x64 (Editor / Standalone) | Yes | **Ubuntu 24.04** | Self-contained payload, `Runtime/Plugins/x86_64/Linux` |
-| Mobile / WebGL / console | No | — | Out of scope for this version. |
+| Windows x64 | Yes | Yes | Windows 10 version 21H1 |
+| macOS, Universal (x86_64 + arm64) | Yes | Yes | macOS 12.0 |
+| Linux x64 | Yes | Not yet | Ubuntu 24.04 |
+| Mobile, WebGL, consoles | No | No | — |
 
-The minimum OS is a property of the shipped native payload, not of the C# layer, and it applies to
-players you build as well as to the Editor: the same libraries are copied into a standalone build.
+The minimum OS applies to players you build as well as to the Editor, because the same native libraries are copied into the player.
 
-- **macOS 12.0.** Every dylib is built with a deployment target of 12.0, which is Unity 6.3's
-  minimum for a macOS player. dyld refuses to load them on anything older.
-- **Ubuntu 24.04.** The Linux payload is built on Ubuntu 24.04 and needs **glibc ≥ 2.38** and
-  **libstdc++ with `GLIBCXX_3.4.32`** (GCC 13). Unity 6.3 itself also supports Ubuntu 22.04, which
-  ships glibc 2.35 and `GLIBCXX_3.4.30` — this package does not run there, and the toolkit throws
-  a native-load error naming the requirement rather than failing silently. Nothing in the code
-  needs 24.04; the dependency comes from the build machine, and a rebuild on 22.04 would lower it.
+On Linux, the native libraries require glibc 2.38 or later and libstdc++ with `GLIBCXX_3.4.32` (GCC 13). They don't load on Ubuntu 22.04. When the requirements aren't met, the toolkit throws an error that names the missing requirement.
 
-> All three platforms are built against the public **OpenUSD `v26.05`** tag (commit `2095faf`), and the native ABI is API 5 on all three. Standardising on a published tag is what lets a third party reproduce and check the shipped payload.
+On Windows, the target machine needs the Microsoft Visual C++ Redistributable.
 
 ### Export
 
 | Feature | Supported | Notes |
 | --- | --- | --- |
-| Static mesh | Yes | GameObjects with `MeshFilter` + `MeshRenderer` |
-| GPU readback for non-readable meshes | Yes | Exports in Play mode even with `Read/Write Enabled` off |
-| Normals / UV0 | Yes | Each can be turned off. |
-| Per-submesh material binding | Yes | Authored as `UsdGeomSubset` |
-| Hierarchy transform preservation | Yes | `UsdTransformPolicy.PreserveHierarchy` |
-| Baked mesh transform | Yes | The default |
-| `UsdPreviewSurface` | Yes | Base color, opacity, metallic, roughness, emission |
-| **PBR texture export** | **Yes** | PNGs written to `<usd-name>_textures/` and referenced relatively |
-| **`.usdz` packaging** | **Yes** | A `.usdz` output path writes a package. An ARKit-compatible mode is available. |
-| Mesh extent | Yes | |
-| Inactive / disabled visibility | Yes | Authored as `visibility = "invisible"` |
-| Skinned mesh / animation | No | A later milestone |
+| Static meshes | Yes | GameObjects with a `MeshFilter` and `MeshRenderer`. |
+| Meshes without **Read/Write Enabled** | Yes | Read back from the GPU in Play mode. |
+| Normals and UV0 | Yes | Each can be turned off. |
+| Per-submesh materials | Yes | Authored as `UsdGeomSubset`. |
+| Transform hierarchy | Yes | With `UsdTransformPolicy.PreserveHierarchy`. |
+| Baked transforms | Yes | The default. |
+| `UsdPreviewSurface` materials | Yes | Base color, opacity, metallic, roughness, emission. |
+| PBR textures | Yes | Written as PNGs to `<usd-name>_textures/`. |
+| `.usdz` packages | Yes | With an optional ARKit-compatible mode. |
+| Inactive objects and disabled renderers | Yes | Authored as `visibility = "invisible"`. |
+| Skinned meshes and animation | No | |
 
-### Import (MVP)
+### Import
 
 | Feature | Supported | Notes |
 | --- | --- | --- |
-| `.usd` / `.usda` / `.usdc` / `.usdz` | Yes | Textures inside a usdz are read through the stage resolver. |
+| `.usd`, `.usda`, `.usdc`, `.usdz` | Yes | Textures inside a `.usdz` are supported. |
 | Static `UsdGeomMesh` | Yes | |
-| Xform hierarchy reconstruction | Yes | Every transformable prim becomes a Unity `Transform`. |
-| Multiple materials per mesh | Yes | `materialBind` `UsdGeomSubset` becomes a Unity submesh. |
-| `UsdPreviewSurface` and PBR textures | Yes | Albedo / normal / metallic-smoothness / emission |
-| Asynchronous import | Yes | Parsing off the main thread, object creation sliced across frames |
-| Stage preview metadata | Yes | Mesh, material, triangle and vertex counts before importing |
-| Folder scanning | Yes | `UsdLibraryScanner.ScanFolder` |
-| Skinned mesh / animation / variants / payload streaming | No | A later milestone |
+| Transform hierarchy | Yes | Every transformable prim becomes a Unity `Transform`. |
+| Multiple materials per mesh | Yes | Each `materialBind` subset becomes a submesh. |
+| `UsdPreviewSurface` materials and PBR textures | Yes | Albedo, normal, metallic-smoothness, emission. |
+| Asynchronous import | Yes | Parses off the main thread and creates objects across several frames. |
+| Statistics preview | Yes | Mesh, material, triangle and vertex counts before importing. |
+| Folder scanning | Yes | `UsdLibraryScanner.ScanFolder`. |
+| Up axis and unit conversion | No | Reported, but not applied. See [Up axis and units](#up-axis-and-units). |
+| Skinned meshes, animation, variant sets, payload streaming | No | |
+| Materials other than `UsdPreviewSurface`, including MaterialX | No | |
+| Physics schemas | No | |
 
-## 3. Adding the package to a Unity project
+## 3. Install the package
 
-### Option A: drop it into the Packages folder
+1. Open **Window > Package Manager**.
+2. Select **+ > Add package from git URL**.
+3. Enter `https://github.com/Unity-Technologies/com.unity.usd-toolkit.git`, then select **Add**.
 
-1. Copy the `com.unity.usd-toolkit` folder into your project's `Packages` folder.
-2. Confirm the final path is `<UnityProject>/Packages/com.unity.usd-toolkit/package.json`.
-3. Open the Editor and check the Console for compile errors.
+To install from a local folder, copy the package to `<YourProject>/Packages/com.unity.usd-toolkit`, or select **+ > Add package from disk** and choose its `package.json`.
 
-### Option B: add it from Package Manager
-
-1. Open `Window > Package Manager`.
-2. Choose `+` → `Add package from disk`.
-3. Select the package's `package.json`.
-
-### Registering it in manifest.json
+You can also add the package to `Packages/manifest.json`:
 
 ```json
 "dependencies": {
-  "com.unity.usd-toolkit": "file:Packages/com.unity.usd-toolkit"
+  "com.unity.usd-toolkit": "https://github.com/Unity-Technologies/com.unity.usd-toolkit.git"
 }
 ```
 
-> The native binaries are stored with Git LFS. If you obtained the package by cloning the repository, run `git lfs install` followed by `git lfs pull`. The plugin will not load while the binaries are still LFS pointer files.
+> [!NOTE]
+> The native libraries are stored with Git LFS. If you clone the repository, run `git lfs install` and `git lfs pull` before you open the project. The plugin doesn't load while the libraries are LFS pointer files.
 
-## 4. Checking the native runtime payload
+### Native files
 
-Each platform needs these files:
+Each platform's native files are in its own folder:
 
 ```text
 Runtime/Plugins/x86_64/Windows/
   UnityUSDToolkitNative.dll
-  usd_rt.dll          (OpenUSD monolithic, renamed from usd_ms to avoid a name collision
-                       with another package's OpenUSD)
-  tbb_usdrt.dll       (Intel's TBB, renamed from tbb.dll so the Windows loader cannot
-                       hand the plugin the Unity Editor's own copy instead)
+  usd_rt.dll
+  tbb_usdrt.dll
   lib/usd/**/plugInfo.json
   plugin/usd/**/plugInfo.json
 
@@ -141,87 +127,17 @@ Runtime/Plugins/macOS/
   UnityUSDToolkitNative.dylib
   libusd_ms.dylib
   libtbb*.dylib
-  lib/usd/… , plugin/usd/…
+  lib/usd/…, plugin/usd/…
 
 Runtime/Plugins/x86_64/Linux/
   libUnityUSDToolkitNative.so
-  lib/libusd_ms.so , lib/libtbb.so.2
-  lib/usd/… , plugin/usd/…
+  lib/libusd_ms.so, lib/libtbb.so.2
+  lib/usd/…, plugin/usd/…
 ```
 
-The macOS dylibs resolve their dependencies through `@loader_path`; confirm this with
-`otool -L Runtime/Plugins/macOS/UnityUSDToolkitNative.dylib`.
+On Windows, the OpenUSD and oneTBB libraries are renamed so they don't conflict with other copies loaded in the same process, such as the Unity Editor's own `tbb.dll`.
 
-### Payload integrity verification
-
-Before the first P/Invoke, the package compares the SHA-256 of each native binary against the digest recorded in `Runtime/Native/NativeRuntimeHashes.g.cs` and refuses to load a payload that does not match. Unlike the older presence check, this reads the file contents, so it catches a binary that was substituted or corrupted in distribution. The check runs once per process.
-
-If you rebuild the native plugin yourself you must regenerate the manifest:
-
-```bash
-python3 Native~/generate_native_hashes.py
-```
-
-> The script hashes **every** platform's binaries, not just the one you rebuilt. It refuses to run while any payload file is still an unfetched Git LFS pointer, so run `git lfs pull` first.
-
-### Verifying that the package is the one Unity published
-
-Three separate things can be checked, and they establish different properties. The digest
-manifest above proves the payload has not changed since it was packed; the two below prove where
-it came from.
-
-**1. The package signature (all platforms).** A package published through Unity's pipeline carries
-a CMS/PKCS#7 attestation at `package/.attestation.p7m`, signed by Unity's PKI and covering the
-digest of every file in the tarball — the native binaries under `Runtime/Plugins/**` included. Any
-file added, removed or altered after packing invalidates it. Unity 6.3 and later verify it
-automatically and show the result in the Package Manager window; to check it yourself:
-
-```bash
-tar -xzf com.unity.usd-toolkit-<version>.tgz package/.attestation.p7m
-openssl cms -verify -in package/.attestation.p7m -inform DER -noverify -out attestation.json
-openssl pkcs7 -in package/.attestation.p7m -inform DER -print_certs -text | head -40
-```
-
-Drop `-noverify` and pass `-CAfile` with Unity's root to check the chain as well as the structure.
-Internally the same two properties are asserted by PVP-28-3 (the signature is present) and
-PVP-29-3 (it is valid and matches the archive contents).
-
-**2. Platform code signatures (Windows and macOS).** The native binaries carry a publisher
-signature from Unity's certificates:
-
-```bash
-# macOS — expect a Developer ID authority, not "Signature=adhoc"
-codesign --verify --strict --verbose=2 Runtime/Plugins/macOS/UnityUSDToolkitNative.dylib
-codesign -dv --verbose=4 Runtime/Plugins/macOS/libusd_ms.dylib
-```
-
-```powershell
-# Windows — expect Status: Valid
-Get-ChildItem Runtime\Plugins\x86_64\Windows\*.dll | ForEach-Object {
-    Get-AuthenticodeSignature $_.FullName | Select-Object Status, SignerCertificate
-}
-```
-
-**Linux is deliberately not code-signed.** Neither the ELF format, the dynamic linker, nor Unity's
-signing infrastructure has an equivalent of Authenticode or Developer ID for a `.so`; Unity's code
-signing service covers Windows PE and macOS Mach-O only, and other Unity packages that ship native
-Linux libraries are signed the same way — that is, at the package level. For Linux the attestation
-in (1) and the digests in (3) are the integrity evidence.
-
-**3. Per-file digests (all platforms).** `ThirdPartyNotices~/sbom.cdx.json` is a CycloneDX 1.6
-bill of materials listing every third-party component in the payload with its version, source and
-SHA-256. It is the same digest the runtime check uses, in a form you can verify from outside the
-Editor:
-
-```bash
-sha256sum Runtime/Plugins/x86_64/Linux/lib/libusd_ms.so
-python3 -c "import json;[print(c['hashes'][0]['content'], [p['value'] for p in c['properties'] if p['name']=='unity:shippedPath'][0]) for c in json.load(open('ThirdPartyNotices~/sbom.cdx.json'))['components'][1:]]"
-```
-
-The SBOM also records which OpenUSD tag and commit each binary was built from, so a third party can
-rebuild from the same public source and compare what the binary contains.
-
-## 5. Exporting at runtime
+## 4. Export at runtime
 
 ```csharp
 using Unity.USDToolkit;
@@ -252,53 +168,57 @@ public class ExportButton : MonoBehaviour
 }
 ```
 
-The output extension decides the format. Because usdz is a read-only zip, a `.usdz` path makes the exporter write a `.usdc` plus its textures into a temporary staging folder and package that; nothing is left beside the `.usdz`.
+The file extension of the output path sets the format. For a `.usdz` path, the exporter writes the stage and its textures to a temporary folder and packages them, and leaves no other files next to the `.usdz`.
 
-### Readable meshes
-
-A player can export a mesh whose `Read/Write Enabled` is off. In Play mode the exporter reads the buffers back from GPU memory, and it uses the CPU path when `Read/Write Enabled` is on. With `RequireReadableMeshes` left at `true`, a mesh that neither path can read raises an exception.
-
-## 6. Export options
-
-| Option | Default | Notes |
-| --- | --- | --- |
-| `RootPrimName` | `null` | Falls back to the export root GameObject's name. |
-| `MetersPerUnit` | `1.0f` | Must be greater than zero. |
-| `IncludeInactive` | `false` | Whether inactive children are included. |
-| `RequireReadableMeshes` | `true` | Throws on a mesh that cannot be read. |
-| `ExportNormals` | `true` | |
-| `ExportUv0` | `true` | |
-| `ExportBounds` | `true` | Authors mesh extent. |
-| `ExportDisabledRenderers` | `true` | Includes disabled renderers as invisible. |
-| `PreserveInactiveAndDisabledVisibility` | `true` | Authors `visibility = "invisible"`. |
-| `TransformPolicy` | `BakedMesh` | `BakedMesh` or `PreserveHierarchy` |
-| `ExportTextures` | `false` | Writes PNGs to `<usd-name>_textures/` and references them. |
-| `IgnoreAlbedoInMetallicSlot` | `true` | Treats an albedo texture in the metallic slot as a misassignment, exports the scalar value instead, and warns. |
-| `UsdzArkitCompatible` | `false` | `.usdz` output only: packages under ARKit constraints. |
-| `ValidateNativeRuntime` | `true` | Checks that the native payload is **present**. |
-| `VerifyNativeRuntimeIntegrity` | `true` | Checks the payload's **contents** (SHA-256). |
-| `ValidateOpenUsdPluginPath` | `true` | Checks plugin/resource discovery paths. |
-| `PluginSearchPath` | `null` | Overrides OpenUSD plugin discovery. **See section 9.** |
-| `CaptureNativeDiagnostics` | `false` | Captures OpenUSD diagnostics. |
-| `NativeDiagnosticsLogPath` | `null` | File path for the captured diagnostics. |
-| `LogExportSummary` | `false` | Logs a summary after a successful export. |
-
-### Choosing a TransformPolicy
+### Choose a transform policy
 
 | Policy | When to use it | Result |
 | --- | --- | --- |
-| `BakedMesh` | Most runtime exports, and whenever the transform structure does not matter downstream | Transforms are baked into mesh points and the USD hierarchy stays flat. |
-| `PreserveHierarchy` | When the Unity hierarchy and local transforms must survive into USD | The GameObject hierarchy becomes Xform prims and mesh points stay in local space. |
+| `BakedMesh` | Most exports, when the downstream tool doesn't need the hierarchy. | Transforms are baked into mesh points, and the USD hierarchy is flat. |
+| `PreserveHierarchy` | When the GameObject hierarchy and local transforms must be kept. | Each GameObject becomes an `Xform` prim, and mesh points stay in local space. |
 
-## 7. Importing at runtime
+With `BakedMesh`, each mesh is written in the export root's space. Positions, rotations and scale, including negative scale, are applied to the points, and triangle winding is corrected for the conversion from Unity's coordinate system to USD's.
 
-### Preview, then import
+With `PreserveHierarchy`, the export root becomes the USD root prim, and each child's local position, rotation and scale are written as an `xformOp:transform` matrix.
+
+### Meshes without Read/Write Enabled
+
+In Play mode, the exporter reads meshes without **Read/Write Enabled** back from the GPU, so you don't need to reimport shipped content. Set `RequireReadableMeshes = false` to allow this. GPU readback needs a graphics device; in batch mode or with `-nographics`, enable **Read/Write Enabled** on the meshes instead.
+
+### Export options
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `RootPrimName` | `null` | The root prim name. Uses the export root's name when empty. |
+| `MetersPerUnit` | `1.0f` | The stage's `metersPerUnit`. Must be greater than zero. |
+| `TransformPolicy` | `BakedMesh` | `BakedMesh` or `PreserveHierarchy`. |
+| `IncludeInactive` | `false` | Includes inactive child GameObjects. |
+| `RequireReadableMeshes` | `true` | Throws an exception for meshes without **Read/Write Enabled**. Set to `false` to read them from the GPU. |
+| `ExportNormals` | `true` | Writes normals when the mesh has them. |
+| `ExportUv0` | `true` | Writes UV0 when the mesh has it. |
+| `ExportBounds` | `true` | Writes the mesh extent. |
+| `ExportDisabledRenderers` | `true` | Includes disabled renderers. |
+| `PreserveInactiveAndDisabledVisibility` | `true` | Marks included inactive objects and disabled renderers as `visibility = "invisible"`. |
+| `ExportTextures` | `false` | Writes PNG textures to `<usd-name>_textures/`. |
+| `IgnoreAlbedoInMetallicSlot` | `true` | Ignores a metallic map that is the same texture as the albedo map. See [Albedo texture in the metallic slot](#albedo-texture-in-the-metallic-slot). |
+| `UsdzArkitCompatible` | `false` | For `.usdz` output, packages the file for AR Quick Look. This can remove features such as variant sets. |
+| `ValidateNativeRuntime` | `true` | Checks that the native files are present. |
+| `VerifyNativeRuntimeIntegrity` | `true` | Checks the SHA-256 digest of each native file before loading it. Can be disabled only in the Editor and development builds. |
+| `ValidateOpenUsdPluginPath` | `true` | Checks the OpenUSD plugin paths. |
+| `PluginSearchPath` | `null` | Overrides where OpenUSD looks for plugins. See [Plugin search path](#plugin-search-path). |
+| `CaptureNativeDiagnostics` | `false` | Captures OpenUSD warnings and errors. |
+| `NativeDiagnosticsLogPath` | `null` | Writes captured diagnostics to this file. |
+| `LogExportSummary` | `false` | Logs a summary after a successful export. |
+
+## 5. Import at runtime
+
+Preview a stage, then import it:
 
 ```csharp
 UsdImportPreviewInfo preview = UsdImporter.GetPreviewInfo(path);
 if (preview.TriangleCount > 5_000_000)
 {
-    // Warn, or offer a cancel, before committing to a heavy import.
+    // Warn the user, or let them cancel, before a large import.
 }
 
 UsdImportResult result = await UsdImporter.ImportAsync(path, new UsdImportOptions
@@ -311,146 +231,241 @@ UsdImportResult result = await UsdImporter.ImportAsync(path, new UsdImportOption
 });
 ```
 
-`ImportAsync` runs the USD parse and file reads on a worker thread and creates Unity objects on the main thread, sliced across frames (`MaxMillisecondsPerFrame`). **Call it from the main thread.** Use `UsdImporter.Import` when you need the synchronous form.
+`ImportAsync` reads the stage on a worker thread and creates GameObjects on the main thread, spread across frames so the application stays responsive. Call it from the main thread. To import synchronously, use `UsdImporter.Import`.
 
-### Scanning a folder
+To list the USD files in a folder, with their thumbnails:
 
 ```csharp
 IReadOnlyList<UsdLibraryItem> items = UsdLibraryScanner.ScanFolder(folderPath);
 ```
 
-## 8. Import options
+### Up axis and units
 
-| Option | Default | Notes |
+The importer converts from USD's coordinate system to Unity's, but it doesn't rotate or scale the stage for its `upAxis` or `metersPerUnit`. Both values are returned in `UsdImportPreviewInfo` and `UsdImportResult`.
+
+Stages from Isaac Sim are Z-up by default, so they appear rotated in Unity. To correct this, import under a parent GameObject, and rotate and scale that parent:
+
+```csharp
+var stageRoot = new GameObject("UsdStageRoot").transform;
+
+UsdImportResult result = await UsdImporter.ImportAsync(path, new UsdImportOptions { Parent = stageRoot });
+
+if (result.UpAxis == "Z")
+{
+    stageRoot.localRotation = Quaternion.Euler(-90f, 0f, 0f); // Stage +Z becomes Unity +Y.
+}
+
+stageRoot.localScale = Vector3.one * (float)result.MetersPerUnit; // Stage units to meters.
+```
+
+### Import options
+
+| Option | Default | Description |
 | --- | --- | --- |
-| `Parent` | `null` | Parent Transform for the created root. |
-| `RootObjectName` | `null` | Falls back to the file name. |
-| `ImportMaterials` | `true` | Turns `UsdPreviewSurface` values into Unity materials. |
-| `ImportTextures` | `true` | Loads referenced PBR textures. |
-| `IncludeInvisible` | `true` | Creates prims marked `visibility = "invisible"` too. |
-| `GenerateColliders` | `false` | Adds a `MeshCollider`. |
+| `Parent` | `null` | The parent `Transform` of the imported root. |
+| `RootObjectName` | `null` | The root GameObject name. Uses the file name when empty. |
+| `ImportMaterials` | `true` | Creates Unity materials from `UsdPreviewSurface` values. |
+| `ImportTextures` | `true` | Loads the PBR textures that materials reference. |
+| `IncludeInvisible` | `true` | Also creates prims marked `visibility = "invisible"`. |
+| `GenerateColliders` | `false` | Adds a `MeshCollider` to each mesh. |
 | `RecalculateNormalsIfMissing` | `true` | Computes normals when the file has none. |
-| `AllowExternalAssetPaths` | `false` | **See section 9.** Permits reads outside the stage folder. |
-| `MaxMillisecondsPerFrame` | `10f` | Main-thread budget per frame for `ImportAsync`. |
-| `ProgressCallback` | `null` | `(0..1, phase)`, invoked on the main thread. |
-| `CaptureNativeDiagnostics` | `false` | |
-| `NativeDiagnosticsLogPath` | `null` | |
+| `AllowExternalAssetPaths` | `false` | Allows textures outside the stage folder. See [Untrusted USD files](#8-untrusted-usd-files). |
+| `MaxMillisecondsPerFrame` | `10f` | The time `ImportAsync` can spend on the main thread each frame. |
+| `ProgressCallback` | `null` | Receives progress from `0` to `1` and the current phase, on the main thread. |
+| `CaptureNativeDiagnostics` | `false` | Captures OpenUSD warnings and errors. |
+| `NativeDiagnosticsLogPath` | `null` | Writes captured diagnostics to this file. |
 
-## 9. How untrusted USD files are handled
+## 6. Threading
 
-A USD file being imported is treated as **untrusted input**: a marketplace asset, a shared `.usdz`, and anything dropped into a scanned folder all qualify. The defaults are as follows.
+Methods that create or read Unity objects must run on the main thread.
 
-### Asset paths are confined to the stage folder (on by default)
+| Method | Thread |
+| --- | --- |
+| `UsdImporter.ImportAsync` | Call from the main thread. Reading the stage runs on a worker thread. |
+| `UsdImporter.Import` | Runs on the calling thread. Call from the main thread. |
+| `UsdImporter.GetPreviewInfo` | Any thread. It doesn't touch Unity objects. |
+| `UsdImporter.LoadImageFile` | Main thread. It creates a `Texture2D`. |
+| `UsdExporter.ExportGameObject`, `ExportGameObjectWithResult` | Main thread. They read meshes, materials and textures. |
 
-A USD file authors its own texture paths, so an `inputs:file` can name an absolute path or climb out with `../` and make the importer read an unrelated file. Any path that resolves outside the stage's own folder — or outside the folder of any layer composing the stage — is therefore skipped. Textures packaged inside a `.usdz` live within the package and are unaffected.
+Every public method sets up the OpenUSD runtime before its first use, so you don't need to initialize anything.
 
-For a stage you trust that deliberately references a shared texture library elsewhere, set `UsdImportOptions.AllowExternalAssetPaths = true`.
+## 7. Materials and textures
 
-A rejected path is reported by its authored spelling only; the resolved absolute path is never printed, so a blocked attempt does not disclose local filesystem layout.
+### Export
 
-### Mesh topology is checked (on by default)
+With `ExportTextures = true`, each material's textures are written as PNGs to `<usd-name>_textures/` and referenced by relative path:
 
-A mesh whose `faceVertexCounts` do not sum to exactly the `faceVertexIndices` length is reported and skipped. Such a file could previously make the importer read outside its buffer and take down the process.
+| Unity property | USD input |
+| --- | --- |
+| `_BaseMap`, `_MainTex`, `_BaseColorMap` | `diffuseColor` (sRGB) |
+| `_BumpMap`, `_NormalMap` | `normal` |
+| `_MetallicGlossMap`, `_MetallicMap` | `metallic` (red channel) and `roughness` (1 − alpha) |
+| `_EmissionMap` | `emissiveColor` |
+| Texture tiling and offset | `UsdTransform2d`, when not the default |
 
-### Texture dimensions are capped (on by default)
+Source textures don't need **Read/Write Enabled**. Each texture is exported once, even when several materials use it.
 
-If a PNG header declares more than 16384 pixels per side, or more than 64M pixels in total, the built-in decoder refuses it and falls back to Unity's decoder. This stops a small file from driving a multi-gigabyte allocation from its header alone.
+### Import
 
-### The plugin search path is confined (on by default)
+Imported materials use the first shader available from `Universal Render Pipeline/Lit`, `HDRP/Lit` and `Standard`. Textures are assigned to `_BaseMap`, `_BumpMap`, `_MetallicGlossMap` and `_EmissionMap`, with tiling and offset from `UsdTransform2d`. Each texture file is loaded once and shared between materials.
 
-OpenUSD loads and executes whatever library a `plugInfo.json` names, inside your process. `UsdExportOptions.PluginSearchPath` must therefore resolve inside the package's own native folders, and anything outside them is refused. To run deliberately against a custom OpenUSD install, set `UsdExporter.AllowExternalPluginSearchPath = true` from code. That switch is a static that is never serialized, so an options object stored in a scene or prefab cannot grant itself the permission.
+### Albedo texture in the metallic slot
 
-## 10. The Live Sync sample
+A base color texture assigned to the metallic slot (`_MetallicGlossMap`) produces a mirror-like surface. In Unity it can look correct because a skybox or reflection probe gives it something to reflect. In viewers without environment reflections, such as the Isaac Sim viewport, it renders black.
 
-`Samples/Live Sync Example` keeps transforms in sync, in both directions, between a running Unity scene and an external tool (Python, NVIDIA Isaac Sim, or a DCC). Unity is the host: it exports the geometry once as `base_stage.usda`, then streams newline-delimited JSON over loopback TCP.
+When a material's metallic map is the same texture as its albedo map, the exporter ignores the metallic map, uses the material's **Metallic** value, and logs a warning. To use one texture for both slots on purpose, set `IgnoreAlbedoInMetallicSlot = false`.
 
-**The channel requires authentication.** Every connection must first send `{"cmd":"auth","token":"..."}`; until that succeeds no command is answered and no broadcast is delivered. The token comes from the inspector's `Auth Token`, else the `USD_LIVE_SYNC_TOKEN` environment variable, else a per-session value written to `live_sync_token.txt` beside `base_stage.usda`.
+## 8. Untrusted USD files
 
-The default bind is loopback. Binding to an address reachable from other machines requires both `allowNonLoopbackBind` and an **explicit** `authToken` — a generated token is shared only through a local file, so it is not a credential a remote client can obtain. In that configuration the traffic is not encrypted and the token travels in clear text, so use it only on a trusted network.
+The importer treats every USD file as untrusted, such as a downloaded asset, a shared `.usdz`, or a file in a scanned folder. The following protections are on by default.
 
-See `Samples/Live Sync Example/README.md` for the full walkthrough.
+### Texture paths
 
-## 11. Using the package in a Standalone build
+A USD file sets its own texture paths, and a path can point anywhere on disk. The importer skips any texture that resolves outside the folder of the stage or its layers, and logs a warning that shows the path as written in the file. Textures inside a `.usdz` are not affected.
 
-1. Pick the target platform in Build Settings. On macOS the build architecture must match the payload.
-2. Both Mono and IL2CPP work.
-3. Writing output under `Application.persistentDataPath` is recommended.
+For a trusted stage that references a shared texture library in another folder, set `UsdImportOptions.AllowExternalAssetPaths = true`.
 
-### Where the payload lands in a built player
+### Mesh topology
+
+The importer skips any mesh whose face data is inconsistent, and logs a warning with the prim path.
+
+### Texture size
+
+The importer refuses PNG and JPEG textures that declare more than 16,384 pixels on a side or more than 64 million pixels in total.
+
+### Plugin search path
+
+OpenUSD runs the libraries that a `plugInfo.json` file names. For this reason, `UsdExportOptions.PluginSearchPath` must be inside the package's own native folders. To use a custom OpenUSD installation, set `UsdExporter.AllowExternalPluginSearchPath = true` from code. This setting is static and never serialized, so an options object saved in a scene or prefab can't enable it.
+
+## 9. Build a standalone player
+
+1. In **Build Profiles**, select Windows or macOS. On macOS, the player architecture must match the native libraries.
+2. Build with Mono or IL2CPP.
+3. Write output files under `Application.persistentDataPath`.
+
+When you build, the package copies the OpenUSD files into the player:
 
 ```text
 <Build>/<App>_Data/Plugins/x86_64/Windows/     (Windows)
 <Build>/<App>.app/Contents/PlugIns/            (macOS)
-<Build>/<App>_Data/Plugins/x86_64/Linux/       (Linux)
 ```
 
-An Editor build postprocessor in the package copies the OpenUSD resource tree into the player, because `plugInfo.json` and `share/usd/plugins` are data files rather than native libraries and Unity's native plugin importer does not move them.
+For distribution outside your own machine, sign the macOS app bundle after Unity builds it.
 
-## 12. Inspecting the resulting USD
+## 10. The USD Live Sync sample
 
-- `usdchecker <file>` — structure and basic validity
-- `usdcat <file>` — dump the contents as text
-- Blender USD import — eyeball geometry and materials
-- usdview / Omniverse — inspect stage structure and material bindings
+`Samples/Live Sync Example` synchronizes transforms in both directions between a running Unity scene and an external tool, such as NVIDIA Isaac Sim or a Python script. Unity exports the scene geometry once as `base_stage.usda`, then streams transform changes over TCP.
 
-## 13. Troubleshooting
+Every connection must authenticate with a token before it receives data. The server accepts connections from the local machine only, and the traffic is not encrypted.
 
-| Symptom | Likely cause | What to do |
+For setup instructions, see the [Live Sync Example guide](../Samples/Live%20Sync%20Example/README.md).
+
+## 11. Check exported USD files
+
+- `usdchecker <file>` checks the structure and validity.
+- `usdcat <file>` prints the contents as text.
+- usdview, Isaac Sim, Omniverse or Blender display the geometry and materials.
+
+## 12. Troubleshooting
+
+| Symptom | Cause | Solution |
 | --- | --- | --- |
-| `DllNotFoundException` | Native files missing, or still LFS pointers | Check the platform payload folder and run `git lfs pull`. |
-| Native API version mismatch exception | The plugin reports a lower API than the package source | Rebuild that platform's plugin from `Native~` (Appendix B). |
-| Load refused on a digest mismatch | The payload does not match the manifest | If you rebuilt it yourself, run `python3 Native~/generate_native_hashes.py`. Otherwise re-acquire the package. |
-| OpenUSD plugin path error | `plugin/usd` or `lib/usd` missing | Confirm the `plugInfo.json` files are present. |
-| `PluginSearchPath` rejected | The path is outside the package's native folders | See section 9; set `UsdExporter.AllowExternalPluginSearchPath` if this is intended. |
-| Mesh is not readable | Neither path could read the mesh | Turn on `Read/Write Enabled`, or export in Play mode. |
-| Textures empty after import | The texture path resolved outside the stage folder | Check the Console warning; for a trusted file, enable `AllowExternalAssetPaths`. |
-| Some meshes missing after import | Rejected for inconsistent topology | The Console warning names the prim path. The source file needs fixing. |
-| No file produced | Output path permissions, or an exception | Write under `Application.persistentDataPath` and check the log. |
-| Works in the Editor, fails in Standalone | Payload missing from the build | Check the player's Plugins folder. |
+| `DllNotFoundException` | The native files are missing or are still Git LFS pointer files. | Run `git lfs pull`, and check the platform folder under `Runtime/Plugins`. |
+| Native API version mismatch | The native plugin is from a different version of the package. | Reinstall the package, or rebuild the plugin. See [Appendix C](#appendix-c-rebuild-the-native-plugin). |
+| The native plugin is refused because its digest doesn't match | A native file differs from the one shipped with the package. | Reinstall the package. If you rebuilt the plugin, regenerate the digests. See [Appendix C](#appendix-c-rebuild-the-native-plugin). |
+| OpenUSD plugin path error | The `plugin/usd` or `lib/usd` folder is missing. | Check that the `plugInfo.json` files are present. |
+| `PluginSearchPath` is refused | The path is outside the package's native folders. | See [Plugin search path](#plugin-search-path). |
+| A mesh can't be read | The mesh doesn't have **Read/Write Enabled**, and no graphics device is available. | Enable **Read/Write Enabled**, or export in Play mode. |
+| The surface renders black in Isaac Sim | The albedo texture is also in the metallic slot. | See [Albedo texture in the metallic slot](#albedo-texture-in-the-metallic-slot). |
+| Textures are missing after import | A texture path points outside the stage folder. | Read the warning in the Console. For a trusted file, set `AllowExternalAssetPaths = true`. |
+| Some meshes are missing after import | A mesh has inconsistent face data. | The warning in the Console names the prim. Fix the source file. |
+| The imported stage is rotated | The stage is Z-up. | See [Up axis and units](#up-axis-and-units). |
+| No file is written | The output folder isn't writable, or the export threw an exception. | Write under `Application.persistentDataPath`, and check the Console. |
+| The package works in the Editor but not in a player | The player targets an unsupported platform, or the native files are missing from the build. | Build for Windows x64 or macOS, and check the player's `Plugins` folder. |
 
-### Printing diagnostics
+To print the native plugin version, OpenUSD version and search paths:
 
 ```csharp
-UsdRuntimeInfo info = UsdExporter.GetRuntimeInfo();
-Debug.Log(info.ToString());   // API version, OpenUSD version, native paths
+Debug.Log(UsdExporter.GetRuntimeInfo().ToString());
 ```
 
-## 14. Pre-release checklist
+## Appendix A. API reference
 
-- Package id is `com.unity.usd-toolkit` and the version is what you intend
-- Each platform's native payload is a real binary, not an LFS pointer
-- `python3 Native~/generate_native_hashes.py` produces no diff (a diff means the manifest is stale)
-- `plugin/usd/plugInfo.json` and `lib/usd/plugInfo.json` are included
-- The package compiles in the Unity Editor
-- A simple mesh exports and passes `usdchecker`
-- The exported file imports back (round trip)
-- Export and import both work in a Standalone player on the target platform
-- If you ship IL2CPP, verify an IL2CPP player separately
-- Tell users that skinned meshes and animation are not supported yet
+All public types are in the `Unity.USDToolkit` namespace.
 
-## Appendix A. Public API summary
-
-| API | Purpose |
+| API | Description |
 | --- | --- |
-| `UsdExporter.ExportGameObject` | Simple export with no result object |
-| `UsdExporter.ExportGameObjectWithResult` | Export that returns a summary |
-| `UsdExporter.GetRuntimeInfo` | Native API / OpenUSD version and runtime paths |
-| `UsdExporter.AllowExternalPluginSearchPath` | Permit a plugin path outside the package (static, never serialized) |
-| `UsdImporter.GetPreviewInfo` | Stage statistics before importing |
-| `UsdImporter.Import` | Synchronous import |
-| `UsdImporter.ImportAsync` | Asynchronous, frame-sliced import |
-| `UsdLibraryScanner.ScanFolder` | List the USD files in a folder |
-| `UsdExportOptions` / `UsdImportOptions` | Behaviour options |
-| `UsdExportResult` / `UsdImportResult` / `UsdImportPreviewInfo` | Results and statistics |
-| `UsdExportException` / `UsdImportException` | Failures, with diagnostics |
-| `UsdTransformPolicy` | `BakedMesh` or `PreserveHierarchy` |
+| `UsdExporter.ExportGameObject` | Exports a GameObject hierarchy. |
+| `UsdExporter.ExportGameObjectWithResult` | Exports a GameObject hierarchy and returns a `UsdExportResult`. |
+| `UsdExporter.GetRuntimeInfo` | Returns the native plugin version, OpenUSD version and search paths. |
+| `UsdExporter.AllowExternalPluginSearchPath` | Allows a `PluginSearchPath` outside the package. |
+| `UsdImporter.GetPreviewInfo` | Returns a stage's statistics without importing it. |
+| `UsdImporter.Import` | Imports a stage synchronously. |
+| `UsdImporter.ImportAsync` | Imports a stage asynchronously, across several frames. |
+| `UsdImporter.LoadImageFile` | Loads an image file as a `Texture2D`, with size limits. |
+| `UsdLibraryScanner.ScanFolder` | Lists the USD files in a folder, with thumbnails. |
+| `UsdExportOptions`, `UsdImportOptions`, `UsdLibraryScanOptions` | Options. |
+| `UsdExportResult`, `UsdExportedMeshInfo` | Export results. |
+| `UsdImportResult`, `UsdImportedMeshInfo`, `UsdImportPreviewInfo` | Import results and statistics. |
+| `UsdLibraryItem` | A USD file found by `ScanFolder`. |
+| `UsdRuntimeInfo` | Native plugin version, OpenUSD version and search paths. |
+| `UsdExportException`, `UsdImportException` | Errors, with diagnostics. |
+| `UsdTransformPolicy` | `BakedMesh` or `PreserveHierarchy`. |
 
-## Appendix B. Rebuilding the native plugin
+Types in `Unity.USDToolkit.Native` are internal and can change without notice.
 
-Most users should keep the payload that ships with the package. Rebuilding is only needed when changing the OpenUSD version or modifying the native wrapper.
+While the package is in `0.x`, any release can include breaking API changes. From `1.0.0`, the public API follows semantic versioning.
 
-- Windows / Linux: `Native~/REBUILD_WINDOWS_LINUX.md` (step-by-step, with gates)
-- macOS:
+## Appendix B. Verify the package's integrity
+
+### Native file digests
+
+Before it loads the native plugin, the package compares the SHA-256 digest of each native file with the digests in `Runtime/Native/NativeRuntimeHashes.g.cs`, and refuses to load files that don't match. This check runs once per process.
+
+### Package signature
+
+A package published by Unity includes a signature at `package/.attestation.p7m` that covers every file in the package, including the native libraries. Unity 6.3 and later verify it automatically and show the result in the Package Manager. To verify it yourself:
+
+```bash
+tar -xzf com.unity.usd-toolkit-<version>.tgz package/.attestation.p7m
+openssl cms -verify -in package/.attestation.p7m -inform DER -noverify -out attestation.json
+openssl pkcs7 -in package/.attestation.p7m -inform DER -print_certs -text | head -40
+```
+
+To also check the certificate chain, remove `-noverify` and pass Unity's root certificate with `-CAfile`.
+
+### Code signatures
+
+On Windows and macOS, the native libraries are signed with Unity's certificates:
+
+```bash
+# macOS: expect a Developer ID authority.
+codesign --verify --strict --verbose=2 Runtime/Plugins/macOS/UnityUSDToolkitNative.dylib
+```
+
+```powershell
+# Windows: expect Status: Valid.
+Get-ChildItem Runtime\Plugins\x86_64\Windows\*.dll | ForEach-Object {
+    Get-AuthenticodeSignature $_.FullName | Select-Object Status, SignerCertificate
+}
+```
+
+Linux shared libraries have no equivalent code signature. On Linux, use the package signature and the digests in the bill of materials.
+
+### Bill of materials
+
+`ThirdPartyNotices~/sbom.cdx.json` is a CycloneDX bill of materials. It lists every third-party component in the native files, with its version, source, OpenUSD commit and SHA-256 digest:
+
+```bash
+sha256sum Runtime/Plugins/x86_64/Linux/lib/libusd_ms.so
+python3 -c "import json;[print(c['hashes'][0]['content'], [p['value'] for p in c['properties'] if p['name']=='unity:shippedPath'][0]) for c in json.load(open('ThirdPartyNotices~/sbom.cdx.json'))['components'][1:]]"
+```
+
+## Appendix C. Rebuild the native plugin
+
+You only need to rebuild the native plugin to change the OpenUSD version or modify the plugin.
+
+Build OpenUSD with `Native~/build_openusd.py`, which verifies the OpenUSD source and its dependencies before building. For example, on macOS:
 
 ```bash
 python3 Native~/build_openusd.py --platform macos --openusd-src <OpenUSD v26.05 clone> \
@@ -460,12 +475,10 @@ bash Native~/build_macos.sh \
   --codesign-id "<Developer ID>"
 ```
 
-Build OpenUSD with `Native~/build_openusd.py` on every platform, never with `build_usd.py` directly: it checks the pinned TBB archive before `build_usd.py` compiles it and stamps the install, and every wrapper build refuses an install without that stamp.
+After you rebuild, regenerate the digests:
 
-After any rebuild you **must**:
+```bash
+python3 Native~/generate_native_hashes.py
+```
 
-1. Run `python3 Native~/generate_native_hashes.py` to regenerate the digest manifest.
-2. Run `Native~/Tests~/security_test.cpp` to confirm the security fixes are in the binary.
-3. Check that no `.meta` file was deleted — the install step can wipe them, and Unity would regenerate them with new GUIDs, breaking references.
-
-`Native~/REBUILD_WINDOWS_LINUX.md` and `BUILD_NOTES.md` have the full procedure and its verification gates.
+For the full procedure on each platform, see `Native~/README.md` and `Native~/REBUILD_WINDOWS_LINUX.md`.
