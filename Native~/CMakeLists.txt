@@ -268,5 +268,7 @@ endif()
 if(_RUSD_SCANNED)
     install(CODE "file(REMOVE \"\${CMAKE_INSTALL_PREFIX}/${_RUSD_UNSCANNED_MARKER}\")")
 else()
-    install(CODE "file(WRITE \"\${CMAKE_INSTALL_PREFIX}/${_RUSD_UNSCANNED_MARKER}\" \"Built against ${OPENUSD_ROOT}, which build_openusd.py did not build with --require-scan.\\nNot for release: Native~/generate_native_hashes.py --release refuses this payload.\\n\")")
+    # Forward slashes: a Windows root's backslashes would be read as escapes in the install script.
+    file(TO_CMAKE_PATH "${OPENUSD_ROOT}" _RUSD_OPENUSD_ROOT_DISPLAY)
+    install(CODE "file(WRITE \"\${CMAKE_INSTALL_PREFIX}/${_RUSD_UNSCANNED_MARKER}\" \"Built against ${_RUSD_OPENUSD_ROOT_DISPLAY}, which build_openusd.py did not build with --require-scan.\\nNot for release: Native~/generate_native_hashes.py --release refuses this payload.\\n\")")
 endif()

@@ -254,6 +254,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Instanced geometry is imported.** The import walked the stage with the default traversal,
+  which stops at an instanceable prim, so everything inside an instance was skipped. Omniverse
+  and most CAD exports build assemblies from instances, and keep the source geometry under an
+  invisible `/World/Prototypes`, so such a stage imported with only those hidden copies and
+  nothing on screen (`KukaArm1.usd` from the Omniverse Factory sample: 114 meshes, 0 visible).
+  The walk now includes instance proxies (`UsdTraverseInstanceProxies()`): the same stage
+  imports 114 visible meshes. Materials bound inside a prototype are shared across its instances.
+- **Omniverse MDL materials import with their colours.** Omniverse authors shading as MDL under
+  the `mdl` render context only (`outputs:mdl:surface`), which the universal-context lookup
+  never sees, so every material came in as default white with a "no surface shader source"
+  warning. The importer now falls back to the `mdl` context and reads the Omniverse library
+  shaders: OmniPBR and its variants (diffuse colour, tint and texture, metallic, roughness,
+  normal map, emission, opacity, UV scale/offset), OmniSurface (base colour, metalness,
+  roughness, emission, opacity, transmission as partial alpha) and OmniGlass (tinted
+  transparent). Another MDL module contributes its base colour if it has one under a common
+  name, with a warning. OmniPBR's separate metallic/roughness/ORM textures have no equivalent in
+  the packed map Unity uses, so those stay at their constants and say so. UsdPreviewSurface still
+  wins when a material carries both. No ABI change.
+- **`primvars:displayColor` is used when a material cannot be.** A mesh with no material, or one
+  whose shader is unsupported, takes its (inherited) displayColor and displayOpacity, averaged
+  when authored per vertex or face, instead of default white. That is what every USD viewer
+  shows for such a mesh.
+- **Export writes each distinct material once and adds `primvars:displayColor`.** Every mesh used
+  to get its own `Material_N` prim, so an assembly of hundreds of parts exported hundreds of
+  identical materials. Materials are now shared by value. Each mesh also carries its base colour
+  as displayColor (per face for multi-material meshes, with displayOpacity when translucent), so
+  viewers and renderers that do not evaluate UsdPreviewSurface show colour instead of grey.
+- The macOS payload is rebuilt from the same pinned OpenUSD 26.05 commit and patch, and
+  `Native~/dependency-digests/macos.sha256` and `NativeRuntimeHashes.g.cs` are updated for it.
+  **The Windows and Linux payloads still need a rebuild on their own OS** to pick up these fixes;
+  until then they behave as before.
+
 - **Textures packaged in a `.usdz` load again.** The symlink check added
   (above) looks at every path component below the stage folder and treated one it could not stat
   as unsafe. A packaged texture's path — `0/tex.png` next to `scene.usdz` — names nothing on disk,

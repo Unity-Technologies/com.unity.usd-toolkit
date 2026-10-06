@@ -1,3 +1,2 @@
-Built against an OpenUSD install that build_openusd.py did not build with --require-scan:
-no source scan was recorded for OpenUSD 26.05 or oneTBB before this payload was compiled.
+Built against /opt/usd-26.05-lz4/install, which build_openusd.py did not build with --require-scan.
 Not for release: Native~/generate_native_hashes.py --release refuses this payload.

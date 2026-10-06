@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstring>
 #include <exception>
+#include <ios>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -106,6 +107,19 @@ struct RUsdContext
     std::vector<ImportedMaterial> importedMaterials;
     std::vector<ImportedMesh> importedMeshes;
     std::vector<ImportedNode> importedNodes;
+
+    // Material cache key -> index into importedMaterials. The key is the material prim in its
+    // prototype, so every instance of one part shares a single entry; displayColor stand-ins add
+    // their colour to the key. Unrecognised materials are cached too, so they warn only once.
+    struct MaterialCacheEntry
+    {
+        int index = -1;
+        bool recognized = false;
+    };
+    std::unordered_map<std::string, MaterialCacheEntry> importedMaterialCache;
+
+    // Export: identical materials (by value) are written once and shared between meshes.
+    std::unordered_map<std::string, UsdShadeMaterial> exportedMaterials;
 
     // Authored asset path -> the path OpenUSD resolved it to, recorded while reading materials.
     // The authored path is all the managed side gets, and for a stage inside a .usdz package it
@@ -695,6 +709,35 @@ enum class TextureReadStatus
     EmptyFilePath
 };
 
+// Writes an authored texture asset path into `buffer` and remembers what OpenUSD resolved it
+// to. USD anchored it against the layer that authored it, which is more than
+// RUsd_ReadImportAsset could work out on its own. Returns false for an empty path.
+bool StoreAssetPath(RUsdContext* context, const SdfAssetPath& asset, char* buffer, size_t capacity)
+{
+    std::string path = asset.GetAssetPath();
+    if (path.empty())
+    {
+        path = asset.GetResolvedPath();
+    }
+
+    if (path.empty())
+    {
+        return false;
+    }
+
+    if (context != nullptr)
+    {
+        const std::string& resolved = asset.GetResolvedPath();
+        if (!resolved.empty())
+        {
+            context->assetResolutions[path] = resolved;
+        }
+    }
+
+    CopyStringToBuffer(path, buffer, capacity);
+    return true;
+}
+
 TextureReadStatus ReadConnectedTexture(
     RUsdContext* context,
     const UsdShadeShader& shader,
@@ -732,31 +775,9 @@ TextureReadStatus ReadConnectedTexture(
         return TextureReadStatus::UnreadableFileValue;
     }
 
-    const SdfAssetPath& asset = vtValue.UncheckedGet<SdfAssetPath>();
-    std::string path = asset.GetAssetPath();
-    if (path.empty())
-    {
-        path = asset.GetResolvedPath();
-    }
-
-    if (path.empty())
-    {
-        return TextureReadStatus::EmptyFilePath;
-    }
-
-    // Remember what OpenUSD resolved this authored path to. USD anchored it against the layer
-    // that authored it, which is more than RUsd_ReadImportAsset could work out on its own.
-    if (context != nullptr)
-    {
-        const std::string& resolved = asset.GetResolvedPath();
-        if (!resolved.empty())
-        {
-            context->assetResolutions[path] = resolved;
-        }
-    }
-
-    CopyStringToBuffer(path, buffer, capacity);
-    return TextureReadStatus::Ok;
+    return StoreAssetPath(context, vtValue.UncheckedGet<SdfAssetPath>(), buffer, capacity)
+        ? TextureReadStatus::Ok
+        : TextureReadStatus::EmptyFilePath;
 }
 
 // Reads the texture path for one input and, when a connection exists but yields nothing, says
@@ -1004,29 +1025,514 @@ RUsdMaterial ExtractPreviewMaterial(RUsdContext* context, const UsdShadeMaterial
     return result;
 }
 
-int AddImportedMaterial(RUsdContext* context, const UsdShadeMaterial& material)
+RUsdMaterial DefaultImportMaterial()
 {
-    if (context == nullptr || !material)
+    RUsdMaterial result = {1.0f, 1.0f, 1.0f, 1.0f, 0.0f, 0.5f};
+    result.uvScale[0] = 1.0f;
+    result.uvScale[1] = 1.0f;
+    return result;
+}
+
+// ---- MDL (Omniverse) materials ---------------------------------------------------------
+// Omniverse authors shading as MDL under the `mdl` render context only (outputs:mdl:surface),
+// so ComputeSurfaceSource() with the default universal context finds no shader at all. The
+// Omniverse library shaders (OmniPBR, OmniSurface, OmniGlass) have documented parameters that
+// map onto RUsdMaterial closely enough for a real-time preview. MDL leaves an unauthored
+// parameter at the module's own default, which USD cannot see, so those defaults are restated
+// here.
+
+// An input's effective value, following connections up to material interface inputs. Returns
+// false when the value is produced by another shader node, which cannot be evaluated here.
+bool GetMdlInputValue(const UsdShadeShader& shader, const char* name, VtValue* value)
+{
+    UsdShadeInput input = shader.GetInput(TfToken(name));
+    if (!input)
+    {
+        return false;
+    }
+
+    for (const UsdAttribute& attribute : input.GetValueProducingAttributes())
+    {
+        if (UsdShadeOutput::IsOutput(attribute))
+        {
+            return false;
+        }
+
+        if (attribute.Get(value) && !value->IsEmpty())
+        {
+            return true;
+        }
+    }
+
+    return input.Get(value) && !value->IsEmpty();
+}
+
+bool GetMdlFloat(const UsdShadeShader& shader, const char* name, float* out)
+{
+    VtValue value;
+    if (!GetMdlInputValue(shader, name, &value))
+    {
+        return false;
+    }
+
+    if (VtValueHoldsType(value, "float"))
+    {
+        *out = value.UncheckedGet<float>();
+    }
+    else if (VtValueHoldsType(value, "double"))
+    {
+        *out = static_cast<float>(value.UncheckedGet<double>());
+    }
+    else if (VtValueHoldsType(value, "int"))
+    {
+        *out = static_cast<float>(value.UncheckedGet<int>());
+    }
+    else
+    {
+        return false;
+    }
+
+    return true;
+}
+
+bool GetMdlBool(const UsdShadeShader& shader, const char* name, bool fallback)
+{
+    VtValue value;
+    if (!GetMdlInputValue(shader, name, &value))
+    {
+        return fallback;
+    }
+
+    if (VtValueHoldsType(value, "bool"))
+    {
+        return value.UncheckedGet<bool>();
+    }
+
+    if (VtValueHoldsType(value, "int"))
+    {
+        return value.UncheckedGet<int>() != 0;
+    }
+
+    return fallback;
+}
+
+bool GetMdlColor(const UsdShadeShader& shader, const char* name, GfVec3f* out)
+{
+    VtValue value;
+    if (!GetMdlInputValue(shader, name, &value))
+    {
+        return false;
+    }
+
+    if (VtValueHoldsType(value, "GfVec3f"))
+    {
+        *out = value.UncheckedGet<GfVec3f>();
+    }
+    else if (VtValueHoldsType(value, "GfVec3d"))
+    {
+        const GfVec3d& v = value.UncheckedGet<GfVec3d>();
+        *out = GfVec3f(static_cast<float>(v[0]), static_cast<float>(v[1]), static_cast<float>(v[2]));
+    }
+    else if (VtValueHoldsType(value, "GfVec4f"))
+    {
+        const GfVec4f& v = value.UncheckedGet<GfVec4f>();
+        *out = GfVec3f(v[0], v[1], v[2]);
+    }
+    else
+    {
+        return false;
+    }
+
+    return true;
+}
+
+bool GetMdlVec2(const UsdShadeShader& shader, const char* name, float* out2)
+{
+    VtValue value;
+    if (!GetMdlInputValue(shader, name, &value))
+    {
+        return false;
+    }
+
+    if (VtValueHoldsType(value, "GfVec2f"))
+    {
+        const GfVec2f& v = value.UncheckedGet<GfVec2f>();
+        out2[0] = v[0];
+        out2[1] = v[1];
+        return true;
+    }
+
+    if (VtValueHoldsType(value, "GfVec2d"))
+    {
+        const GfVec2d& v = value.UncheckedGet<GfVec2d>();
+        out2[0] = static_cast<float>(v[0]);
+        out2[1] = static_cast<float>(v[1]);
+        return true;
+    }
+
+    return false;
+}
+
+// MDL texture parameters are plain asset-valued inputs, not connections to a texture node.
+bool GetMdlTexture(
+    RUsdContext* context,
+    const UsdShadeShader& shader,
+    const char* name,
+    char* buffer,
+    size_t capacity)
+{
+    VtValue value;
+    if (!GetMdlInputValue(shader, name, &value) || !VtValueHoldsType(value, "SdfAssetPath"))
+    {
+        return false;
+    }
+
+    return StoreAssetPath(context, value.UncheckedGet<SdfAssetPath>(), buffer, capacity);
+}
+
+void SetColor(RUsdMaterial* material, const GfVec3f& color)
+{
+    material->r = color[0];
+    material->g = color[1];
+    material->b = color[2];
+}
+
+// The MDL module a shader runs: its sub-identifier ("OmniPBR"), else the module file's stem.
+std::string GetMdlShaderName(const UsdShadeShader& shader)
+{
+    const TfToken mdl("mdl");
+    TfToken subIdentifier;
+    if (shader.GetSourceAssetSubIdentifier(&subIdentifier, mdl) && !subIdentifier.IsEmpty())
+    {
+        return subIdentifier.GetString();
+    }
+
+    SdfAssetPath asset;
+    if (!shader.GetSourceAsset(&asset, mdl))
+    {
+        return std::string();
+    }
+
+    std::string name = TfGetBaseName(asset.GetAssetPath());
+    const std::string extension = ".mdl";
+    if (name.size() > extension.size() &&
+        name.compare(name.size() - extension.size(), extension.size(), extension) == 0)
+    {
+        name.resize(name.size() - extension.size());
+    }
+
+    return name;
+}
+
+bool StartsWith(const std::string& value, const char* prefix)
+{
+    return value.rfind(prefix, 0) == 0;
+}
+
+// OmniPBR and its variants (OmniPBR_ClearCoat, OmniPBR_Opacity, ...).
+void ReadOmniPbr(
+    RUsdContext* context,
+    const UsdShadeShader& shader,
+    const std::string& materialPath,
+    RUsdContext::ImportedMaterial* out)
+{
+    RUsdMaterial& m = out->material;
+
+    // With a diffuse texture, OmniPBR multiplies it by the tint alone; the constant is the
+    // untextured colour. Same rule as UsdPreviewSurface, so the C# side needs nothing new.
+    GfVec3f diffuse(0.2f, 0.2f, 0.2f);
+    GetMdlColor(shader, "diffuse_color_constant", &diffuse);
+    GfVec3f tint(1.0f, 1.0f, 1.0f);
+    GetMdlColor(shader, "diffuse_tint", &tint);
+    SetColor(&m, GfCompMult(diffuse, tint));
+    GetMdlTexture(context, shader, "diffuse_texture", m.albedoTexturePath, sizeof(m.albedoTexturePath));
+
+    m.metallic = 0.0f;
+    GetMdlFloat(shader, "metallic_constant", &m.metallic);
+    m.roughness = 0.5f;
+    GetMdlFloat(shader, "reflection_roughness_constant", &m.roughness);
+
+    GetMdlTexture(context, shader, "normalmap_texture", m.normalTexturePath, sizeof(m.normalTexturePath));
+
+    // Unity's packed metallic+smoothness map has no equivalent of OmniPBR's separate (or ORM)
+    // maps, so those stay at their constants rather than being misread.
+    char unused[1024] = {0};
+    if (GetMdlTexture(nullptr, shader, "metallic_texture", unused, sizeof(unused)) ||
+        GetMdlTexture(nullptr, shader, "reflectionroughness_texture", unused, sizeof(unused)) ||
+        GetMdlTexture(nullptr, shader, "ORM_texture", unused, sizeof(unused)))
+    {
+        AppendImportWarning(context,
+            "material '" + materialPath + "' uses OmniPBR metallic/roughness/ORM textures; they "
+            "are not imported and the constant metallic and roughness values are used.");
+    }
+
+    if (GetMdlBool(shader, "enable_emission", false))
+    {
+        GfVec3f emissive(1.0f, 0.1f, 0.1f);
+        GetMdlColor(shader, "emissive_color", &emissive);
+        // emissive_intensity is in nits with a default of 40. Normalising by that default keeps
+        // an untouched emitter at its authored colour instead of blowing it out to white.
+        float intensity = 40.0f;
+        GetMdlFloat(shader, "emissive_intensity", &intensity);
+        const float scale = std::max(0.0f, intensity / 40.0f);
+        m.emissive[0] = emissive[0] * scale;
+        m.emissive[1] = emissive[1] * scale;
+        m.emissive[2] = emissive[2] * scale;
+        GetMdlTexture(context, shader, "emissive_color_texture",
+            m.emissiveTexturePath, sizeof(m.emissiveTexturePath));
+    }
+
+    if (GetMdlBool(shader, "enable_opacity", false))
+    {
+        GetMdlFloat(shader, "opacity_constant", &m.a);
+        if (GetMdlBool(shader, "enable_opacity_texture", false))
+        {
+            char opacityTexture[1024] = {0};
+            if (GetMdlTexture(context, shader, "opacity_texture", opacityTexture, sizeof(opacityTexture)))
+            {
+                out->opacityTexturePath = opacityTexture;
+            }
+        }
+
+        GetMdlFloat(shader, "opacity_threshold", &out->opacityThreshold);
+    }
+
+    GetMdlVec2(shader, "texture_scale", m.uvScale);
+    GetMdlVec2(shader, "texture_translate", m.uvOffset);
+}
+
+void ReadOmniSurface(const UsdShadeShader& shader, RUsdContext::ImportedMaterial* out)
+{
+    RUsdMaterial& m = out->material;
+
+    GfVec3f base(1.0f, 1.0f, 1.0f);
+    GetMdlColor(shader, "diffuse_reflection_color", &base);
+    float weight = 0.8f;
+    GetMdlFloat(shader, "diffuse_reflection_weight", &weight);
+    SetColor(&m, base * weight);
+
+    m.metallic = 0.0f;
+    GetMdlFloat(shader, "metalness", &m.metallic);
+    m.roughness = 0.2f;
+    GetMdlFloat(shader, "specular_reflection_roughness", &m.roughness);
+
+    float emissionWeight = 0.0f;
+    GetMdlFloat(shader, "emission_weight", &emissionWeight);
+    if (emissionWeight > 0.0f)
+    {
+        GfVec3f emission(1.0f, 1.0f, 1.0f);
+        GetMdlColor(shader, "emission_color", &emission);
+        m.emissive[0] = emission[0] * emissionWeight;
+        m.emissive[1] = emission[1] * emissionWeight;
+        m.emissive[2] = emission[2] * emissionWeight;
+    }
+
+    if (GetMdlBool(shader, "enable_opacity", false))
+    {
+        GetMdlFloat(shader, "geometry_opacity", &m.a);
+    }
+
+    // Transmission has no real-time equivalent; partial alpha is the closest readable stand-in.
+    float transmission = 0.0f;
+    GetMdlFloat(shader, "specular_transmission_weight", &transmission);
+    if (transmission > 0.0f)
+    {
+        m.a = std::min(m.a, 1.0f - 0.75f * std::min(transmission, 1.0f));
+    }
+}
+
+void ReadOmniGlass(const UsdShadeShader& shader, RUsdContext::ImportedMaterial* out)
+{
+    RUsdMaterial& m = out->material;
+
+    GfVec3f color(1.0f, 1.0f, 1.0f);
+    GetMdlColor(shader, "glass_color", &color);
+    SetColor(&m, color);
+    m.a = 0.25f;
+    m.metallic = 0.0f;
+    m.roughness = 0.0f;
+    GetMdlFloat(shader, "frosting_roughness", &m.roughness);
+}
+
+// Returns false when the MDL module is not one this reader understands.
+bool ExtractMdlMaterial(
+    RUsdContext* context,
+    const UsdShadeShader& shader,
+    const std::string& materialPath,
+    RUsdContext::ImportedMaterial* out)
+{
+    const std::string name = GetMdlShaderName(shader);
+    if (StartsWith(name, "OmniPBR"))
+    {
+        ReadOmniPbr(context, shader, materialPath, out);
+        return true;
+    }
+
+    if (StartsWith(name, "OmniSurface"))
+    {
+        ReadOmniSurface(shader, out);
+        return true;
+    }
+
+    if (StartsWith(name, "OmniGlass"))
+    {
+        ReadOmniGlass(shader, out);
+        return true;
+    }
+
+    // Unknown module: take a base colour if it carries one under a common name.
+    GfVec3f color;
+    for (const char* input : {"diffuse_color_constant", "base_color", "diffuse_color", "color"})
+    {
+        if (GetMdlColor(shader, input, &color))
+        {
+            SetColor(&out->material, color);
+            AppendImportWarning(context,
+                "material '" + materialPath + "' uses MDL module '" + name +
+                "'; only its base colour (inputs:" + input + ") is imported.");
+            return true;
+        }
+    }
+
+    return false;
+}
+
+// Fills `out` from the material's surface shader. Returns false when no supported shader is
+// found, after saying why; `out` then holds the default material.
+bool ExtractMaterial(
+    RUsdContext* context,
+    const UsdShadeMaterial& material,
+    RUsdContext::ImportedMaterial* out)
+{
+    out->material = DefaultImportMaterial();
+    const std::string materialPath = material.GetPath().GetString();
+
+    // UsdPreviewSurface wins when a material carries both, as it does for every other renderer.
+    UsdShadeShader universal = material.ComputeSurfaceSource();
+    TfToken shaderId;
+    if (universal && universal.GetShaderId(&shaderId) && shaderId == TfToken("UsdPreviewSurface"))
+    {
+        out->material = ExtractPreviewMaterial(context, material);
+        ExtractOpacityInfo(context, material, &out->opacityTexturePath, &out->opacityThreshold);
+        return true;
+    }
+
+    // This falls back to the universal output when there is no mdl one; that shader was
+    // already rejected above.
+    UsdShadeShader mdl = material.ComputeSurfaceSource(TfTokenVector{TfToken("mdl")});
+    if (mdl && universal && mdl.GetPath() == universal.GetPath())
+    {
+        mdl = UsdShadeShader();
+    }
+
+    if (mdl && ExtractMdlMaterial(context, mdl, materialPath, out))
+    {
+        return true;
+    }
+
+    std::string reason;
+    if (universal)
+    {
+        reason = "surface shader is '" +
+            (shaderId.IsEmpty() ? std::string("(no info:id)") : shaderId.GetString()) +
+            "', not UsdPreviewSurface or a supported MDL shader";
+    }
+    else if (mdl)
+    {
+        const std::string name = GetMdlShaderName(mdl);
+        reason = "MDL shader '" + (name.empty() ? std::string("(unnamed)") : name) + "' is not supported";
+    }
+    else
+    {
+        reason = "has no surface shader source";
+    }
+
+    AppendImportWarning(context,
+        "material '" + materialPath + "' " + reason +
+        "; the mesh's displayColor, else the default material, is used.");
+    return false;
+}
+
+// primvars:displayColor/displayOpacity, the colour every USD viewer falls back to when it
+// cannot evaluate a material. There is no vertex-colour channel in the import ABI, so
+// per-vertex or per-face colours are averaged, which beats default white by a long way.
+struct DisplayColor
+{
+    bool valid = false;
+    GfVec3f color = GfVec3f(1.0f, 1.0f, 1.0f);
+    float opacity = 1.0f;
+};
+
+int AddDisplayColorMaterial(
+    RUsdContext* context,
+    const std::string& baseKey,
+    const std::string& name,
+    const DisplayColor& displayColor)
+{
+    std::ostringstream key;
+    key << baseKey << "|displayColor" << std::hexfloat << displayColor.color[0] << ','
+        << displayColor.color[1] << ',' << displayColor.color[2] << ',' << displayColor.opacity;
+
+    RUsdContext::MaterialCacheEntry& entry = context->importedMaterialCache[key.str()];
+    if (entry.recognized)
+    {
+        return entry.index;
+    }
+
+    RUsdContext::ImportedMaterial importedMaterial;
+    importedMaterial.name = name;
+    importedMaterial.material = DefaultImportMaterial();
+    SetColor(&importedMaterial.material, displayColor.color);
+    importedMaterial.material.a = displayColor.opacity;
+    context->importedMaterials.push_back(importedMaterial);
+
+    entry.index = static_cast<int>(context->importedMaterials.size() - 1);
+    entry.recognized = true;
+    return entry.index;
+}
+
+int AddImportedMaterial(
+    RUsdContext* context,
+    const UsdShadeMaterial& material,
+    const DisplayColor& displayColor)
+{
+    if (context == nullptr)
     {
         return -1;
     }
 
-    std::string path = material.GetPath().GetString();
-    for (size_t i = 0; i < context->importedMaterials.size(); ++i)
+    if (!material)
     {
-        if (context->importedMaterials[i].name == path)
-        {
-            return static_cast<int>(i);
-        }
+        return displayColor.valid
+            ? AddDisplayColorMaterial(context, std::string(), "displayColor", displayColor)
+            : -1;
     }
 
-    RUsdContext::ImportedMaterial importedMaterial;
-    importedMaterial.name = path;
-    importedMaterial.material = ExtractPreviewMaterial(context, material);
-    ExtractOpacityInfo(
-        context, material, &importedMaterial.opacityTexturePath, &importedMaterial.opacityThreshold);
-    context->importedMaterials.push_back(importedMaterial);
-    return static_cast<int>(context->importedMaterials.size() - 1);
+    // Instance proxies of one prototype bind the same material prim inside the prototype. Keying
+    // by that prim keeps forty instances of a part from becoming forty identical Unity materials.
+    UsdPrim prim = material.GetPrim();
+    const std::string key =
+        (prim.IsInstanceProxy() ? prim.GetPrimInPrototype() : prim).GetPath().GetString();
+    const std::string name = material.GetPath().GetString();
+
+    auto found = context->importedMaterialCache.find(key);
+    if (found == context->importedMaterialCache.end())
+    {
+        RUsdContext::ImportedMaterial importedMaterial;
+        importedMaterial.name = name;
+        RUsdContext::MaterialCacheEntry entry;
+        entry.recognized = ExtractMaterial(context, material, &importedMaterial);
+        context->importedMaterials.push_back(importedMaterial);
+        entry.index = static_cast<int>(context->importedMaterials.size() - 1);
+        found = context->importedMaterialCache.emplace(key, entry).first;
+    }
+
+    if (found->second.recognized || !displayColor.valid)
+    {
+        return found->second.index;
+    }
+
+    return AddDisplayColorMaterial(context, key, name, displayColor);
 }
 
 // Triangulates one polygon face (fan) into `indices` with the import winding flip.
@@ -1065,6 +1571,7 @@ int BuildImportedSubmeshes(
     const VtIntArray& faceVertexCounts,
     const int* cornerVertices,
     int cornerCount,
+    const DisplayColor& displayColor,
     std::vector<int>* indices,
     std::vector<RUsdSubmesh>* submeshes)
 {
@@ -1103,7 +1610,7 @@ int BuildImportedSubmeshes(
     }
 
     UsdShadeMaterial meshMaterial = UsdShadeMaterialBindingAPI(mesh.GetPrim()).ComputeBoundMaterial();
-    int defaultMaterialIndex = AddImportedMaterial(context, meshMaterial);
+    int defaultMaterialIndex = AddImportedMaterial(context, meshMaterial, displayColor);
 
     std::vector<int> faceMaterial(static_cast<size_t>(numFaces), defaultMaterialIndex);
 
@@ -1113,7 +1620,10 @@ int BuildImportedSubmeshes(
     {
         UsdShadeMaterial subsetMaterial =
             UsdShadeMaterialBindingAPI(subset.GetPrim()).ComputeBoundMaterial();
-        int subsetMaterialIndex = AddImportedMaterial(context, subsetMaterial);
+        // An unbound subset keeps the mesh's material rather than becoming a displayColor stand-in.
+        int subsetMaterialIndex = subsetMaterial
+            ? AddImportedMaterial(context, subsetMaterial, displayColor)
+            : -1;
         if (subsetMaterialIndex < 0)
         {
             subsetMaterialIndex = defaultMaterialIndex;
@@ -1538,6 +2048,49 @@ struct SplitVertexKeyHash
     }
 };
 
+DisplayColor ReadDisplayColor(const UsdGeomMesh& mesh)
+{
+    DisplayColor result;
+    UsdGeomPrimvarsAPI primvars(mesh.GetPrim());
+
+    // With inheritance: a colour authored once on a parent Xform applies to every mesh below it.
+    UsdGeomPrimvar color = primvars.FindPrimvarWithInheritance(UsdGeomTokens->primvarsDisplayColor);
+    VtArray<GfVec3f> colors;
+    if (color && ReadVec3Array(color.GetAttr(), &colors))
+    {
+        GfVec3f sum(0.0f, 0.0f, 0.0f);
+        for (const GfVec3f& value : colors)
+        {
+            sum += value;
+        }
+
+        result.color = sum / static_cast<float>(colors.size());
+        result.valid = true;
+    }
+
+    UsdGeomPrimvar opacity =
+        primvars.FindPrimvarWithInheritance(UsdGeomTokens->primvarsDisplayOpacity);
+    VtValue value;
+    if (opacity && opacity.GetAttr().Get(&value) &&
+        opacity.GetAttr().GetTypeName().GetAsToken().GetString() == "float[]")
+    {
+        const VtArray<float>& opacities = value.UncheckedGet<VtArray<float>>();
+        if (!opacities.empty())
+        {
+            float sum = 0.0f;
+            for (float o : opacities)
+            {
+                sum += o;
+            }
+
+            result.opacity = std::min(1.0f, std::max(0.0f, sum / static_cast<float>(opacities.size())));
+            result.valid = true;
+        }
+    }
+
+    return result;
+}
+
 bool BuildImportedMesh(
     RUsdContext* context,
     const UsdGeomMesh& mesh,
@@ -1758,11 +2311,28 @@ bool BuildImportedMesh(
     }
 
     importedMesh->materialIndex = BuildImportedSubmeshes(
-        context, mesh, faceVertexCounts, cornerVertices, cornerCount,
+        context, mesh, faceVertexCounts, cornerVertices, cornerCount, ReadDisplayColor(mesh),
         &importedMesh->indices, &importedMesh->submeshes);
 
     importedMesh->visible = UsdGeomImageable(mesh.GetPrim()).ComputeVisibility() == UsdGeomTokens->invisible ? 0 : 1;
     return !importedMesh->indices.empty();
+}
+
+// Value identity of an export material. Built field by field: the fixed-size path buffers
+// carry whatever follows their terminator, so comparing raw bytes would split equal materials.
+std::string ExportMaterialKey(const RUsdMaterial& m)
+{
+    std::ostringstream key;
+    key << std::hexfloat << m.r << ',' << m.g << ',' << m.b << ',' << m.a << ',' << m.metallic << ','
+        << m.roughness << ',' << m.uvScale[0] << ',' << m.uvScale[1] << ',' << m.uvOffset[0] << ','
+        << m.uvOffset[1] << ',' << m.emissive[0] << ',' << m.emissive[1] << ',' << m.emissive[2];
+    for (const char* path :
+         {m.albedoTexturePath, m.normalTexturePath, m.metallicTexturePath, m.emissiveTexturePath})
+    {
+        key << '|' << std::string(path, strnlen(path, sizeof(m.albedoTexturePath)));
+    }
+
+    return key.str();
 }
 
 UsdShadeMaterial CreateMaterial(
@@ -1771,6 +2341,15 @@ UsdShadeMaterial CreateMaterial(
 {
     const RUsdMaterial fallback = {1.0f, 1.0f, 1.0f, 1.0f, 0.0f, 0.5f};
     const RUsdMaterial& source = material != nullptr ? *material : fallback;
+
+    // An assembly of a few hundred parts typically uses a dozen distinct materials; write each
+    // once and bind it everywhere instead of one Material prim per mesh.
+    const std::string materialKey = ExportMaterialKey(source);
+    auto existing = context->exportedMaterials.find(materialKey);
+    if (existing != context->exportedMaterials.end())
+    {
+        return existing->second;
+    }
 
     SdfPath looksPath = context->rootPath.AppendChild(TfToken("Looks"));
     if (!context->stage->GetPrimAtPath(looksPath))
@@ -1916,6 +2495,7 @@ UsdShadeMaterial CreateMaterial(
         SdfValueTypeNames->Token);
     usdMaterial.CreateSurfaceOutput().ConnectToSource(shaderSurfaceOutput);
 
+    context->exportedMaterials.emplace(materialKey, usdMaterial);
     return usdMaterial;
 }
 
@@ -1991,6 +2571,71 @@ void BindMaterials(
         UsdShadeMaterialBindingAPI::Apply(subset.GetPrim()).Bind(usdMaterials[static_cast<size_t>(materialIndex)]);
     }
 }
+}
+
+// Mirrors the bound material's base colour into primvars:displayColor (and displayOpacity when
+// translucent), which viewers and renderers that do not evaluate UsdPreviewSurface show instead
+// of grey. A mesh with several materials gets per-face (uniform) colours from its subsets.
+void WriteDisplayColor(
+    const UsdGeomMesh& mesh,
+    const RUsdSubmesh* submeshes,
+    int submeshCount,
+    const RUsdMaterial* materials,
+    int materialCount)
+{
+    if (materials == nullptr || materialCount <= 0)
+    {
+        return;
+    }
+
+    auto clampIndex = [materialCount](int index)
+    {
+        return static_cast<size_t>(std::max(0, std::min(index, materialCount - 1)));
+    };
+
+    VtArray<GfVec3f> colors;
+    VtArray<float> opacities;
+    TfToken interpolation = UsdGeomTokens->constant;
+    bool translucent = false;
+
+    if (submeshes == nullptr || submeshCount <= 1)
+    {
+        const RUsdMaterial& m =
+            materials[clampIndex(submeshes != nullptr && submeshCount == 1 ? submeshes[0].materialIndex : 0)];
+        colors.push_back(GfVec3f(m.r, m.g, m.b));
+        opacities.push_back(m.a);
+        translucent = m.a < 1.0f;
+    }
+    else
+    {
+        // Submeshes are contiguous triangle ranges, and the exported faces are those triangles.
+        interpolation = UsdGeomTokens->uniform;
+        for (int i = 0; i < submeshCount; ++i)
+        {
+            const RUsdMaterial& m = materials[clampIndex(submeshes[i].materialIndex)];
+            const int faceStart = submeshes[i].indexStart / 3;
+            const int faceCount = std::max(0, submeshes[i].indexCount / 3);
+            if (colors.size() < static_cast<size_t>(faceStart + faceCount))
+            {
+                colors.resize(static_cast<size_t>(faceStart + faceCount), GfVec3f(1.0f));
+                opacities.resize(static_cast<size_t>(faceStart + faceCount), 1.0f);
+            }
+
+            for (int f = faceStart; f < faceStart + faceCount; ++f)
+            {
+                colors[static_cast<size_t>(f)] = GfVec3f(m.r, m.g, m.b);
+                opacities[static_cast<size_t>(f)] = m.a;
+            }
+
+            translucent = translucent || m.a < 1.0f;
+        }
+    }
+
+    mesh.CreateDisplayColorPrimvar(interpolation).Set(colors);
+    if (translucent)
+    {
+        mesh.CreateDisplayOpacityPrimvar(interpolation).Set(opacities);
+    }
 }
 
 int RUsd_GetApiVersion(void)
@@ -2191,6 +2836,7 @@ int RUsd_AddMeshEx(
         }
 
         BindMaterials(context, mesh, submeshes, submeshCount, materials, materialCount);
+        WriteDisplayColor(mesh, submeshes, submeshCount, materials, materialCount);
         return kSuccess;
     }
     catch (const std::exception& exception)
@@ -2359,7 +3005,10 @@ int RUsd_OpenStage(
         context->importUpAxis = upAxis == UsdGeomTokens->z ? 2 : 1;
 
         UsdGeomXformCache xformCache;
-        for (const UsdPrim& prim : context->stage->Traverse())
+        // Instance proxies included: instanceable prims (Omniverse and most CAD exports build
+        // assemblies this way) keep all their geometry in prototypes, and the default
+        // traversal stops at the instance, which imported such stages as empty.
+        for (const UsdPrim& prim : context->stage->Traverse(UsdTraverseInstanceProxies()))
         {
             // Record every transformable prim (Xform, Mesh, ...) so the Unity side can
             // rebuild the hierarchy with per-node local transforms instead of baking.
