@@ -1,16 +1,12 @@
-# Unity USD Live Sync Extension — Proprietary License Notice
-
-Copyright (c) 2026 Unity. All rights reserved.
+# Unity USD Live Sync Extension License Notice
 
 This Omniverse Kit extension (`unity.usd.livesync`) is part of the
 `Live Sync Example` sample of the Unity USD Toolkit package
-(`com.unity.usd-toolkit`) and is proprietary software owned by Unity.
+(`com.unity.usd-toolkit`).
 
-Unless a separate written license agreement, EULA, purchase agreement, or
-distribution agreement grants additional rights, you may not copy, modify,
-merge, publish, distribute, sublicense, sell, lease, or otherwise transfer this
-extension or any derivative work of it. See the package's `LICENSE.md` for the
-full notice.
+Unity USD Toolkit Package © 2026 Unity Technologies Licensed under the Unity Companion License for Unity-dependent projects (see https://unity3d.com/legal/licenses/unity_companion_license). Unless expressly provided otherwise, the Software under this license is made available strictly on an "AS IS" BASIS WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED. Please review the license for details on these and other terms and conditions.
+
+See the package's `LICENSE.md` for the full notice.
 
 ## Third-party software
 

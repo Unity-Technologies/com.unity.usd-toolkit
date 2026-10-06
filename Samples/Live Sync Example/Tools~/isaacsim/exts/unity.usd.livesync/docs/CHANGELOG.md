@@ -2,11 +2,8 @@
 
 ## [0.1.1]
 
-### Added
-- `LICENSE.md` — Unity proprietary notice, the statement that no NVIDIA software is redistributed,
-  the Third Party Product disclaimer, and trademark attribution. Reachable from the Extensions
-  window via `[documentation] pages`.
-- `extension.toml`: `authors` corrected to `Unity Technologies`, `license = "SEE LICENSE.md"`.
+### Changed
+- `extension.toml`: `authors` set to `Unity Technologies`.
 
 ## [0.1.0]
 

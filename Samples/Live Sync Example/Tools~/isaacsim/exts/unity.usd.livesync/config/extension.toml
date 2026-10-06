@@ -11,7 +11,7 @@ keywords = ["unity", "usd", "live", "sync", "transform", "bridge"]
 readme = "docs/Overview.md"
 changelog = "docs/CHANGELOG.md"
 
-# Proprietary Unity software; ships as part of the com.unity.usd-toolkit package.
+# Part of the com.unity.usd-toolkit package, licensed under the Unity Companion License.
 # No NVIDIA software is redistributed — the omni.* / isaacsim APIs are resolved at
 # run time from the user's own Isaac Sim installation. Full notice in LICENSE.md.
 license = "SEE LICENSE.md"

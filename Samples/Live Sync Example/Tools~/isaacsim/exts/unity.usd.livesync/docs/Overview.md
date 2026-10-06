@@ -21,11 +21,12 @@ sample's own `README.md` for how it fits the wider architecture.
 
 ## License and notices
 
-Copyright (c) 2026 Unity. All rights reserved. This extension is proprietary Unity software shipped
-as part of the Unity USD Toolkit package (`com.unity.usd-toolkit`); see `LICENSE.md` next to this
-folder for the full notice, the third-party disclaimer, and the statement that **no NVIDIA software
-is redistributed** — the `isaacsim` / `omni.*` / `carb` APIs are resolved at run time from your own
-Isaac Sim installation.
+This extension is part of the Unity USD Toolkit package (`com.unity.usd-toolkit`). Unity USD Toolkit
+Package © 2026 Unity Technologies. Licensed under the Unity Companion License for Unity-dependent
+projects. See `LICENSE.md` at the package root.
+
+**No NVIDIA software is redistributed.** The `isaacsim`, `omni.*` and `carb` APIs are provided by
+your own Isaac Sim installation, which NVIDIA licenses to you under NVIDIA's own terms.
 
 NVIDIA, NVIDIA Isaac Sim, and NVIDIA Omniverse are trademarks and/or registered trademarks of NVIDIA
 Corporation in the U.S. and other countries. Universal Scene Description (USD) and OpenUSD are
