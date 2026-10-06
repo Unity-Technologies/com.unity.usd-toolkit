@@ -1,10 +1,10 @@
 # SHA-256 of the macos OpenUSD/TBB files the native build copies into
 # Runtime/Plugins. Regenerate deliberately with --record and review the diff; see
 # Native~/verify_dependency_digests.py.
-95f7ac6863c931bbb6d3c32a3e4eec3f9e0a034ed40697c7d722a9475bf47ad5  lib/libtbb.dylib
-2c0abe8fa0be4af1c41d96d2b4460a259e46ada25dc9d7322234f86928bff55c  lib/libtbbmalloc.dylib
-c3718add5721df0888ddf9123625892e473a8c24814fb3701f6c53fac9cc471f  lib/libtbbmalloc_proxy.dylib
-bc3c0e8bcbf7a4a7b522209db9d724f93492c78d0ee527938518a21ca6bdc2a0  lib/libusd_ms.dylib
+cef0eb80f28ff640c717e0581dcdf6499fb33819cdcbf2c9a13262407a726eb0  lib/libtbb.dylib
+6ed1796ad24ea7634a7361a99bf2587c7b04c00e0dcba2c21fc9b35cd59c82f2  lib/libtbbmalloc.dylib
+15c5c89cf9462cefdd2ac1aad1992144b0a8ea11c9c91bb859289ef2fccef0ec  lib/libtbbmalloc_proxy.dylib
+35dd034c84f168e9d2190daa3ef97a845b194947050c90b79088766a0fe5a0f6  lib/libusd_ms.dylib
 9e1f7de1980772441033787853be0dd5b7a6619c3abc86285ac242b8589e326c  lib/usd/ar/resources/plugInfo.json
 83ac5a08ce424a84261e8948ecb5ccba69279c30553ab3826c198759fa1af4ca  lib/usd/esf/resources/plugInfo.json
 b455afac3e18337d01658c3540443052335c8aa6bf1bffe7f28c5577af5c5b73  lib/usd/esfUsd/resources/plugInfo.json
