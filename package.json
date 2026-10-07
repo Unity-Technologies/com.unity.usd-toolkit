@@ -14,5 +14,12 @@
   ],
   "author": {
     "name": "Unity"
-  }
+  },
+  "samples": [
+    {
+      "displayName": "Runtime Examples",
+      "description": "Three runtime scenes sharing one UI theme. Export Example exports the open scene to USD, Import Example scans a folder for USD files and imports them, and Live Sync Example streams transforms between Unity and Isaac Sim 6.0.1 or a Python client.",
+      "path": "Samples~/Runtime Examples"
+    }
+  ]
 }

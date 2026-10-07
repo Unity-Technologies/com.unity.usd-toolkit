@@ -41,7 +41,7 @@ The toolkit is not a renderer or a simulation runtime. Unity renders imported co
 
 ## Installation
 
-1. Open **Window > Package Manager**.
+1. Open **Window > Package Management > Package Manager**.
 2. Select **+ > Add package from git URL**.
 3. Enter the following URL, then select **Add**:
 
@@ -107,13 +107,21 @@ UsdExportResult result = UsdExporter.ExportGameObjectWithResult(
 
 ## Samples
 
-The samples are in the package's `Samples` folder. Open them from the Project window under **Packages > Unity USD Toolkit > Samples**.
+To add the samples to your project:
+
+1. Open **Window > Package Management > Package Manager**.
+2. Select **Unity USD Toolkit**, then open the **Samples** tab.
+3. Next to **Runtime Examples**, select **Import**.
+
+Unity copies the samples to `Assets/Samples/Unity USD Toolkit/<version>/Runtime Examples`, where you can open and edit the scenes. This works the same for every install method, including Git URLs and tarballs, which Unity installs as read-only packages. The three scenes share one UI theme, so they import together. The package doesn't compile the samples until you import them.
 
 | Sample | Scene | What it shows |
 | --- | --- | --- |
-| **Export Example** | `Samples/Export Example/RuntimeExportExample.unity` | A runtime UI that exports the open scene to any USD format, with or without textures, as baked meshes or a preserved hierarchy. |
-| **Import Example** | `Samples/Import Example/RuntimeImportBrowser.unity` | A runtime browser that scans a folder for USD files, previews their statistics and imports them. |
-| **[USD Live Sync](Samples/Live%20Sync%20Example/README.md)** | `Samples/Live Sync Example/LiveSyncExample.unity` | Two-way transform sync between the Unity Editor and Isaac Sim 6.0.1 or a Python client. |
+| **Export Example** | `Export Example/RuntimeExportExample.unity` | A runtime UI that exports the open scene to any USD format, with or without textures, as baked meshes or a preserved hierarchy. |
+| **Import Example** | `Import Example/RuntimeImportBrowser.unity` | A runtime browser that scans a folder for USD files, previews their statistics and imports them. |
+| **[USD Live Sync](Samples~/Runtime%20Examples/Live%20Sync%20Example/README.md)** | `Live Sync Example/LiveSyncExample.unity` | Two-way transform sync between the Unity Editor and Isaac Sim 6.0.1 or a Python client. |
+
+If you imported the samples before, delete the old copy under `Assets/Samples/Unity USD Toolkit` before you import them again.
 
 ### USD Live Sync
 
@@ -123,7 +131,7 @@ Unity exports the scene geometry once as `base_stage.usda`, then streams transfo
 
 The sample synchronizes transforms only, on a single machine. Isaac Sim is not included with this package; install it separately from NVIDIA under NVIDIA's license terms.
 
-To try it, see the [Live Sync Example guide](Samples/Live%20Sync%20Example/README.md) and the [Isaac Sim client guide](Samples/Live%20Sync%20Example/Tools~/isaacsim/README.md).
+To try it, see the [Live Sync Example guide](Samples~/Runtime%20Examples/Live%20Sync%20Example/README.md) and the [Isaac Sim client guide](Samples~/Runtime%20Examples/Live%20Sync%20Example/Tools~/isaacsim/README.md).
 
 ## Workflows
 
@@ -210,8 +218,8 @@ The package does not depend on `com.unity.formats.usd`, `com.unity.importer.usd`
 | Document | Contents |
 | --- | --- |
 | [User Manual](Documentation~/Unity%20USD%20Toolkit%20User%20Manual%20EN.md) | Export and import options, threading, materials, untrusted file handling, standalone builds, troubleshooting and the API reference. |
-| [Live Sync Example](Samples/Live%20Sync%20Example/README.md) | Setup, wire protocol, ownership, coordinate conversion and security. |
-| [Isaac Sim client](Samples/Live%20Sync%20Example/Tools~/isaacsim/README.md) | The Kit extension, launchers and troubleshooting. |
+| [Live Sync Example](Samples~/Runtime%20Examples/Live%20Sync%20Example/README.md) | Setup, wire protocol, ownership, coordinate conversion and security. |
+| [Isaac Sim client](Samples~/Runtime%20Examples/Live%20Sync%20Example/Tools~/isaacsim/README.md) | The Kit extension, launchers and troubleshooting. |
 | [Changelog](CHANGELOG.md) | Release history. |
 
 ## Troubleshooting

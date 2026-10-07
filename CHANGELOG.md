@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The samples import from the Package Manager** 
+  0.6.3 moved the samples into an always-compiled `Samples/` folder inside the package. Unity
+  installs a package from a Git URL or a tarball as read-only, so it refused to open the sample
+  scenes there ("It is not allowed to open a scene in a read-only package"), and the Package
+  Manager Samples tab was empty. The samples now live in `Samples~/Runtime Examples` with a
+  `samples` entry in `package.json`. Import them from the Samples tab, and Unity copies them under
+  `Assets/Samples`, where the scenes open and save. The three examples ship as one entry because
+  they share the internal `SampleTheme` type. The package no longer compiles the samples until you
+  import them, so they no longer add code to every player build. Every file was moved with its
+  `.meta`, so asset GUIDs are unchanged. If a project still has an older imported copy under
+  `Assets/Samples/Unity USD Toolkit`, delete it before importing again, because both copies define
+  the `Unity.USDToolkit.Samples` assembly.
+- **The samples assembly builds only where the runtime does** 
+  `Unity.USDToolkit.Samples` was compiled for every platform, but the `Unity.USDToolkit` assembly
+  it references only targets the Editor, Windows x64 and macOS. A player build for any other
+  target failed with CS0246, even in a project that never used the samples. The samples assembly
+  now targets the same platforms as the runtime, so other targets skip it and build.
+- **README and manual name the Unity 6.4+ Package Manager menu** 
+  The Package Manager opens from **Window > Package Management > Package Manager**.
 - **The Export and Import sample UIs are in English** 
   The tooltips on their checkboxes and buttons, and the code comments in `UsdExportExample` and
   `RuntimeImportBrowser`, were still in Korean. They're now in English.
