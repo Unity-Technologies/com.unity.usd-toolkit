@@ -10,3 +10,12 @@ Thumbs.db
 # Python bytecode from the Native~ build/verification scripts
 __pycache__/
 *.pyc
+
+# Development-only assets stay outside the package tree.
+DevSamples~/
+*.usd
+*.usdc
+*.usdz
+*.usda
+!Runtime/Plugins/**/*.usda
+!Native~/Tests~/*.usda
