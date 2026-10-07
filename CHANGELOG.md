@@ -13,6 +13,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The tooltips on their checkboxes and buttons, and the code comments in `UsdExportExample` and
   `RuntimeImportBrowser`, were still in Korean. They're now in English.
 
+### Fixed
+
+- **The Editor no longer looks for another platform's native files** 
+  The Editor defines the scripting symbols of the active build target alongside its own, so after
+  switching the build target to Linux (or macOS) on a Windows Editor the toolkit searched for `.so`
+  (or `.dylib`) files, set `LD_LIBRARY_PATH` and read the Linux hash table, and every import or
+  export failed with "native runtime files are missing". The platform conditions in `UsdExporter`,
+  `UsdImporter` and the generated `NativeRuntimeHashes` now test the player symbols only outside
+  the Editor.
+
 ### Security
 
 - **The source-scan gate reads the record, and a release cannot skip it** 

@@ -939,7 +939,7 @@ namespace Unity.USDToolkit
         // accept a sibling directory that merely differs in case as being "inside" the stage
         // folder. Windows and macOS default to case-insensitive, where the strict comparison
         // would reject legitimate paths.
-#if UNITY_EDITOR_LINUX || UNITY_STANDALONE_LINUX
+#if UNITY_EDITOR_LINUX || (!UNITY_EDITOR && UNITY_STANDALONE_LINUX)
         private const StringComparison PathComparison = StringComparison.Ordinal;
 #else
         private const StringComparison PathComparison = StringComparison.OrdinalIgnoreCase;
