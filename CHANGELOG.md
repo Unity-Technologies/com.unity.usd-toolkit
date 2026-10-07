@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The Export and Import sample UIs are in English** 
+  The tooltips on their checkboxes and buttons, and the code comments in `UsdExportExample` and
+  `RuntimeImportBrowser`, were still in Korean. They're now in English.
+
 ### Security
 
 - **The source-scan gate reads the record, and a release cannot skip it** 

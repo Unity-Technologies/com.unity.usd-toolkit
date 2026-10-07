@@ -41,7 +41,7 @@ namespace Unity.USDToolkit.Samples
         private Texture2D selectedItemBackground;
         private Texture2D thumbnailFallback;
 
-        // 공통 UI(Export 샘플과 통일): 출력 포맷(드롭다운) + 폴더 아이콘(코드 생성)
+        // Shared UI (matches the Export sample): output format (dropdown) and folder icon (generated in code)
         private static readonly string[] UsdFormats = { ".usd", ".usda", ".usdc" };
         private int formatIndex = 1;
         private bool formatDropdownOpen;
@@ -109,7 +109,7 @@ namespace Unity.USDToolkit.Samples
             DrawTooltip();
         }
 
-        // 마우스 올린 컨트롤의 tooltip(코드 기반 설명)을 커서 옆에 팝업으로 그린다.
+        // Draw the hovered control's tooltip (defined in code) as a popup next to the cursor.
         private void DrawTooltip()
         {
             if (Event.current == null || Event.current.type != EventType.Repaint)
@@ -177,7 +177,7 @@ namespace Unity.USDToolkit.Samples
             }
 
             GUILayout.EndHorizontal();
-            recursiveScan = SampleTheme.Checkbox(recursiveScan, new GUIContent("Recursive scan", "하위 폴더까지 재귀적으로 USD 파일을 검색한다"));
+            recursiveScan = SampleTheme.Checkbox(recursiveScan, new GUIContent("Recursive scan", "Search subfolders for USD files too"));
 
             GUILayout.Space(8.0f);
             GUILayout.Label("Export file name", smallStyle);
@@ -221,9 +221,9 @@ namespace Unity.USDToolkit.Samples
 
             GUILayout.Space(10.0f);
             GUILayout.Label("Options", sectionStyle);
-            importMaterials = SampleTheme.Checkbox(importMaterials, new GUIContent("Import materials", "USD의 머티리얼(색/텍스처)을 함께 임포트한다"));
-            generateColliders = SampleTheme.Checkbox(generateColliders, new GUIContent("Generate mesh colliders", "임포트된 메시에 MeshCollider를 생성한다"));
-            clearBeforeImport = SampleTheme.Checkbox(clearBeforeImport, new GUIContent("Clear previous import", "임포트 전에 이전 임포트 결과를 먼저 제거한다"));
+            importMaterials = SampleTheme.Checkbox(importMaterials, new GUIContent("Import materials", "Import USD materials (colors and textures) as well"));
+            generateColliders = SampleTheme.Checkbox(generateColliders, new GUIContent("Generate mesh colliders", "Add a MeshCollider to each imported mesh"));
+            clearBeforeImport = SampleTheme.Checkbox(clearBeforeImport, new GUIContent("Clear previous import", "Remove the previous import result before importing"));
 
             GUILayout.Space(12.0f);
             GUI.enabled = !string.IsNullOrWhiteSpace(selectedPath);
@@ -435,7 +435,7 @@ namespace Unity.USDToolkit.Samples
             }
         }
 
-        // 파일명(확장자 제외) + 드롭다운 포맷으로 출력 파일명 구성 (Export 샘플과 공통)
+        // Build the output file name from the base name (no extension) and the dropdown format (shared with the Export sample)
         private string GetOutputFileName()
         {
             string baseName = string.IsNullOrWhiteSpace(exportFileName) ? "sample-cube" : exportFileName.Trim();
@@ -449,7 +449,7 @@ namespace Unity.USDToolkit.Samples
             return baseName + UsdFormats[idx];
         }
 
-        // 포맷 선택 드롭다운(IMGUI 런타임): 버튼을 누르면 목록이 아래로 펼쳐진다.
+        // Format dropdown (runtime IMGUI): pressing the button expands the list below it.
         private void DrawFormatDropdown(float inner)
         {
             GUILayout.Label("Format", smallStyle);
@@ -480,7 +480,7 @@ namespace Unity.USDToolkit.Samples
             }
         }
 
-        // 폴더 선택: 에디터는 OpenFolderPanel(Win/mac/Linux), 빌드는 OS 네이티브 다이얼로그.
+        // Folder picker: OpenFolderPanel in the Editor (Windows/macOS/Linux), the native OS dialog in a build.
         private static string BrowseFolder(string title, string startDir)
         {
 #if UNITY_EDITOR
@@ -492,7 +492,7 @@ namespace Unity.USDToolkit.Samples
 #endif
         }
 
-        // 파일 선택: 에디터는 OpenFilePanel(usd 계열), 빌드는 OS 네이티브 다이얼로그.
+        // File picker: OpenFilePanel (USD file types) in the Editor, the native OS dialog in a build.
         private static string BrowseFile(string title, string startPath)
         {
 #if UNITY_EDITOR
@@ -513,7 +513,7 @@ namespace Unity.USDToolkit.Samples
 #endif
         }
 
-        // 빌드 런타임용 OS 네이티브 다이얼로그(Windows/macOS/Linux). pickFile=false면 폴더 선택.
+        // Native OS dialog for player builds (Windows/macOS/Linux). Picks a folder when pickFile is false.
         private static string RunNativeDialog(string title, bool pickFile)
         {
             try
@@ -566,7 +566,7 @@ namespace Unity.USDToolkit.Samples
             }
         }
 
-        // 코드로 생성한 폴더 아이콘(다운로드/라이선스 불필요, 에디터·런타임 공통)
+        // Folder icon generated in code (no download or license needed; shared by the Editor and runtime)
         private Texture2D GetFolderIcon()
         {
             if (folderIcon != null)
@@ -798,7 +798,7 @@ namespace Unity.USDToolkit.Samples
 
             thumbnailFallback = CreateThumbnailFallback();
 
-            // 리스트 아이템: 어두운 둥근 카드 / 선택 시 초록 강조
+            // List item: dark rounded card, highlighted in green when selected
             itemStyle = new GUIStyle
             {
                 border = new RectOffset(12, 12, 12, 12),
