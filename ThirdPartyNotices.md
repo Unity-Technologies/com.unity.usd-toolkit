@@ -128,7 +128,7 @@ Nature of the integration:
 
 - The `Live Sync Example` sample ships an Omniverse Kit extension and a
   standalone runner under
-  `Samples/Live Sync Example/Tools~/isaacsim` that connect an Isaac Sim stage to
+  `Samples~/Runtime Examples/Live Sync Example/Tools~/isaacsim` that connect an Isaac Sim stage to
   the sample's `UsdLiveSyncServer`.
 
 Redistributed files:
@@ -142,7 +142,7 @@ Redistributed files:
 
 License:
 
-- The integration code under `Samples/Live Sync Example/Tools~/isaacsim` is
+- The integration code under `Samples~/Runtime Examples/Live Sync Example/Tools~/isaacsim` is
   Unity code licensed under the Unity Companion License for Unity-dependent
   projects. See `LICENSE.md`.
 - NVIDIA Isaac Sim, NVIDIA Omniverse, and any NVIDIA components they install are

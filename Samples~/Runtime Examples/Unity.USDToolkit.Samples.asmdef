@@ -4,7 +4,11 @@
     "references": [
         "GUID:71fa65d963c37aa448e37e287c77298b"
     ],
-    "includePlatforms": [],
+    "includePlatforms": [
+        "Editor",
+        "macOSStandalone",
+        "WindowsStandalone64"
+    ],
     "excludePlatforms": [],
     "allowUnsafeCode": false,
     "overrideReferences": false,

@@ -94,7 +94,7 @@ Windows에서는 대상 PC에 Microsoft Visual C++ 재배포 가능 패키지가
 
 ## 3. 패키지 설치
 
-1. **Window > Package Manager**를 엽니다.
+1. **Window > Package Management > Package Manager**를 엽니다.
 2. **+ > Add package from git URL**을 선택합니다.
 3. `https://github.com/Unity-Technologies/com.unity.usd-toolkit.git`을 입력하고 **Add**를 선택합니다.
 
@@ -354,11 +354,11 @@ OpenUSD는 `plugInfo.json` 파일이 지정한 라이브러리를 실행합니�
 
 ## 10. USD Live Sync 예제
 
-`Samples/Live Sync Example`은 실행 중인 Unity 씬과 NVIDIA Isaac Sim이나 Python 스크립트 같은 외부 도구 사이에서 transform을 양방향으로 동기화합니다. Unity는 씬 geometry를 `base_stage.usda`로 한 번 export한 뒤, transform 변경 사항을 TCP로 스트리밍합니다.
+`Samples~/Runtime Examples/Live Sync Example`은 실행 중인 Unity 씬과 NVIDIA Isaac Sim이나 Python 스크립트 같은 외부 도구 사이에서 transform을 양방향으로 동기화합니다. Unity는 씬 geometry를 `base_stage.usda`로 한 번 export한 뒤, transform 변경 사항을 TCP로 스트리밍합니다.
 
 모든 연결은 데이터를 받기 전에 토큰으로 인증해야 합니다. 서버는 로컬 머신의 연결만 받으며, 트래픽은 암호화되지 않습니다.
 
-설정 방법은 [Live Sync Example 가이드](../Samples/Live%20Sync%20Example/README.md)를 참고하세요.
+설정 방법은 [Live Sync Example 가이드](../Samples~/Runtime%20Examples/Live%20Sync%20Example/README.md)를 참고하세요.
 
 ## 11. Export한 USD 파일 확인
 

@@ -94,7 +94,7 @@ On Windows, the target machine needs the Microsoft Visual C++ Redistributable.
 
 ## 3. Install the package
 
-1. Open **Window > Package Manager**.
+1. Open **Window > Package Management > Package Manager**.
 2. Select **+ > Add package from git URL**.
 3. Enter `https://github.com/Unity-Technologies/com.unity.usd-toolkit.git`, then select **Add**.
 
@@ -354,11 +354,11 @@ For distribution outside your own machine, sign the macOS app bundle after Unity
 
 ## 10. The USD Live Sync sample
 
-`Samples/Live Sync Example` synchronizes transforms in both directions between a running Unity scene and an external tool, such as NVIDIA Isaac Sim or a Python script. Unity exports the scene geometry once as `base_stage.usda`, then streams transform changes over TCP.
+`Samples~/Runtime Examples/Live Sync Example` synchronizes transforms in both directions between a running Unity scene and an external tool, such as NVIDIA Isaac Sim or a Python script. Unity exports the scene geometry once as `base_stage.usda`, then streams transform changes over TCP.
 
 Every connection must authenticate with a token before it receives data. The server accepts connections from the local machine only, and the traffic is not encrypted.
 
-For setup instructions, see the [Live Sync Example guide](../Samples/Live%20Sync%20Example/README.md).
+For setup instructions, see the [Live Sync Example guide](../Samples~/Runtime%20Examples/Live%20Sync%20Example/README.md).
 
 ## 11. Check exported USD files
 

@@ -311,8 +311,8 @@ def write_overrides(state, base_stage, overrides_path, color):
 def find_unity_project_root(start):
     """
     Walk up from 'start' looking for a Unity project root (a folder holding both Assets/ and
-    ProjectSettings/). This file ships inside the USD Toolkit package, so it may run from an embedded
-    Packages/com.unity.usd-toolkit/... path or from Library/PackageCache/... — both sit under the
+    ProjectSettings/). This file ships with the USD Toolkit samples, so it usually runs from the
+    Assets/Samples/Unity USD Toolkit/... copy that the Package Manager imports, which sits under the
     project root. Returns None when the script was copied somewhere else entirely.
     """
     current = os.path.abspath(start)
