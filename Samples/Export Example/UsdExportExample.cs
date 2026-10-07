@@ -14,15 +14,15 @@ namespace Unity.USDToolkit.Samples
         [SerializeField] private string rootPrimName = "RuntimeExport";
         [SerializeField] private UsdTransformPolicy transformPolicy = UsdTransformPolicy.BakedMesh;
         [SerializeField] private bool includeInactive;
-        // 에디터에서는 isReadable=false 메시도 mesh.vertices로 읽히므로 기본 false.
-        // (true로 켜면 readable 아닌 메시에서 예외 — 빌드 플레이어 export 시에만 의미 있음)
+        // Off by default: in the Editor, mesh.vertices works even when isReadable is false.
+        // (When on, a non-readable mesh throws. This only matters for exports from a player build.)
         [SerializeField] private bool requireReadableMeshes = false;
         [SerializeField] private bool exportNormals = true;
         [SerializeField] private bool exportUv0 = true;
         [SerializeField] private bool exportBounds = true;
         [SerializeField] private bool exportDisabledRenderers = true;
         [SerializeField] private bool preserveVisibility = true;
-        // metallic 슬롯에 albedo와 같은 텍스처가 꽂힌 오배치를 무시(거울 금속 → 검은 패널 방지).
+        // Ignore the albedo texture when it is misassigned to the metallic slot (prevents mirror-metal black panels).
         [SerializeField] private bool ignoreAlbedoInMetallicSlot = true;
         [SerializeField] private bool captureNativeDiagnostics;
 
@@ -40,7 +40,7 @@ namespace Unity.USDToolkit.Samples
         private GUIStyle textFieldStyle;
         private Texture2D panelBackground;
 
-        // 출력 파일 포맷(드롭다운) + 폴더 아이콘(코드 생성)
+        // Output file format (dropdown) and folder icon (generated in code)
         private static readonly string[] UsdFormats = { ".usd", ".usda", ".usdc", ".usdz" };
         private int formatIndex;
         private bool formatDropdownOpen;
@@ -63,10 +63,10 @@ namespace Unity.USDToolkit.Samples
 
             const float margin = 20.0f;
             const float gap = 16.0f;
-            const float minWidth = 720.0f;   // 이보다 좁아질 때만 비례 축소
+            const float minWidth = 720.0f;   // Scale down proportionally only below this width
             const float minHeight = 460.0f;
 
-            // 화면이 충분히 크면 스케일 1배(진짜 반응형), 아주 좁을 때만 축소해 잘림 방지.
+            // Use a scale of 1 on large enough screens (truly responsive) and shrink only on very narrow ones to avoid clipping.
             float scale = Mathf.Min(1.0f, Mathf.Min(Screen.width / (minWidth + margin * 2.0f), Screen.height / (minHeight + margin * 2.0f)));
             Matrix4x4 previousMatrix = GUI.matrix;
             GUI.matrix = Matrix4x4.Scale(new Vector3(scale, scale, 1.0f));
@@ -84,7 +84,7 @@ namespace Unity.USDToolkit.Samples
             GUILayout.BeginArea(new Rect(margin, margin, width, height));
             GUILayout.BeginHorizontal();
 
-            // 해상도와 무관하게 좌/우 패널을 정확히 반반(50/50)으로.
+            // Split the left and right panels exactly 50/50 at any resolution.
             float half = (width - gap) * 0.5f;
             DrawControlPanel(half, height);
             GUILayout.Space(gap);
@@ -97,7 +97,7 @@ namespace Unity.USDToolkit.Samples
             DrawTooltip();
         }
 
-        // 마우스 올린 컨트롤의 tooltip(코드 기반 설명)을 커서 옆에 팝업으로 그린다.
+        // Draw the hovered control's tooltip (defined in code) as a popup next to the cursor.
         private void DrawTooltip()
         {
             if (Event.current == null || Event.current.type != EventType.Repaint)
@@ -156,7 +156,7 @@ namespace Unity.USDToolkit.Samples
                 string outputPath = Path.Combine(outputFolderPath, safeFileName);
                 string diagnosticsPath = Path.Combine(outputFolderPath, Path.GetFileNameWithoutExtension(safeFileName) + "-diagnostics.log");
 
-                // 데모가 아니라 현재 열려있는 씬 전체를 export (exportTextures면 PBR 텍스처 PNG 동반)
+                // Export the whole open scene, not just the demo (with PBR texture PNGs when exportTextures is on)
                 UsdExportResult result = ExportActiveScene(outputPath, diagnosticsPath, exportTextures);
 
                 lastOutputPath = outputPath;
@@ -170,8 +170,8 @@ namespace Unity.USDToolkit.Samples
             }
         }
 
-        // 현재 열려있는 씬의 모든 루트를 임시 묶음(bundle) 아래로 모아 한 번에 export한 뒤,
-        // 원래 계층/순서로 복원하고 묶음을 제거한다. (USD API가 단일 root만 받기 때문)
+        // Gather every root of the open scene under a temporary bundle and export them in one pass,
+        // then restore the original hierarchy and order and remove the bundle. (The USD API takes a single root.)
         private UsdExportResult ExportActiveScene(string outputPath, string diagnosticsPath, bool exportTextures)
         {
             Scene scene = gameObject.scene;
@@ -181,7 +181,7 @@ namespace Unity.USDToolkit.Samples
             bundle.transform.SetPositionAndRotation(Vector3.zero, Quaternion.identity);
             bundle.transform.localScale = Vector3.one;
 
-            // 묶음 자신과 이 UI 오브젝트를 제외한 모든 씬 루트를 수집 (원래 sibling 순서 보존)
+            // Collect every scene root except the bundle and this UI object (keeping the original sibling order)
             var detached = new List<KeyValuePair<Transform, int>>();
             foreach (var root in scene.GetRootGameObjects())
             {
@@ -195,7 +195,7 @@ namespace Unity.USDToolkit.Samples
 
             try
             {
-                // worldPositionStays = true 로 좌표/스케일 유지하며 임시로 묶음 아래로 이동
+                // Move under the bundle temporarily with worldPositionStays = true to keep position and scale
                 foreach (var entry in detached)
                 {
                     entry.Key.SetParent(bundle.transform, true);
@@ -207,8 +207,8 @@ namespace Unity.USDToolkit.Samples
                     MetersPerUnit = 1.0f,
                     IncludeInactive = includeInactive,
                     ExportTextures = exportTextures,
-                    // 에디터에서는 isReadable=false 메시도 mesh.vertices로 읽히므로 항상 false로 고정한다.
-                    // (씬에 직렬화된 인스턴스의 옛 값(true)에 영향받지 않도록 필드 대신 false 하드코딩)
+                    // Always false: in the Editor, mesh.vertices works even when isReadable is false.
+                    // (Hard-coded instead of the field so a stale serialized value of true in the scene has no effect.)
                     RequireReadableMeshes = false,
                     ExportNormals = exportNormals,
                     ExportUv0 = exportUv0,
@@ -224,7 +224,7 @@ namespace Unity.USDToolkit.Samples
             }
             finally
             {
-                // 원래 루트로 복원 (계층 분리 + sibling 순서 되돌림) 후 묶음 제거
+                // Restore the original roots (detach and restore sibling order), then remove the bundle
                 foreach (var entry in detached)
                 {
                     if (entry.Key != null)
@@ -240,9 +240,9 @@ namespace Unity.USDToolkit.Samples
 
         private void DrawControlPanel(float width, float height)
         {
-            float inner = width - 56.0f;   // 카드 패딩(40) + 세로 스크롤바(16) 여유 → content 부풀림 차단
+            float inner = width - 56.0f;   // Card padding (40) plus vertical scrollbar (16), so the content doesn't grow wider
             GUILayout.BeginVertical(panelStyle, GUILayout.Width(width), GUILayout.Height(height));
-            // 내용이 박스 높이를 넘으면 세로 스크롤(드래그) 가능. 가로는 막고 고정폭 컬럼으로 감싼다.
+            // Scroll vertically (or drag) when the content is taller than the box. Horizontal scrolling is off and the content wraps in a fixed-width column.
             controlScroll = GUILayout.BeginScrollView(controlScroll, false, false, GUIStyle.none, GUI.skin.verticalScrollbar, GUI.skin.scrollView, GUILayout.ExpandHeight(true));
             GUILayout.BeginVertical(GUILayout.Width(inner));
             GUILayout.Label("Runtime USD Export Example", titleStyle);
@@ -271,33 +271,33 @@ namespace Unity.USDToolkit.Samples
 
             GUILayout.Space(10.0f);
             GUILayout.Label("Transform Policy", sectionStyle);
-            // 명시적 Rect 로 정확히 반반 분할(스타일 stretch 동작에 의존하지 않음)
+            // Split exactly in half with explicit Rects (doesn't rely on style stretching)
             Rect segRow = GUILayoutUtility.GetRect(inner, 36f, GUILayout.Width(inner), GUILayout.Height(36.0f));
             const float segGap = 8.0f;
             float segW = (segRow.width - segGap) * 0.5f;
             var bakedRect = new Rect(segRow.x, segRow.y, segW, segRow.height);
             var hierRect = new Rect(segRow.x + segW + segGap, segRow.y, segW, segRow.height);
-            if (GUI.Button(bakedRect, new GUIContent("Baked Mesh", "월드 트랜스폼을 정점에 구워 export (각 메시를 월드 좌표 기준 단일 메시로)"), transformPolicy == UsdTransformPolicy.BakedMesh ? SampleTheme.SegmentOn : SampleTheme.SegmentOff))
+            if (GUI.Button(bakedRect, new GUIContent("Baked Mesh", "Bake world transforms into the vertices on export (each mesh becomes a single mesh in world space)"), transformPolicy == UsdTransformPolicy.BakedMesh ? SampleTheme.SegmentOn : SampleTheme.SegmentOff))
             {
                 transformPolicy = UsdTransformPolicy.BakedMesh;
             }
 
-            if (GUI.Button(hierRect, new GUIContent("Hierarchy", "USD Xform 계층과 각 노드의 로컬 트랜스폼을 보존해 export"), transformPolicy == UsdTransformPolicy.PreserveHierarchy ? SampleTheme.SegmentOn : SampleTheme.SegmentOff))
+            if (GUI.Button(hierRect, new GUIContent("Hierarchy", "Export with the USD Xform hierarchy and each node's local transform preserved"), transformPolicy == UsdTransformPolicy.PreserveHierarchy ? SampleTheme.SegmentOn : SampleTheme.SegmentOff))
             {
                 transformPolicy = UsdTransformPolicy.PreserveHierarchy;
             }
 
             GUILayout.Space(10.0f);
             GUILayout.Label("Options", sectionStyle);
-            includeInactive = SampleTheme.Checkbox(includeInactive, new GUIContent("Include inactive objects", "비활성(inactive) GameObject도 export 대상에 포함한다"));
-            requireReadableMeshes = SampleTheme.Checkbox(requireReadableMeshes, new GUIContent("Require readable meshes", "Read/Write 꺼진 메시를 만나면 예외 발생 (끄면 GPU 버퍼를 readback해 임시 readable 사본으로 export)"));
-            exportNormals = SampleTheme.Checkbox(exportNormals, new GUIContent("Export normals", "메시 노멀(normals)을 USD에 기록한다"));
-            exportUv0 = SampleTheme.Checkbox(exportUv0, new GUIContent("Export UV0", "첫 번째 UV 세트(UV0)를 USD에 기록한다"));
-            exportBounds = SampleTheme.Checkbox(exportBounds, new GUIContent("Author mesh extent", "메시 bounding box(extent)를 USD prim에 기록한다"));
-            exportDisabledRenderers = SampleTheme.Checkbox(exportDisabledRenderers, new GUIContent("Export disabled renderers", "Renderer가 disabled인 메시도 export한다"));
-            preserveVisibility = SampleTheme.Checkbox(preserveVisibility, new GUIContent("Preserve inactive/disabled visibility", "비활성/disabled 오브젝트의 visibility 상태를 USD에 반영한다"));
-            ignoreAlbedoInMetallicSlot = SampleTheme.Checkbox(ignoreAlbedoInMetallicSlot, new GUIContent("Ignore albedo texture in metallic slot (fix mirror/black panels)", "metallic 슬롯에 albedo와 같은 텍스처가 꽂힌 오배치를 무시하고 스칼라 metallic만 export (거울 금속→검은 패널 방지)"));
-            captureNativeDiagnostics = SampleTheme.Checkbox(captureNativeDiagnostics, new GUIContent("Capture native diagnostics", "OpenUSD 네이티브 진단 로그를 캡처해 -diagnostics.log 로 저장한다"));
+            includeInactive = SampleTheme.Checkbox(includeInactive, new GUIContent("Include inactive objects", "Include inactive GameObjects in the export"));
+            requireReadableMeshes = SampleTheme.Checkbox(requireReadableMeshes, new GUIContent("Require readable meshes", "Throw on a mesh with Read/Write disabled (when off, read the GPU buffers back and export a temporary readable copy)"));
+            exportNormals = SampleTheme.Checkbox(exportNormals, new GUIContent("Export normals", "Write mesh normals to USD"));
+            exportUv0 = SampleTheme.Checkbox(exportUv0, new GUIContent("Export UV0", "Write the first UV set (UV0) to USD"));
+            exportBounds = SampleTheme.Checkbox(exportBounds, new GUIContent("Author mesh extent", "Write the mesh bounding box (extent) to the USD prim"));
+            exportDisabledRenderers = SampleTheme.Checkbox(exportDisabledRenderers, new GUIContent("Export disabled renderers", "Also export meshes whose Renderer is disabled"));
+            preserveVisibility = SampleTheme.Checkbox(preserveVisibility, new GUIContent("Preserve inactive/disabled visibility", "Write the visibility of inactive or disabled objects to USD"));
+            ignoreAlbedoInMetallicSlot = SampleTheme.Checkbox(ignoreAlbedoInMetallicSlot, new GUIContent("Ignore albedo texture in metallic slot (fix mirror/black panels)", "Ignore the albedo texture when it is misassigned to the metallic slot and export only the scalar metallic value (prevents mirror-metal black panels)"));
+            captureNativeDiagnostics = SampleTheme.Checkbox(captureNativeDiagnostics, new GUIContent("Capture native diagnostics", "Capture OpenUSD native diagnostics and save them as -diagnostics.log"));
 
             GUILayout.Space(12.0f);
             if (GUILayout.Button("Export USD (Mesh Only)", SampleTheme.PrimaryButton, GUILayout.Width(inner), GUILayout.Height(42.0f)))
@@ -363,8 +363,8 @@ namespace Unity.USDToolkit.Samples
                 lightObject.transform.rotation = Quaternion.Euler(45.0f, -35.0f, 0.0f);
             }
 
-            // 데모 지오메트리는 자동 생성하지 않는다. Export는 현재 열려있는 씬 전체를 대상으로 한다.
-            // (데모가 필요하면 "Recreate Demo Geometry" 버튼으로 명시적으로 생성)
+            // Don't create the demo geometry automatically. Export always targets the whole open scene.
+            // (To get the demo, create it explicitly with the "Recreate Demo Geometry" button.)
         }
 
         private void ApplyDefaultPaths()
@@ -526,7 +526,7 @@ namespace Unity.USDToolkit.Samples
             return texture;
         }
 
-        // 파일명(확장자 제외) + 드롭다운 포맷으로 출력 파일명 구성
+        // Build the output file name from the base name (no extension) and the dropdown format
         private string GetOutputFileName()
         {
             string baseName = string.IsNullOrWhiteSpace(fileName) ? "runtime-usd-export" : fileName.Trim();
@@ -540,7 +540,7 @@ namespace Unity.USDToolkit.Samples
             return baseName + UsdFormats[idx];
         }
 
-        // 직렬화된 옛 파일명에 확장자(.usda 등)가 박혀 있으면 떼어내고 그 포맷을 드롭다운 기본값으로 잡는다.
+        // If an old serialized file name includes an extension (.usda and so on), strip it and use that format as the dropdown default.
         private void NormalizeFileName()
         {
             if (string.IsNullOrWhiteSpace(fileName))
@@ -566,7 +566,7 @@ namespace Unity.USDToolkit.Samples
             }
         }
 
-        // 포맷 선택 드롭다운(IMGUI 런타임): 버튼을 누르면 목록이 아래로 펼쳐진다.
+        // Format dropdown (runtime IMGUI): pressing the button expands the list below it.
         private void DrawFormatDropdown(float inner)
         {
             GUILayout.Label("Format", smallStyle);
@@ -597,7 +597,7 @@ namespace Unity.USDToolkit.Samples
             }
         }
 
-        // 폴더 선택 다이얼로그: 에디터는 OpenFolderPanel(Win/mac/Linux), 빌드는 OS 네이티브 다이얼로그.
+        // Folder picker: OpenFolderPanel in the Editor (Windows/macOS/Linux), the native OS dialog in a build.
         private static string BrowseFolder(string title, string startDir)
         {
 #if UNITY_EDITOR
@@ -609,7 +609,7 @@ namespace Unity.USDToolkit.Samples
 #endif
         }
 
-        // 빌드 런타임용 OS 네이티브 폴더 다이얼로그 (Windows/macOS/Linux)
+        // Native OS folder dialog for player builds (Windows/macOS/Linux)
         private static string RunNativeFolderDialog(string title)
         {
             try
@@ -658,7 +658,7 @@ namespace Unity.USDToolkit.Samples
             }
         }
 
-        // 코드로 생성한 폴더 아이콘(다운로드/라이선스 불필요, 에디터·런타임 공통)
+        // Folder icon generated in code (no download or license needed; shared by the Editor and runtime)
         private Texture2D GetFolderIcon()
         {
             if (folderIcon != null)
