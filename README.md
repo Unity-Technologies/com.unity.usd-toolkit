@@ -37,6 +37,7 @@ The toolkit is not a renderer or a simulation runtime. Unity renders imported co
 | **Unity** | **6.4 and newer.** |
 | **Windows** | x64, Windows 10 version 21H1 or later. Requires the Microsoft Visual C++ Redistributable. |
 | **macOS** | Universal (x86_64 + arm64), macOS 12.0 or later. |
+| **Linux** | x64, Ubuntu 22.04 or later (glibc 2.34, `GLIBCXX_3.4.29`). |
 | **Git LFS** | Required if you install from Git. The native libraries are stored with LFS. |
 
 ## Installation
@@ -211,7 +212,7 @@ The package does not depend on `com.unity.formats.usd`, `com.unity.importer.usd`
 | **USD version** | OpenUSD 26.05 | USD 20.08 | USD 23.02 |
 | **Read / write** | Import and export | Import and export | Importer: import. Exporter: export. |
 | **Runs in** | Editor and built players | Editor | Editor |
-| **Platforms** | Windows x64, macOS (Intel and Apple silicon) | Windows, macOS Intel | Windows, macOS, Linux |
+| **Platforms** | Windows x64, macOS (Intel and Apple silicon), Linux x64 | Windows, macOS Intel | Windows, macOS, Linux |
 
 ## Documentation
 

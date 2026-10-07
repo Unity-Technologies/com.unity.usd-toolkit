@@ -100,13 +100,11 @@ Windows:
 Linux:
 
 - **g++ 11+** (C++17), `patchelf` (`pip install patchelf`), `binutils` (`nm`, `objdump`, `strip`).
-- Build on the **oldest glibc you must support**. The current payload was built on Ubuntu 24.04
-  and therefore requires **glibc ≥ 2.38** and `GLIBCXX_3.4.32`, which excludes Ubuntu 22.04.
-  Ubuntu 24.04 is the package's documented minimum for Linux (see `README.md` and the user
-  manuals), so rebuilding on 24.04 keeps that promise. To lower the floor to 22.04 — Unity 6.3
-  supports it, so this is worth doing when a machine is available — build in an Ubuntu 22.04
-  (glibc 2.35) container or on that distro directly. No source change is needed; the dependency
-  comes entirely from the build host's headers.
+- Build on the **oldest glibc you must support**. The current payload was built on Ubuntu 22.04
+  (glibc 2.35, g++ 11.4.0) and requires **glibc ≥ 2.34** and `GLIBCXX_3.4.29`, which is the
+  package's documented minimum for Linux (see `README.md` and the user manuals). Rebuilding on
+  22.04 keeps that promise; building on a newer distro raises the floor, because the dependency
+  comes entirely from the build host's headers, not from the source.
 
 ## 4. Get the repository
 
@@ -679,7 +677,7 @@ inspected.
 payload must resolve purely through `$ORIGIN`. Also confirm you did not ship a Python-enabled
 build (no `libpython*` in the payload).
 
-**Linux: `GLIBC_2.38 not found` on the target machine.** Rebuild on an older distro or in a
+**Linux: `GLIBC_2.xx not found` on the target machine.** Rebuild on an older distro or in a
 container matching the oldest glibc you support (§3).
 
 ## Appendix B — what this rebuild must not change

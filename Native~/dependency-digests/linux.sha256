@@ -2,8 +2,8 @@
 # Runtime/Plugins. Regenerate deliberately with --record and review the diff; see
 # Native~/verify_dependency_digests.py.
 37b507cef26b47b7d1c2beefc91ec1e30d61b0e94073bebca780ac6870a62878  lib/libtbb.so
-dcadeb8ff2eddd1ac10242c4d390f0966b637c0f95a545b239492bf29f9f4d26  lib/libtbb.so.2
-9a6ff1017fa83c57e0f827ba9252b068168eb9c15a9f6f5d80ce31e1d0d6b359  lib/libusd_ms.so
+eca65e6bc680492e8f76ca20d0d1efa625cab2e4f1ad6cbcf4d0d11af55dcf51  lib/libtbb.so.2
+021910fae76dcfd45b0a49f5ea63b1b83c08bd27829e285ae9ee41dc7c6fb723  lib/libusd_ms.so
 9e1f7de1980772441033787853be0dd5b7a6619c3abc86285ac242b8589e326c  lib/usd/ar/resources/plugInfo.json
 83ac5a08ce424a84261e8948ecb5ccba69279c30553ab3826c198759fa1af4ca  lib/usd/esf/resources/plugInfo.json
 b455afac3e18337d01658c3540443052335c8aa6bf1bffe7f28c5577af5c5b73  lib/usd/esfUsd/resources/plugInfo.json

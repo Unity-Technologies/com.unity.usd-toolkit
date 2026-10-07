@@ -54,7 +54,7 @@ TOOLCHAIN = {
         "Windows, VS Build Tools 2022 (MSVC 14.44), Windows SDK 10.0.26100, CMake 4.3.3, x64"
     ),
     "Linux x64": (
-        "Ubuntu 24.04, g++ 13.3.0, CMake 3.28.3, patchelf 0.17, x64 (requires glibc >= 2.38)"
+        "Ubuntu 22.04, g++ 11.4.0, CMake 3.31.6, patchelf 0.19.1, x64 (requires glibc >= 2.34)"
     ),
 }
 
