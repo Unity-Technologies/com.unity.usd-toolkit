@@ -1781,7 +1781,7 @@ namespace Unity.USDToolkit
 
         // Linux filesystems are case-sensitive, so comparing case-insensitively there would
         // accept a sibling directory differing only in case as being inside the trusted root.
-#if UNITY_EDITOR_LINUX || UNITY_STANDALONE_LINUX
+#if UNITY_EDITOR_LINUX || (!UNITY_EDITOR && UNITY_STANDALONE_LINUX)
         private const StringComparison PathComparison = StringComparison.Ordinal;
 #else
         private const StringComparison PathComparison = StringComparison.OrdinalIgnoreCase;
@@ -1818,6 +1818,11 @@ namespace Unity.USDToolkit
             yield return Path.GetFullPath("Packages/com.unity.usd-toolkit/Runtime/Plugins/x86_64/Windows");
 #elif UNITY_EDITOR_OSX
             yield return Path.GetFullPath("Packages/com.unity.usd-toolkit/Runtime/Plugins/macOS");
+#elif UNITY_EDITOR_LINUX
+            // Self-contained layout: the toolkit .so sits in Linux/, its dependent .so files and
+            // the schema tree in Linux/lib/ (lib/usd).
+            yield return Path.GetFullPath("Packages/com.unity.usd-toolkit/Runtime/Plugins/x86_64/Linux");
+            yield return Path.GetFullPath("Packages/com.unity.usd-toolkit/Runtime/Plugins/x86_64/Linux/lib");
 #elif UNITY_STANDALONE_WIN
             yield return Path.Combine(Application.dataPath, "Plugins", "x86_64", "Windows");
             yield return Path.Combine(Application.dataPath, "Plugins", "x86_64");
@@ -1827,11 +1832,6 @@ namespace Unity.USDToolkit
             yield return Path.Combine(Application.dataPath, "PlugIns", "macOS");
             yield return Path.Combine(Application.dataPath, "Plugins");
             yield return Path.Combine(Application.dataPath, "Plugins", "macOS");
-#elif UNITY_EDITOR_LINUX
-            // Self-contained layout: the toolkit .so sits in Linux/, its dependent .so files and
-            // the schema tree in Linux/lib/ (lib/usd).
-            yield return Path.GetFullPath("Packages/com.unity.usd-toolkit/Runtime/Plugins/x86_64/Linux");
-            yield return Path.GetFullPath("Packages/com.unity.usd-toolkit/Runtime/Plugins/x86_64/Linux/lib");
 #elif UNITY_STANDALONE_LINUX
             yield return Path.Combine(Application.dataPath, "Plugins", "x86_64", "Linux");
             yield return Path.Combine(Application.dataPath, "Plugins", "x86_64", "Linux", "lib");
@@ -1844,20 +1844,25 @@ namespace Unity.USDToolkit
 
         private static string GetNativeLibrarySearchEnvironmentVariable()
         {
-#if UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX
+#if UNITY_EDITOR_OSX || (!UNITY_EDITOR && UNITY_STANDALONE_OSX)
             return "DYLD_LIBRARY_PATH";
-#elif UNITY_EDITOR_LINUX || UNITY_STANDALONE_LINUX
+#elif UNITY_EDITOR_LINUX || (!UNITY_EDITOR && UNITY_STANDALONE_LINUX)
             return "LD_LIBRARY_PATH";
 #else
             return "PATH";
 #endif
         }
 
+        // The Editor also defines the symbols of the active build target (UNITY_STANDALONE_LINUX
+        // while a Linux player is selected on a Windows Editor), so the Editor's own OS has to win:
+        // the conditions below and in GetDefaultNativeBasePaths test the player symbols only
+        // outside the Editor. Otherwise a build-target switch made every Editor import and export
+        // look for another platform's libraries.
         private static string[] GetToolkitNativeFileNames()
         {
-#if UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX
+#if UNITY_EDITOR_OSX || (!UNITY_EDITOR && UNITY_STANDALONE_OSX)
             return new[] { "UnityUSDToolkitNative.dylib", "libUnityUSDToolkitNative.dylib", "UnityUSDToolkitNative.bundle" };
-#elif UNITY_EDITOR_LINUX || UNITY_STANDALONE_LINUX
+#elif UNITY_EDITOR_LINUX || (!UNITY_EDITOR && UNITY_STANDALONE_LINUX)
             return new[] { "libUnityUSDToolkitNative.so", "UnityUSDToolkitNative.so" };
 #else
             return new[] { "UnityUSDToolkitNative.dll" };
@@ -1870,9 +1875,9 @@ namespace Unity.USDToolkit
             // base-name collision with the usd_ms bundled by another package (for example
             // com.unity.pixyz.sdk-plus). The old usd_ms name is kept as a compatibility
             // fallback.
-#if UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX
+#if UNITY_EDITOR_OSX || (!UNITY_EDITOR && UNITY_STANDALONE_OSX)
             return new[] { "libusd_rt.dylib", "libusd_ms.dylib", "libusd_m.dylib" };
-#elif UNITY_EDITOR_LINUX || UNITY_STANDALONE_LINUX
+#elif UNITY_EDITOR_LINUX || (!UNITY_EDITOR && UNITY_STANDALONE_LINUX)
             // Linux uses a component build (no monolithic library): these are representative
             // names, and the actual detection is done by pattern.
             return new[] { "libusd_rt.so", "libusd_usd.so", "libusd_ms.so" };
@@ -1883,9 +1888,9 @@ namespace Unity.USDToolkit
 
         private static string[] GetOpenUsdNativeFilePatterns()
         {
-#if UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX
+#if UNITY_EDITOR_OSX || (!UNITY_EDITOR && UNITY_STANDALONE_OSX)
             return new[] { "libusd*.dylib", "usd*.dylib" };
-#elif UNITY_EDITOR_LINUX || UNITY_STANDALONE_LINUX
+#elif UNITY_EDITOR_LINUX || (!UNITY_EDITOR && UNITY_STANDALONE_LINUX)
             return new[] { "libusd*.so" };
 #else
             return new[] { "usd*.dll" };
@@ -1894,9 +1899,9 @@ namespace Unity.USDToolkit
 
         private static string[] GetTbbNativeFileNames()
         {
-#if UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX
+#if UNITY_EDITOR_OSX || (!UNITY_EDITOR && UNITY_STANDALONE_OSX)
             return new[] { "libtbb.dylib", "libtbb.12.dylib", "libtbbmalloc.dylib", "libtbbmalloc.2.dylib" };
-#elif UNITY_EDITOR_LINUX || UNITY_STANDALONE_LINUX
+#elif UNITY_EDITOR_LINUX || (!UNITY_EDITOR && UNITY_STANDALONE_LINUX)
             return new[] { "libtbb.so", "libtbb.so.2", "libtbb.so.12" };
 #else
             // tbb_usdrt.dll is Intel's TBB renamed so the Windows loader cannot hand us the
@@ -1998,9 +2003,9 @@ namespace Unity.USDToolkit
             // also refuse a library that is there and intact because the host OS is older than
             // the one it was built for. That reads as "file not found" and sends people looking
             // for a missing file, so name the OS requirement here.
-#if UNITY_STANDALONE_LINUX || UNITY_EDITOR_LINUX
+#if UNITY_EDITOR_LINUX || (!UNITY_EDITOR && UNITY_STANDALONE_LINUX)
             message.Append(" On Linux the payload is built on Ubuntu 24.04 and requires glibc 2.38 or newer and a libstdc++ providing GLIBCXX_3.4.32; Ubuntu 22.04 (glibc 2.35) cannot load it. Run `ldd --version` to check.");
-#elif UNITY_STANDALONE_OSX || UNITY_EDITOR_OSX
+#elif UNITY_EDITOR_OSX || (!UNITY_EDITOR && UNITY_STANDALONE_OSX)
             message.Append(" On macOS the payload requires macOS 12.0 or newer.");
 #endif
             return new UsdExportException(message.ToString(), exception, nativeRuntime.ToDiagnosticString());

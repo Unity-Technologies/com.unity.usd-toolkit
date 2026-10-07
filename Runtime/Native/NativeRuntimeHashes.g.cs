@@ -17,9 +17,9 @@ namespace Unity.USDToolkit.Native
     {
         // Identifies which platform's entries apply at run time. Must match the keys the
         // generator writes.
-#if UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX
+#if UNITY_EDITOR_OSX || (!UNITY_EDITOR && UNITY_STANDALONE_OSX)
         internal const string PlatformId = "macOS";
-#elif UNITY_EDITOR_LINUX || UNITY_STANDALONE_LINUX
+#elif UNITY_EDITOR_LINUX || (!UNITY_EDITOR && UNITY_STANDALONE_LINUX)
         internal const string PlatformId = "linux";
 #else
         internal const string PlatformId = "windows";
