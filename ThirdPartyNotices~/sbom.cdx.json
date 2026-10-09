@@ -298,7 +298,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "6909762c6605503fbd2228faec9c4879de99278b10a99cf767e13b3e06f1062a"
+          "content": "7e2336a3ee28a50bdf631d2db5d68261813f70e4bec93d16c39540dcdf061d2f"
         }
       ],
       "properties": [
@@ -398,7 +398,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "708420d8b009b4754c98c16dda30b2bcc52894038bc5bfc39d85ecaac0b166a6"
+          "content": "4cda1434ea30f032f64189a71de4e5a0df621966890e42688db4ae1e43b539fc"
         }
       ],
       "properties": [
@@ -412,7 +412,7 @@
         },
         {
           "name": "unity:toolchain",
-          "value": "Ubuntu 24.04, g++ 13.3.0, CMake 3.28.3, patchelf 0.17, x64 (requires glibc >= 2.38)"
+          "value": "Ubuntu 22.04, g++ 11.4.0, CMake 3.31.6, patchelf 0.19.1, x64 (requires glibc >= 2.34)"
         },
         {
           "name": "unity:sourceCommit",
@@ -448,7 +448,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "d915411ca5e148f320cbec708c17762e0cf6b7a90ee52f554b2dc0da31993e2b"
+          "content": "245adaa1a8efcd0afce4b204a4c73014e569c87bf8248fff367756e28d935527"
         }
       ],
       "properties": [
@@ -494,7 +494,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "9af651df7c60897dffc9296960d20bd189c21f6f1c279e2eadee6072b72402df"
+          "content": "e5f2bbea7734f4bdec53251687bf76883d8ae3e3822e1eeb8cc0d3f71d94c665"
         }
       ],
       "properties": [
@@ -540,7 +540,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "1293975a77ac06f7dcc64c5ae9f4deaa7ad31a14321056545d5f8e4aa6ffd434"
+          "content": "e28b63875078eb74ae77adbfe768dffdb98b96d9d3d82a6b68c5154aca857bad"
         }
       ],
       "properties": [
@@ -632,7 +632,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "9e3b7de888e5d9aaa14725f7d7984231889f3cf32ec74c5de9ed25ed08d9d21f"
+          "content": "9055354cda2b1e5e29b8ebe73f9b6998e58812d56b0eadb15b44041ba208acb5"
         }
       ],
       "properties": [
@@ -677,7 +677,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "91700a95a39d5c8acae46326513890776bbe8b5dfca89bb07d20c50ee029bca4"
+          "content": "bb8f10f9ef00392afeec1e25a8e2d7827b73a84a50f40cb3dcef35f774550ed8"
         }
       ],
       "properties": [
@@ -716,7 +716,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "4728734ddee28359c4983e1b95f6a3fb55257ef599692c6caccbacbe9fe1aa77"
+          "content": "245e9bd1930bb827cd90d116ea5f59f16744275a441a3f4b35e20618c3dcc1f5"
         }
       ],
       "properties": [
@@ -755,7 +755,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "75391e9fc4d85bdee287fc3f895e10fbad19c5befb9e3085e2ee3e4e8349348a"
+          "content": "f8929e85e4e9a8771afa4a68b2858e3682161f01e99a164701918e2c2a2da281"
         }
       ],
       "properties": [
@@ -769,7 +769,7 @@
         },
         {
           "name": "unity:toolchain",
-          "value": "Ubuntu 24.04, g++ 13.3.0, CMake 3.28.3, patchelf 0.17, x64 (requires glibc >= 2.38)"
+          "value": "Ubuntu 22.04, g++ 11.4.0, CMake 3.31.6, patchelf 0.19.1, x64 (requires glibc >= 2.34)"
         },
         {
           "name": "unity:nativeApiVersion",

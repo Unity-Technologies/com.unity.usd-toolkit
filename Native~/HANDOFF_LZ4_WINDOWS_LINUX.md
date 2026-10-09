@@ -193,12 +193,12 @@ Commit as yourself; do not add tool-attribution trailers.
 ## 3. Linux x64
 
 Prerequisites: `REBUILD_WINDOWS_LINUX.md` §3 — g++ 11+, CMake, `patchelf`, binutils, Python 3,
-git-lfs. **Build on Ubuntu 24.04** (the documented floor, glibc 2.38) unless you deliberately
-lower it with a 22.04 container (P22).
+git-lfs. **Build on Ubuntu 22.04** (the documented floor, glibc 2.34 since 2026-10-08) unless you
+deliberately change the floor (P22).
 
 `build_linux.sh` stops at once if any of `cmake python3 patchelf strip strings ldd` is missing, so
 check them up front, and compare the versions with the `"Linux x64"` line of `TOOLCHAIN` in
-`Native~/generate_sbom.py` (Ubuntu 24.04, g++ 13.3.0, CMake 3.28.3, patchelf 0.17). A difference
+`Native~/generate_sbom.py` (Ubuntu 22.04, g++ 11.4.0, CMake 3.31.6, patchelf 0.19.1). A difference
 is not a STOP; write it down for §4, which updates that line.
 
 ```bash
@@ -442,7 +442,8 @@ and §4, because the manifest is regenerated once at the end. Do not "fix" it by
 generator on Windows or per platform.
 
 **P22. Linux glibc floor.** Whatever distro you build on sets the minimum glibc of the payload.
-Ubuntu 24.04 keeps today's floor (2.38). If you build elsewhere, record the new floor and update
+Ubuntu 22.04 keeps today's floor (2.34, lowered from 2.38 on 2026-10-08). If you build elsewhere,
+record the new floor and update
 `TOOLCHAIN`, `README.md` and the manuals in §4.
 
 ---

@@ -50,12 +50,12 @@ The C# API checks the version of the native plugin when it loads, and refuses a 
 | --- | --- | --- | --- |
 | Windows x64 | Yes | Yes | Windows 10 version 21H1 |
 | macOS, Universal (x86_64 + arm64) | Yes | Yes | macOS 12.0 |
-| Linux x64 | Yes | Not yet | Ubuntu 24.04 |
+| Linux x64 | Yes | Yes | Ubuntu 22.04 |
 | Mobile, WebGL, consoles | No | No | — |
 
 The minimum OS applies to players you build as well as to the Editor, because the same native libraries are copied into the player.
 
-On Linux, the native libraries require glibc 2.38 or later and libstdc++ with `GLIBCXX_3.4.32` (GCC 13). They don't load on Ubuntu 22.04. When the requirements aren't met, the toolkit throws an error that names the missing requirement.
+On Linux, the native libraries require glibc 2.34 or later and libstdc++ with `GLIBCXX_3.4.29` (GCC 11). Ubuntu 22.04 and newer meet both. When the requirements aren't met, the toolkit throws an error that names the missing requirement.
 
 On Windows, the target machine needs the Microsoft Visual C++ Redistributable.
 

@@ -2004,7 +2004,7 @@ namespace Unity.USDToolkit
             // the one it was built for. That reads as "file not found" and sends people looking
             // for a missing file, so name the OS requirement here.
 #if UNITY_EDITOR_LINUX || (!UNITY_EDITOR && UNITY_STANDALONE_LINUX)
-            message.Append(" On Linux the payload is built on Ubuntu 24.04 and requires glibc 2.38 or newer and a libstdc++ providing GLIBCXX_3.4.32; Ubuntu 22.04 (glibc 2.35) cannot load it. Run `ldd --version` to check.");
+            message.Append(" On Linux the payload is built on Ubuntu 22.04 and requires glibc 2.34 or newer and a libstdc++ providing GLIBCXX_3.4.29; Ubuntu 22.04 (glibc 2.35) and newer load it. Run `ldd --version` to check.");
 #elif UNITY_EDITOR_OSX || (!UNITY_EDITOR && UNITY_STANDALONE_OSX)
             message.Append(" On macOS the payload requires macOS 12.0 or newer.");
 #endif

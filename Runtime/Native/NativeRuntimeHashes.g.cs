@@ -32,8 +32,8 @@ namespace Unity.USDToolkit.Native
         internal static readonly Dictionary<string, string> Expected =
             new Dictionary<string, string>(StringComparer.Ordinal)
         {
-            { "linux/lib/libtbb.so.2", "9e3b7de888e5d9aaa14725f7d7984231889f3cf32ec74c5de9ed25ed08d9d21f" },
-            { "linux/lib/libusd_ms.so", "708420d8b009b4754c98c16dda30b2bcc52894038bc5bfc39d85ecaac0b166a6" },
+            { "linux/lib/libtbb.so.2", "9055354cda2b1e5e29b8ebe73f9b6998e58812d56b0eadb15b44041ba208acb5" },
+            { "linux/lib/libusd_ms.so", "4cda1434ea30f032f64189a71de4e5a0df621966890e42688db4ae1e43b539fc" },
             { "linux/lib/usd/ar/resources/plugInfo.json", "9e1f7de1980772441033787853be0dd5b7a6619c3abc86285ac242b8589e326c" },
             { "linux/lib/usd/esf/resources/plugInfo.json", "83ac5a08ce424a84261e8948ecb5ccba69279c30553ab3826c198759fa1af4ca" },
             { "linux/lib/usd/esfUsd/resources/plugInfo.json", "b455afac3e18337d01658c3540443052335c8aa6bf1bffe7f28c5577af5c5b73" },
@@ -96,7 +96,7 @@ namespace Unity.USDToolkit.Native
             { "linux/lib/usd/usdVol/resources/generatedSchema.usda", "50777f52292b86a69aeffbd3df7b0e795e0edb2346ae7a954df5daaf329392a8" },
             { "linux/lib/usd/usdVol/resources/plugInfo.json", "fdbddc6d2fc503efdeef579e748b5176efcfd40366897a1a5c6f8b8549f2cfa7" },
             { "linux/lib/usd/usdVol/resources/usdVol/schema.usda", "e1ad6c11b3f7866754dd6d4ccc49e42efc7d5864b658ffb71f4a2739a9c15397" },
-            { "linux/libUnityUSDToolkitNative.so", "346f280c69751033419edd39c525c72297bc90a8734870892454828e75889c6f" },
+            { "linux/libUnityUSDToolkitNative.so", "f8929e85e4e9a8771afa4a68b2858e3682161f01e99a164701918e2c2a2da281" },
             { "linux/plugin/usd/plugInfo.json", "7b7a874c34b5e0151a1406805557c498fe8095609c9d11ced4977cec02df349d" },
             { "linux/plugin/usd/usdShaders/resources/plugInfo.json", "785323b961816c88ead3e3f49dec75beac1d9c75030e476523059d194b7e281f" },
             { "linux/plugin/usd/usdShaders/resources/shaders/previewSurface.glslfx", "de60e7f6dd4ab26b9941fffe3814aacf0194dd7d65bd2136ad0e022f12c16e79" },

@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Linux x64 players** 
+  `Unity.USDToolkit` and `Unity.USDToolkit.Samples` now include `LinuxStandalone64`. The Linux
+  native payload, its plugin settings and the build postprocessor already handled Linux players,
+  but the C# assemblies left them out, so a Linux build shipped the native libraries without the
+  API. The Linux payload is now built on Ubuntu 22.04 and needs glibc 2.34 or later
+  (`GLIBCXX_3.4.29`), down from glibc 2.38, so it loads on Ubuntu 22.04 and newer.
+
 ### Changed
 
 - **The samples import from the Package Manager** 
