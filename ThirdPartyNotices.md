@@ -19,21 +19,27 @@ but does not redistribute. See [NVIDIA Isaac Sim](#nvidia-isaac-sim) and
 Redistributed files:
 
 - `Runtime/Plugins/macOS/libusd_ms.dylib` (OpenUSD monolithic, universal x86_64 + arm64)
-- `Runtime/Plugins/macOS/lib/usd/**`
+- `Runtime/Plugins/macOS/lib/usd/**`, except `lib/usd/usdMtlx/resources/libraries/**`
 - `Runtime/Plugins/macOS/plugin/usd/**`
 - `Runtime/Plugins/x86_64/Windows/usd_rt.dll` (OpenUSD monolithic, renamed from `usd_ms.dll`)
-- `Runtime/Plugins/x86_64/Windows/lib/usd/**`
+- `Runtime/Plugins/x86_64/Windows/lib/usd/**`, except `lib/usd/usdMtlx/resources/libraries/**`
 - `Runtime/Plugins/x86_64/Windows/plugin/usd/**`
 - `Runtime/Plugins/x86_64/Linux/lib/libusd_ms.so` (OpenUSD monolithic)
-- `Runtime/Plugins/x86_64/Linux/lib/usd/**`
+- `Runtime/Plugins/x86_64/Linux/lib/usd/**`, except `lib/usd/usdMtlx/resources/libraries/**`
 - `Runtime/Plugins/x86_64/Linux/plugin/usd/**`
+
+The `lib/usd/usdMtlx/resources/libraries/**` trees are the MaterialX standard library, which
+OpenUSD's `usdMtlx` plugin installs but does not author. They are covered under
+[MaterialX](#materialx) below, not by Pixar's license.
 
 Version:
 
 - OpenUSD **26.05**, public tag `v26.05`, commit `2095faf` ("Merge release v26.05")
 - The same tag and commit on all three platforms, built monolithic with
   `--build-variant release --build-monolithic --no-python --no-imaging --no-usdview
-  --no-examples --no-tutorials --no-tests --no-materialx`
+  --no-examples --no-tutorials --no-tests --materialx
+  --build-args MaterialX,-DMATERIALX_BUILD_RENDER=OFF`, after applying
+  `Native~/patches/openusd-26.05-lz4-1.10.0.patch` (see the vendored components below)
 
 Source:
 
@@ -88,6 +94,90 @@ License:
 - Apache License 2.0
 - Full text: `ThirdPartyNotices~/licenses/oneTBB-LICENSE.txt`
 
+## MaterialX
+
+Redistributed files:
+
+- `Runtime/Plugins/macOS/libMaterialXCore.1.dylib` and `libMaterialXFormat.1.dylib`
+  (universal x86_64 + arm64)
+- `Runtime/Plugins/x86_64/Windows/MaterialXCore.dll` and `MaterialXFormat.dll`
+- `Runtime/Plugins/x86_64/Linux/lib/libMaterialXCore.so.1` and `libMaterialXFormat.so.1`
+- `lib/usd/usdMtlx/resources/libraries/**` under each of the three platform folders: the MaterialX
+  standard library (`.mtlx` node definitions, and the GLSL, MSL, OSL and MDL source its shader
+  generators use), which OpenUSD's `usdMtlx` plugin reads at run time
+
+Version:
+
+- MaterialX **1.39.4**, the version OpenUSD v26.05's `build_scripts/build_usd.py` pins for
+  `--materialx`, built from the `v1.39.4` source archive with `-DMATERIALX_BUILD_RENDER=OFF`.
+  `usdMtlx` links only `MaterialXCore` and `MaterialXFormat`, so those are the only two libraries
+  shipped.
+
+Source:
+
+- Academy Software Foundation MaterialX
+- https://github.com/AcademySoftwareFoundation/MaterialX
+- https://github.com/AcademySoftwareFoundation/MaterialX/releases/tag/v1.39.4
+
+License:
+
+- Apache License 2.0
+- Full text: `ThirdPartyNotices~/licenses/MaterialX-LICENSE.txt`
+
+Files in the standard library that carry another copyright holder's notice, each with its notice
+left in place:
+
+- Eight MDL files under `libraries/mdl/materialx/` — `core.mdl`, `hsv.mdl`, `pbrlib.mdl` and
+  `pbrlib_1_6.mdl` to `pbrlib_1_10.mdl` — are "Copyright (c) 2020, NVIDIA CORPORATION. All
+  rights reserved." under the Apache License 2.0 (same text as above).
+- Four OSL headers under `libraries/stdlib/genosl/include/` — `color4.h`, `matrix33.h`,
+  `vector2.h`, `vector4.h` — are "Copyright Contributors to the Open Shading Language project",
+  BSD-3-Clause.
+- `libraries/mdl/materialx/noise.mdl`, `libraries/stdlib/genglsl/lib/mx_noise.glsl`,
+  `libraries/stdlib/genglsl/lib/mx_hsv.glsl` and `libraries/stdlib/genosl/include/mx_funcs.h` are
+  derived from Open Shading Language and carry Sony Pictures Imageworks' copyright, BSD-3-Clause.
+  The first three reproduce the notice below in full; `mx_funcs.h` links to OSL's license.
+
+```text
+Copyright (c) 2009-2010 Sony Pictures Imageworks Inc., et al.
+All Rights Reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are
+met:
+* Redistributions of source code must retain the above copyright
+  notice, this list of conditions and the following disclaimer.
+* Redistributions in binary form must reproduce the above copyright
+  notice, this list of conditions and the following disclaimer in the
+  documentation and/or other materials provided with the distribution.
+* Neither the name of Sony Pictures Imageworks nor the names of its
+  contributors may be used to endorse or promote products derived from
+  this software without specific prior written permission.
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
+
+### pugixml (vendored inside MaterialX)
+
+MaterialX vendors pugixml **1.9** at `source/MaterialXFormat/External/PugiXML`, with two
+MaterialX-specific modifications (new-line tracking, and serializing `<` and `>` unescaped), and
+compiles it into `MaterialXFormat`. It ships as part of `libMaterialXFormat.1.dylib` /
+`MaterialXFormat.dll` / `libMaterialXFormat.so.1`, not as a file of its own.
+
+- Source: https://github.com/zeux/pugixml (tag `v1.9`, per the vendored `readme.txt`)
+- License: MIT, Copyright (c) 2006-2018 Arseny Kapoulkine
+- Full text: `ThirdPartyNotices~/licenses/pugixml-LICENSE.txt`, copied from the vendored
+  `readme.txt`
+
 ## Components vendored inside OpenUSD
 
 These are third-party libraries that live in the OpenUSD source tree and are
@@ -111,6 +201,24 @@ Sources:
 - https://github.com/lz4/lz4
 - https://github.com/Tessil/robin-map
 
+### libdeflate (compiled into the wrapper)
+
+libdeflate is vendored in the same OpenUSD tree, at
+`pxr/imaging/plugin/hioOpenEXR/OpenEXR/deflate`, but reaches the payload by a different route:
+OpenUSD is built `--no-imaging`, so it is not in the OpenUSD library. Instead
+`Native~/src/UsdDeflate.c` compiles its decompressor into `UnityUSDToolkitNative`
+(`UnityUSDToolkitNative.dylib` / `.dll` / `libUnityUSDToolkitNative.so`) on every platform, after
+`Native~/CMakeLists.txt` has checked each file it uses against the copy OpenUSD v26.05 ships. It
+is not exported.
+
+| Component | Version | License | Full text |
+|---|---|---|---|
+| libdeflate (`pxr/imaging/plugin/hioOpenEXR/OpenEXR/deflate`) | 1.18 | MIT | `ThirdPartyNotices~/licenses/libdeflate-LICENSE.txt` |
+
+Source:
+
+- https://github.com/ebiggers/libdeflate
+
 ## Microsoft Visual C++ Runtime
 
 This package does not bundle Microsoft Visual C++ Runtime redistributable DLLs.
@@ -133,9 +241,12 @@ Nature of the integration:
 
 Redistributed files:
 
-- **None.** This package does not bundle, embed, or redistribute any NVIDIA
-  software, source code, binaries, headers, models, or assets. The extension
-  only calls NVIDIA-provided Python APIs (`isaacsim`, `omni.ext`, `omni.kit.app`,
+- **None of Isaac Sim or Omniverse.** This package does not bundle, embed, or
+  redistribute any NVIDIA software, binaries, headers, models, or assets from
+  them. The only NVIDIA-copyright files in the package are the eight MDL source
+  files of the MaterialX standard library (Apache License 2.0), which arrive with
+  MaterialX and have nothing to do with this integration; see
+  [MaterialX](#materialx). The extension only calls NVIDIA-provided Python APIs (`isaacsim`, `omni.ext`, `omni.kit.app`,
   `omni.ui`, `omni.usd`, `omni.timeline`, `carb`) that are resolved at run time
   from an Isaac Sim installation the user obtains separately from NVIDIA. The
   Isaac Sim installation directory is never written to.

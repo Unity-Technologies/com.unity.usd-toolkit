@@ -57,7 +57,9 @@ PLATFORM_ROOTS = {
 }
 
 DESCRIPTOR_NAMES = {"plugInfo.json"}
-DESCRIPTOR_SUFFIXES = {".usda", ".glslfx"}
+# .mtlx: the MaterialX standard library usdMtlx parses at run time (node definitions a material
+# resolves against), so an edited one changes what a stage's materials mean, as a .usda would.
+DESCRIPTOR_SUFFIXES = {".usda", ".glslfx", ".mtlx"}
 BINARY_SUFFIXES = {".dll", ".dylib", ".so"}
 
 # A Git LFS pointer is a small text file that begins with this line. Hashing one would record

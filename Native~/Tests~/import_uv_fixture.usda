@@ -152,9 +152,10 @@ def Xform "Fixture"
 
             def Shader "not_a_texture"
             {
-                uniform token info:id = "UsdPrimvarReader_float3"
-                token inputs:varname = "displayColor"
-                float3 outputs:result
+                # Neither a texture nor a primvar reader (a primvar reader is resolved since
+                # 2026-10-10), so the importer has nothing it can read here.
+                uniform token info:id = "UsdTransform2d"
+                float2 outputs:result
             }
         }
 

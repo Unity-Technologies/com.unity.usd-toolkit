@@ -251,7 +251,8 @@ class MarkerTests(TempDirTest):
 
 
 def scan_record_text(component="OpenUSD", version="0.0", commit="a" * 40, patches="none",
-                     counts=None, kept_open="None.", conclusion="Acceptable to compile; decided by test."):
+                     counts=None, kept_open="None.", conclusion="Acceptable to compile; decided by test.",
+                     archive="-"):
     counts = counts or {"Critical": (0, 0), "High": (0, 0), "Medium": (0, 0), "Low": (0, 0)}
     result = "\n".join(f"| {name} | {found} | {kept} |" for name, (found, kept) in counts.items())
     return textwrap.dedent("""\
@@ -267,6 +268,7 @@ def scan_record_text(component="OpenUSD", version="0.0", commit="a" * 40, patche
         | Date | 2026-10-01 |
         | Tool | Cycode CLI 0.0, SAST |
         | Patches covered | {patches} |
+        | Archive scanned | {archive} |
 
         ## Command
 
@@ -291,7 +293,7 @@ def scan_record_text(component="OpenUSD", version="0.0", commit="a" * 40, patche
         ## Conclusion
 
         {conclusion}
-        """).format(component=component, version=version, commit=commit, patches=patches,
+        """).format(component=component, version=version, commit=commit, patches=patches, archive=archive,
                     result=result.replace("\n", "\n        "), kept_open=kept_open,
                     conclusion=conclusion)
 
@@ -343,6 +345,13 @@ class ScanRecordTests(TempDirTest):
             patches="d" * 64, counts=counts,
             kept_open="rule X, pxr/imaging/foo.cpp:12: not compiled under --no-imaging.")), [])
 
+    def test_archive_record_must_name_the_archive(self):
+        tbb = self.rows[1]
+        record = scan_record_text(component="oneTBB", commit="0" * 40)
+        self.assertTrue(sources.scan_record_problems(tbb, self.rows, record))
+        record = scan_record_text(component="oneTBB", commit="0" * 40, archive="b" * 64)
+        self.assertEqual(sources.scan_record_problems(tbb, self.rows, record), [])
+
     def test_empty_conclusion_fails(self):
         self.assertTrue(self.problems(scan_record_text(patches="d" * 64, conclusion="<decision>")))
 
@@ -351,7 +360,7 @@ class ScanRecordTests(TempDirTest):
                 mock.patch.object(sources, "REPO", self.tmp), quiet():
             (self.tmp / "openusd-0.0.md").write_text("")
             (self.tmp / "onetbb-0.0.md").write_text(
-                scan_record_text(component="oneTBB", commit="0" * 40))
+                scan_record_text(component="oneTBB", commit="0" * 40, archive="b" * 64))
             self.assertFalse(sources.verify_scan(self.rows))
             (self.tmp / "openusd-0.0.md").write_text(scan_record_text(patches="d" * 64))
             self.assertTrue(sources.verify_scan(self.rows))

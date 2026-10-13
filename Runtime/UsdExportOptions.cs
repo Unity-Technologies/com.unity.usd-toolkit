@@ -78,11 +78,88 @@ namespace Unity.USDToolkit
         /// CaptureNativeDiagnostics to be enabled.
         /// </summary>
         public string NativeDiagnosticsLogPath;
+
+        /// <summary>
+        /// <see cref="UsdCompositionMode.Flatten"/> (the default) writes every object out in
+        /// full, as earlier versions did. <see cref="UsdCompositionMode.Preserve"/> keeps USD
+        /// composition: an imported stage is written back as overrides on top of its source
+        /// file, prefab instances become references to one asset each, and (with
+        /// <see cref="ShareMeshes"/>) repeated meshes become instances of one prototype.
+        /// Preserve always keeps the hierarchy, whatever <see cref="TransformPolicy"/> says, and
+        /// needs native API 6.
+        /// </summary>
+        public UsdCompositionMode Composition = UsdCompositionMode.Flatten;
+
+        /// <summary>
+        /// Where shared content goes in <see cref="UsdCompositionMode.Preserve"/>:
+        /// <see cref="UsdExportLayout.SingleFile"/> keeps prefab assets and mesh prototypes in
+        /// the one file, as class prims referenced internally;
+        /// <see cref="UsdExportLayout.FolderWithAssets"/> writes each prefab asset to its own
+        /// file in a "&lt;usd-name&gt;_assets/" folder beside the USD and references it. An
+        /// output path ending in .usdz packages either layout, dependencies included.
+        /// </summary>
+        public UsdExportLayout Layout = UsdExportLayout.SingleFile;
+
+        /// <summary>
+        /// How <see cref="UsdCompositionMode.Preserve"/> writes objects that came from
+        /// <see cref="UsdImporter"/> (they carry a <see cref="UsdStageSource"/>).
+        /// </summary>
+        public UsdImportedContentMode ImportedContent = UsdImportedContentMode.OverrideSource;
+
+        /// <summary>
+        /// Preserve mode only. When true, meshes that share one Mesh asset and the same materials
+        /// are written once, as a prototype, and every user references it as an instance. Off by
+        /// default so the shape of an export does not change for existing callers.
+        /// </summary>
+        public bool ShareMeshes;
+
+        /// <summary>
+        /// Preserve mode only. Detects prefab instances (in the Editor through the prefab
+        /// connection, at runtime through <see cref="UsdPrefabMarker"/>) and writes each prefab
+        /// once as an asset that its instances reference, with each instance's differences as
+        /// overrides. On by default.
+        /// </summary>
+        public bool ExportPrefabsAsReferences = true;
     }
 
     public enum UsdTransformPolicy
     {
         BakedMesh = 0,
         PreserveHierarchy = 1
+    }
+
+    public enum UsdCompositionMode
+    {
+        /// <summary>Every object is written out in full into one layer (the original behaviour).</summary>
+        Flatten = 0,
+
+        /// <summary>Sublayers, references and instancing are kept or created; see UsdExportOptions.Composition.</summary>
+        Preserve = 1
+    }
+
+    public enum UsdExportLayout
+    {
+        /// <summary>One file; shared content lives in it as class prims.</summary>
+        SingleFile = 0,
+
+        /// <summary>The scene file plus one file per prefab asset in "&lt;usd-name&gt;_assets/".</summary>
+        FolderWithAssets = 1
+    }
+
+    public enum UsdImportedContentMode
+    {
+        /// <summary>
+        /// When the export root is the object an import created, the output sublayers the
+        /// source file and holds only what changed in Unity (moves, visibility, deletions,
+        /// additions, variant selections), so every composition arc in the source survives.
+        /// An imported stage nested deeper in the exported hierarchy is referenced instead.
+        /// </summary>
+        OverrideSource = 0,
+
+        /// <summary>Imported stages are always referenced from the source file, with changes as overrides.</summary>
+        ReferenceSource = 1,
+
+        /// <summary>Imported objects are written out like any other object; the source file is not used.</summary>
+        Inline = 2
     }
 }

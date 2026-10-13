@@ -18,4 +18,19 @@
 # invisibly, because autocrlf converts back when git compares.
 Runtime/Plugins/**/*.usda         -text
 Runtime/Plugins/**/*.glslfx       -text
+Runtime/Plugins/**/*.mtlx         -text
 Runtime/Plugins/**/plugInfo.json  -text
+
+# The MaterialX shader sources beside the .mtlx files (.glsl, .osl, .mdl, .metal, .h) are not
+# hashed at run time, but the SBOM records a tree digest over the whole library folder. With
+# autocrlf they check out as CRLF on Windows, so generate_sbom.py run there writes a digest
+# that matches no other checkout, and a pack made there ships them converted. (.mtlx is above.)
+Runtime/Plugins/**/usdMtlx/resources/libraries/**/*.glsl  -text
+Runtime/Plugins/**/usdMtlx/resources/libraries/**/*.osl  -text
+Runtime/Plugins/**/usdMtlx/resources/libraries/**/*.mdl  -text
+Runtime/Plugins/**/usdMtlx/resources/libraries/**/*.metal  -text
+Runtime/Plugins/**/usdMtlx/resources/libraries/**/*.h  -text
+
+# A patch applied to the OpenUSD tree is pinned by SHA-256 in Native~/dependency-sources, so a
+# Windows checkout converting it to CRLF would make every Windows build refuse it.
+Native~/patches/*.patch  -text

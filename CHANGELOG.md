@@ -9,6 +9,105 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Texture streaming for `ImportAsync` (on by default)** 
+  `ImportAsync` waited for every texture to decode before building anything, so a stage with
+  large textures showed nothing until the end (ALab: about 13 of 23.5 seconds is its UDIM
+  atlases). It now returns once the hierarchy, meshes and untextured materials are built and
+  attaches the textures when they finish decoding on a worker thread; await
+  `UsdImportResult.TexturesReady` for the final look. The textured material is built by the same
+  code as before and copied onto the one already in use, so the result is identical (checked by a
+  material-state hash on ALab and Factory). Measured on Windows (ALab, cold): first geometry 27.6 s
+  → 16.5 s, textures complete 27.6 s → 26.3 s, peak commit +0.4 GB. `StreamTextures = false`
+  restores the load-everything-before-return behaviour; the synchronous `Import` is unchanged.
+  See Changed for what this means for existing callers.
+- **UDIM texture sets import as atlases** 
+  A `<UDIM>` texture path stands for a grid of tiles, and the importer used the first tile for
+  the whole mesh, so every face outside the first UV square sampled the wrong image (915 of
+  ALab's 2,047 sets span several tiles, up to 34). The tiles of a set are now stitched into one
+  atlas laid out as they sit in UV space, holding only the rows and columns the set has; the
+  mesh's UVs are unchanged and the material's base-map scale and offset place them on the atlas.
+  An atlas is halved until it fits the graphics device's texture limit, read when the import
+  starts. The first tile is found by listing the folder, so sets that start at 1002 or 1011 load.
+- **The textures a renderer reads: `full` bindings, EXR, and separate PBR maps** 
+  ALab imported without a single texture and without a warning. Materials are now looked up
+  through `material:binding:full`, then `preview`, then the all-purpose binding, as Hydra does,
+  for meshes and GeomSubsets alike (2 of ALab's 7,485 meshes had a material before). OpenEXR
+  images decode (scanline and tiled; NONE, RLE, ZIPS, ZIP; half, float and uint; level 0 of a
+  mipmapped file), quantised to 8 bits with an sRGB encode for colour slots. Separate metallic,
+  roughness and occlusion maps, which every DCC writes, are packed into Unity's metallic map
+  instead of the roughness map landing in the metallic slot (every surface a mirror), and an
+  opacity map that is not the albedo's alpha is folded into the albedo (Moore Lane's foliage drew
+  solid cards).
+- **Texture maps of Omniverse MDL materials** 
+  OmniPBR's metallic, roughness and ORM maps were skipped with a warning, and OmniGlass and
+  OmniSurface read no textures at all (190, 696 and 120 materials on Factory fell back to flat
+  colour). An ORM map (occlusion, roughness, metallic in red, green, blue) is repacked into
+  metallic-in-red and smoothness-in-alpha on the decoding thread and assigned to both the
+  metallic and the occlusion slot, uploaded once. OmniGlass and OmniSurface maps are read under
+  their `*_image` names.
+- **Point instancers are culled by cell and can use Mesh LOD** 
+  `UsdPointInstancer` sorts its placements into a grid of cells, each with its own bounds, so the
+  engine drops the cells that are off screen instead of drawing the whole set or none of it:
+  Moore Lane from a camera inside the stage went from 6,511 ms to 2,287 ms a frame, with
+  pixel-identical frames. **GameObject > USD > Generate Mesh LODs for Point Instancers** (Editor
+  only, since mesh decimation is an Editor API) gives the selected instancers' prototypes LOD
+  levels, and `UsdPointInstancer.LodDistance` chooses between them: 6,210 ms to 1,184 ms a frame
+  on Moore Lane (RTX A4000). It is a menu item rather than automatic because decimation thins
+  foliage visibly; check the result on each stage.
+
+- **Lights, cameras and spatial audio import (native API 7)** 
+  UsdLux lights, UsdGeomCamera and UsdMediaSpatialAudio prims arrived as empty transforms (Moore
+  Lane alone has 104 lights and 21 cameras). Distant, sphere, disk, cylinder and rect lights now
+  become Unity `Light`s (a shaped light becomes a spot), cameras become disabled `Camera`s with the
+  authored field of view and clipping range, and spatial audio becomes an `AudioSource` with a
+  `UsdSpatialAudio` record of its file (the clip is not loaded). Lights and cameras sit on a child
+  turned to Unity's +Z convention, marked `UsdImportHelperObject` and skipped by both exporters.
+  A dome light is recorded on a `UsdDomeLight`; `ApplyDomeLightToEnvironment` (off by default)
+  turns it into the scene's ambient colour and a panoramic skybox. Light intensities are mapped
+  heuristically. Options: `ImportLights`, `ImportCameras`, `ImportSpatialAudio`. Native API 7
+  adds `RUsd_GetImportLight(Count)`, `RUsd_GetImportCamera(Count)` and
+  `RUsd_GetImportAudio(Count)`; an API 6 plugin still loads and imports everything else.
+- **Identical meshes share one Unity Mesh** 
+  Instanced parts (instanceable prims, point-instancer copies) produced one Unity `Mesh` per
+  instance. Meshes with identical geometry now share one, found by a content hash and confirmed by
+  a full comparison, so memory grows with the number of distinct shapes. Materials still differ
+  per object. `UsdImportResult.UniqueMeshCount` reports the distinct count;
+  `ShareIdenticalMeshes = false` restores one Mesh per prim. Editing `MeshFilter.sharedMesh` now
+  changes every object that shares it.
+
+- **Exports that keep USD composition** 
+  `UsdExportOptions.Composition = UsdCompositionMode.Preserve` writes composition instead of
+  copies. An imported stage is written back as a layer that sublayers its source file and holds
+  only what changed in Unity: moves as `xformOp:transform` overrides, deactivated objects and
+  disabled renderers as `visibility`, deleted objects as `active = false`, added objects as new
+  prims, the import's variant selections, and `instanceable = false` on an instance before
+  anything below it is edited. Prefab instances reference one asset per prefab, with each
+  instance's differences as overrides; `Layout` keeps the assets in the file as `class` prims
+  (`SingleFile`) or writes one file each (`FolderWithAssets`). With `ShareMeshes`, objects that
+  share a mesh and materials reference one instanceable prototype. `.usdz` output packages the
+  source layer and asset files with it. The default (`Flatten`) output is byte-for-byte unchanged.
+- **Prefab links in players** 
+  `UsdPrefabMarker` carries the prefab an object came from into Play Mode and players, where
+  Unity keeps no prefab connection. Scene instances are marked automatically when a scene is
+  built or enters Play Mode (only that copy of the scene; define
+  `USD_TOOLKIT_DISABLE_PREFAB_MARKERS` to turn it off); runtime instances use
+  `UsdPrefabMarker.Instantiate` or `Attach`.
+- **Variant selection and payload control on import** 
+  `UsdImportOptions.VariantSelections` composes the stage with the variants given (in the session
+  layer; the file is not edited), and `LoadPayloads` / `PayloadsToLoad` choose which payloads
+  load. An unloaded payload's prim still arrives as an empty GameObject.
+  `UsdImportResult.Source` (`UsdStageSource`) lists the stage's variant sets, payloads and direct
+  references, payloads, inherits, specializes and relocates, and
+  `CreateOptionsWithVariant` re-imports with another variant. With `RecordSource` (on by default)
+  every imported object carries a `UsdPrimSource` with its prim path and the state it arrived in.
+- **Native API 6** 
+  Twelve additive entry points: `RUsd_BeginLayerExport`, `RUsd_DefinePrim`, `RUsd_AddReference`,
+  `RUsd_SetInstanceable`, `RUsd_SetActive`, `RUsd_SetVariantSelection`,
+  `RUsd_SetLocalTransform`, `RUsd_SetVisibility`, `RUsd_PrimExists`, `RUsd_OpenStageEx`,
+  `RUsd_GetImportNodeFlags` and `RUsd_GetImportComposition`, covered by
+  `Native~/Tests~/composition_test.cpp`. The managed side still accepts an API 5 plugin for
+  everything else and refuses only the composition features on it, with a message saying so.
+
 - **Linux x64 players** 
   `Unity.USDToolkit` and `Unity.USDToolkit.Samples` now include `LinuxStandalone64`. The Linux
   native payload, its plugin settings and the build postprocessor already handled Linux players,
@@ -18,6 +117,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`ImportAsync` returns before its textures are on** 
+  With `StreamTextures` on by default, code that exports, captures, saves a prefab or inspects
+  materials right after `await ImportAsync(...)` now sees untextured materials. Await
+  `result.TexturesReady` first, or set `StreamTextures = false`. `ProgressCallback` reports
+  "Streaming textures" at 0.9 once the objects are built and "Done" (1) only when the textures are
+  attached -- or have failed, or the import was destroyed first. A texture decode that fails no
+  longer fails the import: it is logged as a warning, with each underlying reason rather than
+  "One or more errors occurred", and the materials keep their authored values.
+- **Textures decode in parallel, in native code, and are block-compressed by default** 
+  Texture work, not USD composition, was most of an import (Moore Lane: 36 of 48 seconds, and 5.9
+  GB of RGBA32 textures). Images now decode on every core; EXR and PNG decoding, UDIM stitching,
+  metallic/roughness and albedo/opacity packing and BC1/BC3 compression with mips run in the
+  native wrapper (API 11 and 12, SSE2 on x86, large images compressed in row bands), and a
+  compressed chain is uploaded straight from native memory and freed once uploaded. Opaque images
+  take BC1 and the rest BC3; `CompressTextures = false` keeps them uncompressed for stages whose
+  textures carry data rather than appearance. The managed decoders remain the fallback for an
+  older payload or a format the native reader declines. ALab (cold, with preview) went from 80.5
+  s to 23.5 s and Moore Lane's texture memory from 5,875 MB to 1,592 MB.
+- **Reading the stage is faster, and invisible geometry is not read** 
+  The native vertex split keyed a hash map with a string per face corner; values are now hashed
+  in place in flat, pre-sized tables, with the same merge results bit for bit (Moore Lane's read
+  9.8 s → 4.4 s, ALab 4.4 s → 2.9 s). A prim that is invisible keeps its GameObject and
+  visibility, but its mesh is no longer read, as Hydra does not populate it (1,274 of Factory's
+  meshes): making such an object visible later shows nothing. `ImportAsync` reuses the stage
+  `GetPreviewInfo` opened for the same unchanged file instead of opening it again.
+- **Native API 6 is required** 
+  `UsdNative.MinimumApiVersion` is 6 again, an exact match, now that the Windows, Linux and macOS
+  payloads are all API 6. An API 5 plugin is refused instead of loading without composition.
+- **package.json states what the package needs** 
+  `unity` said 2023.1 while the documentation requires 6.4, so the Package Manager offered the
+  package to Editors it does not support; it is now `6000.4`. The built-in modules the code calls
+  are declared: `com.unity.modules.imageconversion` (texture decode and PNG export),
+  `com.unity.modules.physics` (`GenerateColliders`) and `com.unity.modules.audio` (spatial audio
+  import). URP and HDRP stay undeclared; they are only
+  looked up by shader name.
 - **The samples import from the Package Manager** 
   0.6.3 moved the samples into an always-compiled `Samples/` folder inside the package. Unity
   installs a package from a Git URL or a tarball as read-only, so it refused to open the sample
@@ -43,6 +177,148 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Export writes the texture file the import read** 
+  The exporter rendered every texture to a render target, read it back and encoded a PNG, which
+  carried block-compression artefacts and cut an EXR to 8 bits. Textures the importer uploaded
+  as decoded now remember their source file, and the exporter copies that file byte for byte,
+  keeping its format (8-bit formats only for colour slots, which are declared sRGB). Repacked
+  maps (ORM, packed metallic/roughness) still go through the readback: Factory round trip, 8 of
+  12 textures byte-identical.
+- **A UDIM texture named without a dot no longer fails the import on Windows** 
+  The texture name was taken from the atlas key with only `.<UDIM>` removed, so `tex_<UDIM>.png`
+  or `tex<UDIM>.png` left `<` and `>` in the path handed to `Path`, which throws on Windows: the
+  whole import failed, or with streaming every texture was dropped. The token is now removed
+  whatever precedes it, and the separator it leaves is trimmed (`tex_<UDIM>.png` → `tex`).
+- **Native texture memory is freed when an import does not upload it** 
+  A compressed chain built by the native side (API 12) is released when it is uploaded, and had no
+  other owner: one never uploaded stayed allocated for the life of the process. That happened
+  whenever a streamed import was destroyed before its textures arrived -- a scene change or a
+  re-import, gigabytes on ALab -- and when an import failed after decoding. Every import now frees
+  what it did not upload once it ends.
+- **EXR and PNG decode natively on Windows too** 
+  The native image codecs (API 11, 12) looked a zlib up at run time (`libz.so.1`, `libz.1.dylib`,
+  `zlib1.dll`) and handed decoding back to C# where none opened. Linux and macOS have one;
+  Windows does not, and neither does the Unity Editor or the OpenUSD install, so the Windows
+  payload quietly decoded every EXR tile and PNG in managed code at a fraction of the speed. The
+  inflate is now compiled into the wrapper from the libdeflate OpenUSD vendors for its OpenEXR
+  reader (`Native~/src/UsdDeflate.c`, MIT, part of the pinned OpenUSD tree, checked file by file
+  against recorded digests at configure time), so every platform takes the same path with the
+  same bytes and no library has to be found. Building the wrapper needs the OpenUSD source tree
+  beside the install (`<install>/openusd-src`, where `build_openusd.py` leaves it) or
+  `OPENUSD_SRC`. `Native~/Tests~/image_codec_test.cpp` decodes a PNG and a ZIP EXR and checks
+  the pixels.
+- **A point instancer's prototype keeps its root transform** 
+  Since instances are drawn from their arrays (API 8), the prototype root's own transform was
+  left out twice -- by `ComputeInstanceTransformsAtTime(ExcludeProtoXform)` and again by the
+  relative transform of each mesh below the root -- so a prototype authored at, say, y = 0.5
+  drew every instance at y = 0. `IncludeProtoXform` restores it. `prim_import_test` now checks
+  the instanced records rather than expanded prims, and `composition_test` expects the hidden
+  seat not to be read, as invisible geometry has not been since the import measurements.
+- **Imported colours are no longer darkened and oversaturated** 
+  USD shading colours are linear; Unity material colours are sRGB in a Linear colour space
+  project. The importer passed the linear value straight through, so every constant colour (base,
+  emission, displayColor and primvar colours, MaterialX and MDL constants) rendered too dark and
+  too saturated: the Teapot's (0.325, 0.825, 0) showed dark green where Isaac Sim and every other
+  USD renderer show yellow-green. Colours are now converted to sRGB on import and back to linear on
+  export. Gamma colour space projects are unchanged.
+- **Re-exporting an imported stage keeps its prim paths and units** 
+  A flattened export of an import root wrote the root GameObject as a prim, so `/Teapot` came
+  back as `/Teapot/Teapot`, and every mesh the importer created became an Xform with a
+  `<name>_Mesh` child; a round trip matched no path at all. The export now starts at the stage's
+  own root prim, writes imported meshes back at their own paths, and keeps the source stage's
+  `metersPerUnit` unless `UsdExportOptions.MetersPerUnit` is set to something else (the Elephant
+  came back 100 times too large).
+- **Preserve exports keep the source's time rate** 
+  The layer a Preserve export writes over its source did not copy the source's
+  `timeCodesPerSecond`, `framesPerSecond`, `startTimeCode` and `endTimeCode`. The stage rate is
+  the root layer's, so the new layer's default 24 made USD rescale the source's samples: the
+  Elephant's 60 fps animation played at 0.4 speed. They are now copied from the strongest
+  sublayer.
+- **MaterialX transmission** 
+  A transmissive `standard_surface` (glass; OpenChessSet's pawn tops) with base colour 1
+  imported as an opaque white surface. It now takes the transmission colour in proportion to the
+  weight and becomes partly transparent, as the OmniSurface path already did.
+- **Isaac Sim's render settings no longer arrive as a GameObject** 
+  Typeless prims holding only things that are not drawn (Isaac's `/Render` with RenderSettings,
+  RenderProduct and RenderVar, which it writes into every stage it saves) are skipped, as
+  material-only containers already were.
+
+- **Z-up and centimeter stages import upright and at their real size** 
+  The importer read a stage's `upAxis` and `metersPerUnit` but never applied them, so Isaac Sim
+  and other Z-up stages came in lying on their side and a `metersPerUnit = 0.01` stage came in
+  100 times too large. The import root now carries the correction: a -90 degree rotation about X
+  for a Z-up stage (USD +Z becomes Unity +Y, USD +Y becomes Unity -Z) and a uniform scale of
+  `metersPerUnit`. Vertices and prim transforms are unchanged, so a Preserve export writes no
+  override for it and no longer warns about the corrected root. `UsdImportResult` and
+  `UsdStageSource` report the correction as `StageCorrectionRotation` and
+  `StageCorrectionScale`. Set `UsdImportOptions.ApplyStageUpAxisAndUnits = false` to get the
+  stage's raw coordinates under an identity root, as before.
+- **Meshes without a material are grey, not magenta** 
+  A mesh or submesh with no material binding was left without a material and rendered magenta
+  under URP and HDRP, which looks the same as a shader that failed. It now gets a shared neutral
+  grey lit material, `UsdDefaultMaterial` (base colour 0.7, smoothness 0.5, one per import, in
+  `UsdImportResult.DefaultMaterial`), using the same URP, HDRP or Built-in shader as imported
+  materials. Magenta now only means a real failure. `UsdImportOptions.AssignDefaultMaterial =
+  false` turns it off.
+- **PointInstancer instances are drawn, and their prototypes no longer show in place** 
+  A `UsdGeomPointInstancer` imported as an empty transform with its prototype prims drawn once
+  where they were defined: OpenChessSet lost its 16 pawns, Moore Lane its forest, and AGV Fleet
+  showed 635 prototype meshes on top of their instances. Each prototype is now imported once,
+  hidden, and the instancer becomes one GameObject with a `UsdPointInstancer` that draws every
+  placement from the instance arrays with `Graphics.RenderMeshInstanced` (native API 8; USD's
+  `ComputeInstanceTransformsAtTime` does the placement, honouring `invisibleIds`). Moore Lane's
+  229,717 instances are 738 mesh records instead of 297,518. Instances are not GameObjects, so
+  they cannot be picked or given colliders one by one.
+- **Cube, Sphere, Cylinder, Cone, Capsule and Plane import as meshes** 
+  These implicit surfaces arrived as empty GameObjects (Isaac collision shapes and simple props
+  among them). They are now tessellated from their schema parameters (`size`, `radius`, `height`,
+  `width`, `length`, `axis`) with normals and UVs, and take their material binding like a mesh.
+- **proxy and guide geometry is skipped** 
+  Prims whose computed `purpose` is `proxy` or `guide` were imported next to the render geometry;
+  ALab, which carries a proxy of most assets, imported 24.6% of its triangles twice. Only
+  `default` and `render` geometry is imported now, and purpose inherits down the hierarchy.
+- **Textures from material layers in other folders are found** 
+  A relative texture path is relative to the layer that authored it. Vehicle Variants keeps its
+  materials in `materials/` pointing at `@../textures/...@`; that was handed to the importer as
+  is, resolved against the stage folder, judged to point outside it and refused, so every
+  material imported white. The path is now given relative to the stage folder whenever USD
+  resolved it to a file inside that folder. Paths that really leave the folder are still refused.
+- **faceVarying primvars no longer split every corner** 
+  A non-indexed `faceVarying` UV or normal gave every face corner its own value index, so every
+  corner became its own vertex even where neighbouring corners carried the same value: 3.1 to 3.4
+  times the vertices on large scenes, with the same triangles. Corners are now merged by value,
+  and only real seams split.
+- **Subdivision surfaces are reported** 
+  A mesh with an authored `subdivisionScheme` other than `none` is still imported as its control
+  cage, and the import now says so once per mesh. An unauthored scheme does not warn.
+- **MaterialX materials import** 
+  A material whose surface comes from a `.mtlx` file (the `mtlx` render context, as in
+  OpenChessSet) imported as "no surface shader source" and fell back to the default material.
+  `standard_surface`, `open_pbr_surface` and MaterialX `UsdPreviewSurface` now import: base colour
+  and weight, metalness, roughness, opacity, emission, and base colour, normal (through a
+  `normalmap` node) and emission textures from node graphs. Inputs the file leaves unset take the
+  MaterialX node definition's default. Separate metalness/roughness images are not put into
+  Unity's packed metallic map; the import says so. Needs a payload built with MaterialX.
+- **Colours read from a primvar** 
+  `UsdPreviewSurface.diffuseColor` fed by `UsdPrimvarReader_float3`/`_float4` (the Teapot sample
+  reads `displayColor` this way) imported white. Each mesh now gets the primvar's colour, meshes
+  with the same colour share one material, and a mesh without the primvar gets the reader's
+  `fallback`.
+- **Faceted shading on meshes without normals** 
+  A mesh with no authored normals whose vertices are split by a per-corner attribute, typically
+  `faceVarying` UVs, was flat-shaded: after the split no two faces share a vertex, so
+  `RecalculateNormals` could not average across them. Such meshes now arrive with smooth,
+  area-weighted normals computed before the split, as USD renderers draw them. Subdivision
+  surfaces are still imported as their control cage.
+- **Typeless and custom-schema prims are kept** 
+  Prims with no type (`def "rig"`, used by ALab to hold referenced light rigs) and prims of a
+  schema the toolkit does not know were dropped from the hierarchy. They now import as empty
+  GameObjects. Containers that hold only materials stay out.
+- **Rebuilding the payload keeps its `.meta` files** 
+  `build_windows.ps1` and `build_macos.sh` deleted the committed Unity `.meta` files with the old
+  OpenUSD runtime files, so every rebuild showed them as deleted and a fresh import would assign
+  new GUIDs. They are now kept, and only a `.meta` whose file is gone is removed, as
+  `build_linux.sh` already did.
 - **The Editor no longer looks for another platform's native files** 
   The Editor defines the scripting symbols of the active build target alongside its own, so after
   switching the build target to Linux (or macOS) on a Windows Editor the toolkit searched for `.so`
@@ -52,6 +328,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the Editor.
 
 ### Security
+
+Review of native API 7-12 against the package's security rules (2026-10-11). Each item below was
+reproduced with a small input before the fix and refused after it; the macOS payload is the first
+built with all of them.
+
+- **Point instancers can no longer import without end** A prototype that contains its own
+  instancer -- the instancer's ancestor, or another instancer whose prototype leads back -- was
+  imported again on every visit, bounded only by depth 64: 600 bytes of usda grew past 11 GB.
+  Such a prototype is now skipped with a warning. The import also counts what it produces and
+  fails, naming the limit, past 2,000,000 nodes, 1,000,000 meshes, 4,000,000 point-instancer
+  placements (instances times prototype meshes) or 268,435,456 points and triangle indices; a 1 MB
+  stage that asked for 691 MB of instance matrices now stops at the limit.
+- **A mesh cannot triangulate past what an int counts** One face of 1.4 billion corners is a small
+  usdc and over 4 billion triangle indices, which the copy-out entry points reported narrowed to
+  int and then copied in full into a managed array of that narrowed size. Meshes over the
+  geometry limit are skipped before any per-corner table is built, and every copy-out capacity is
+  compared in `size_t`.
+- **OpenEXR and PNG headers no longer decide allocations on their own** EXR scratch buffers were
+  sized from the declared tile size and channel count: a 210-byte file with a 1x1 image and
+  16384x16384 tiles held 3.2 GB, a 21 KB file with 1000 channels 2.1 GB, once per decoding core.
+  Tiles are now clamped to the image, more than 64 channels is refused, and an image or chunk that
+  claims more pixels than its bytes can expand to (deflate 1032:1, RLE 64:1) is refused before
+  anything is allocated for it -- likewise a PNG whose IDAT cannot inflate to its IHDR size (a
+  68-byte file held 270 MB). Native and managed decoders alike. dataWindow extents are computed
+  in 64 bit.
+- **A failed allocation in native image code no longer ends the process** The image entry points
+  and their worker threads had no exception barrier, so `std::bad_alloc`, or a thread that could
+  not start, terminated the Editor or player. Each entry point now returns its failure with a
+  reason, a tile that fails is left out of its atlas, and a worker that cannot start runs inline.
+  A managed OpenEXR decode that throws costs that texture, not the import.
+- **Every UDIM tile is confined to the stage folder** Only the tile-1001 name was checked; every
+  other tile found in the folder was read as listed, so a `tex.1002.png` symlink to a file outside
+  the stage was stitched into the atlas. Each tile is now checked, symlinks included; the native
+  reader opens regular files only (a FIFO blocked it); and nothing outside the stage folder is
+  probed for a first tile (`\\host\share` paths reached SMB on Windows before being refused).
+- **UDIM atlases stay within the texture limits** A thin tile stopped the halving loop on its
+  short side, so three 273-byte PNGs built a 70x1,638,400 atlas. Each side is now halved on its
+  own and a grid that still does not fit is refused. The native atlas also refuses tile numbers
+  outside 1001-1999 or repeated, which wrapped its grid arithmetic into a heap overflow, and the
+  managed fallback takes large sets on a quarter of the cores.
+- **The dome-light skybox goes through the image limits** It was the one texture still read
+  straight into `Texture2D.LoadImage`.
+- **`UsdSpatialAudio.FilePath` is confined like a texture** A rooted path, a `../` climb or a URL
+  authored in the stage was stored as written for the application to load; it is now left empty
+  unless it resolves inside the stage folder.
+- **Payload integrity covers MaterialX** The Linux dependency-digest rules now include
+  `libMaterialX*.so*`, the SBOM lists the Windows and macOS MaterialX libraries, and the MaterialX
+  standard library (`.mtlx`, parsed at run time) is in the runtime hash manifest and pinned against
+  line-ending conversion. `build_macos.sh` copies MaterialX under the names `libusd_ms` links
+  (`libMaterialXCore.1.dylib`) and fails on an install built without it; the generic copy shipped
+  only the versioned file, which dyld could not find.
+- **Every binary we build is signed, and pack checks each one** `sign_windows` named only
+  `UnityUSDToolkitNative.dll` and `usd_rt.dll`, so the MaterialX DLLs -- built here from the pinned
+  archive like OpenUSD -- would have shipped unsigned, and `pack` would not have noticed: it passed
+  when any file in the payload had changed. It now signs all four, and `pack` requires each listed
+  file to differ from its committed copy and every `.dylib`/`.dll` in the payload to be on the list,
+  Intel's TBB excepted. `build_windows.ps1` no longer re-signs Intel's `tbb_usdrt.dll` either.
+- **The SBOM and notices cover what ships** The SBOM reads the native API version from the source
+  (it said 5), lists MaterialX's source archive with its digest, the pugixml 1.9 it vendors and the
+  standard-library data under `usdMtlx/resources`, links libdeflate to the wrappers that compile it
+  rather than to OpenUSD, and gives Linux oneTBB as 2020.3.1. `ThirdPartyNotices.md` gains MaterialX,
+  pugixml and libdeflate, attributes the usdMtlx data to MaterialX (with its NVIDIA and Sony
+  Pictures Imageworks files) instead of Pixar, and no longer says no NVIDIA material ships.
+- **A source-scan record has to name the archive it covers** MaterialX pins an archive digest, not a
+  commit, so a record reading "Commit scanned: -" passed without saying what had been scanned. A
+  record for an archive-pinned component must now carry that archive's SHA-256; the MaterialX rows
+  note the commit the v1.39.4 tag resolves to.
+- **macOS payload at API 12** Rebuilt against OpenUSD 26.05 with the LZ4 patch and MaterialX
+  1.39.4 (`/Users/Shared/usd-26.05-mtlx`, universal, macOS 12.0), with every fix above; all eight
+  Gate 6 tests pass.
+- **Windows and Linux payloads at API 12** Rebuilt from the same source with every fix above
+  (Linux x64 at 9c0eb7c, Windows x64 at 959418a): all eight Gate 6 tests pass on each, and the
+  Linux dependency digests now record the seven MaterialX libraries the new rule covers.
 
 - **The source-scan gate reads the record, and a release cannot skip it** 
  `verify_upstream_sources.py --require-scan` used to pass on any file with the right
@@ -63,8 +412,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `.unscanned-build` in a payload built from such an install. The pack job requires a passing
   record for every platform and runs `generate_native_hashes.py --release`, which refuses a marked
   payload. The three committed payloads carry the marker, since no scan has been recorded for
-  them yet. `Native~/security-scans/known-vulnerabilities-2026-10-01.md` records a check of the
-  pins against OSV and NVD: no published vulnerability applies.
+  them yet. A check of the pins against OSV and NVD on 2026-10-01 found no published
+  vulnerability that applies; its write-up was later taken out of the repository with the other
+  release-process security notes, so it is not a file here.
 - **The import browser sample loads thumbnails within the importer's image limits**
   `RuntimeImportBrowser` handed each companion image to
   `Texture2D.LoadImage` unchecked, so a PNG whose header claimed 30000×30000 made it allocate

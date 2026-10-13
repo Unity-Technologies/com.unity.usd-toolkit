@@ -70,7 +70,7 @@ To install from a local clone or a tarball from the [Releases](https://github.co
 4. In the Inspector, set **Usd Path** to the absolute path of a `.usd`, `.usda`, `.usdc` or `.usdz` file.
 5. Enter Play mode.
 
-The stage appears as children of the GameObject, and the Console prints a summary.
+The stage appears as children of the GameObject, and the Console prints a summary. Geometry appears first and textures attach as they finish decoding; set `StreamTextures = false` to have `ImportAsync` return only when everything is loaded.
 
 ```csharp
 using Unity.USDToolkit;
@@ -92,6 +92,8 @@ public class OpenUsdStage : MonoBehaviour
             ImportTextures = true
         });
 
+        // ImportAsync returns once the objects are built; textures keep streaming in.
+        await result.TexturesReady;
         Debug.Log(result.ToString());
     }
 }
@@ -142,19 +144,13 @@ To try it, see the [Live Sync Example guide](Samples~/Runtime%20Examples/Live%20
 2. Call `UsdImporter.GetPreviewInfo` to check the mesh count, up axis and units.
 3. Call `UsdImporter.ImportAsync` from the main thread.
 
-The importer reports the stage's up axis and `metersPerUnit` but doesn't apply them. Isaac Sim stages are Z-up by default, so they appear rotated in Unity's Y-up world. To correct this, import under a parent GameObject and rotate and scale that parent:
+The importer applies the stage's up axis and `metersPerUnit` to the import root, so an Isaac Sim stage, which is Z-up by default, arrives Y-up and in meters. The correction sits only on the root's local rotation and scale. Vertices and every prim's local transform stay as authored, so a `Preserve` export writes no override for it. `UsdImportResult.StageCorrectionRotation` and `StageCorrectionScale` report what was applied. To get the stage's raw coordinates under an identity root instead, turn the correction off:
 
 ```csharp
-var stageRoot = new GameObject("UsdStageRoot").transform;
-
-UsdImportResult result = await UsdImporter.ImportAsync(path, new UsdImportOptions { Parent = stageRoot });
-
-if (result.UpAxis == "Z")
+UsdImportResult result = await UsdImporter.ImportAsync(path, new UsdImportOptions
 {
-    stageRoot.localRotation = Quaternion.Euler(-90f, 0f, 0f); // Stage +Z becomes Unity +Y.
-}
-
-stageRoot.localScale = Vector3.one * (float)result.MetersPerUnit; // Stage units to meters.
+    ApplyStageUpAxisAndUnits = false // Keep the stage's own up axis and units.
+});
 ```
 
 ### Export a Unity scene for Isaac Sim
@@ -163,18 +159,30 @@ stageRoot.localScale = Vector3.one * (float)result.MetersPerUnit; // Stage units
 2. Call `UsdExporter.ExportGameObjectWithResult`. Set `TransformPolicy = UsdTransformPolicy.PreserveHierarchy` to keep the transform hierarchy, and `ExportTextures = true` to write PNG textures.
 3. Open the result in Isaac Sim, or check it with `usdchecker`.
 
+### Keep USD composition (round trip, prefabs, instancing)
+
+Set `Composition = UsdCompositionMode.Preserve` to write composition instead of copies:
+
+- **Import, edit, export back.** An imported stage is written as a layer that sublayers the source file and holds only what changed in Unity (moves, visibility, deletions, additions, variant selections). Every reference, payload, variant set, inherit and specialize in the source survives.
+- **Prefabs.** Each prefab is written once, in the file or as its own file (`Layout = UsdExportLayout.FolderWithAssets`), and its instances reference it, with their differences as overrides. This works in players too: scene instances are marked automatically, and runtime instances made with `UsdPrefabMarker.Instantiate`.
+- **Repeated meshes.** With `ShareMeshes = true`, objects sharing a mesh and materials become instances of one prototype.
+
+On import, `UsdImportOptions.VariantSelections` picks variants and `LoadPayloads` / `PayloadsToLoad` choose which payloads load; `UsdImportResult.Source` lists the stage's variant sets, payloads and arcs. These need native API 6. See the manual's *Keep USD composition* section.
+
 ## Features
 
 | | Export (`UsdExporter`) | Import (`UsdImporter`) |
 | --- | --- | --- |
 | **Formats** | `.usd`, `.usda`, `.usdc`, `.usdz` (with an optional ARKit-compatible mode) | `.usd`, `.usda`, `.usdc`, `.usdz` |
-| **Geometry** | Static meshes, including meshes without **Read/Write Enabled** | Static `UsdGeomMesh`, with optional `MeshCollider` |
-| **Transforms** | Baked into mesh points, or kept as an `Xform` hierarchy | Every transformable prim becomes a GameObject |
-| **Materials** | `UsdPreviewSurface`: base color, opacity, metallic, roughness, emission; one binding per submesh | `UsdPreviewSurface` values become URP, HDRP or Built-in materials |
-| **Textures** | Albedo, normal, metallic-smoothness and emission as PNG, with UV tiling and offset | The same set, including textures inside `.usdz` packages |
-| **Performance** | | Asynchronous import, spread across frames; statistics preview before import |
+| **Geometry** | Static meshes, including meshes without **Read/Write Enabled** | Static `UsdGeomMesh`, implicit surfaces (`Cube`, `Sphere`, `Cylinder`, `Cone`, `Capsule`, `Plane`) as meshes, and `PointInstancer` instances drawn from their arrays (culled by cell, with optional Mesh LOD for prototypes), with optional `MeshCollider`. Smooth normals are generated when none are authored. Subdivision surfaces arrive as their control cage, with a warning |
+| **Transforms** | Baked into mesh points, or kept as an `Xform` hierarchy | Every transformable prim becomes a GameObject, including typeless and custom-schema prims; `proxy` and `guide` purpose prims are skipped. The stage's up axis and units are applied on the import root |
+| **Materials** | `UsdPreviewSurface`: base color, opacity, metallic, roughness, emission; one binding per submesh | `UsdPreviewSurface`, MaterialX (`standard_surface`, `open_pbr_surface`, `UsdPreviewSurface`, including `.mtlx` files) and MDL `OmniPBR`, `OmniSurface` and `OmniGlass` colors and textures become URP, HDRP or Built-in materials. A `UsdPrimvarReader` color such as `displayColor` on `diffuseColor` is read. Unbound meshes get a grey `UsdDefaultMaterial` |
+| **Textures** | Albedo, normal, metallic-smoothness and emission as PNG, with UV tiling and offset | The same set from PNG, JPEG and OpenEXR, including UDIM sets (stitched into an atlas), separate metallic, roughness and occlusion maps and OmniPBR ORM maps (packed for Unity), `material:binding:full` and `preview` bindings, textures inside `.usdz` packages and textures referenced from material layers in sub-folders. Block-compressed (BC1/BC3) by default |
+| **Lights, cameras, audio** | | UsdLux distant, sphere, disk, cylinder and rect lights become Unity `Light`s, `UsdGeomCamera` becomes a disabled `Camera`, and `UsdMediaSpatialAudio` becomes an `AudioSource` (clip not loaded). A dome light is recorded on `UsdDomeLight` and can set the ambient color and skybox. Needs native API 7 |
+| **Composition** | Sublayers, references, prefab assets, instancing and sparse overrides (`UsdCompositionMode.Preserve`) | Fully composed; variant selection and payload loading control |
+| **Performance** | | Asynchronous import, spread across frames, with textures streamed in after the geometry (`TexturesReady`); textures decoded and compressed in parallel in native code; statistics preview before import, whose stage the import reuses; instances with identical geometry share one `Mesh` |
 
-**Not supported yet:** skinned meshes, animation, variant sets, payload streaming, materials other than `UsdPreviewSurface` (including MaterialX), physics schemas, and automatic up-axis and unit conversion on import.
+**Not supported yet:** skinned meshes, animation, subdivision (surfaces are imported as their control cage), MDL materials other than `OmniPBR`, `OmniSurface` and `OmniGlass`, and physics schemas.
 
 ## Architecture
 
@@ -229,9 +237,10 @@ The package does not depend on `com.unity.formats.usd`, `com.unity.importer.usd`
 | --- | --- | --- |
 | `DllNotFoundException` | The native libraries are missing or are still Git LFS pointer files. | Run `git lfs pull`. |
 | The surface renders black in Isaac Sim | The albedo texture is also assigned to the metallic slot. | Keep `IgnoreAlbedoInMetallicSlot` enabled (the default), or assign a separate metallic map. |
+| Materials are flat right after `ImportAsync` | Textures stream in after the objects are built. | `await result.TexturesReady` before exporting, capturing or inspecting materials, or set `StreamTextures = false`. |
 | Textures are missing after import | A texture path points outside the stage folder. | Move the textures next to the stage. For files you trust, set `AllowExternalAssetPaths = true`. |
 | Exporting a mesh fails in batch mode | Meshes without **Read/Write Enabled** need a graphics device. | Enable **Read/Write Enabled** on the meshes. |
-| The package works in the Editor but not in a player | The player targets an unsupported platform. | Build for Windows x64 or macOS. |
+| The package works in the Editor but not in a player | The player targets an unsupported platform. | Build for Windows x64, macOS or Linux x64. |
 
 For more, see [Troubleshooting](Documentation~/Unity%20USD%20Toolkit%20User%20Manual%20EN.md#12-troubleshooting) in the User Manual.
 

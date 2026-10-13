@@ -200,4 +200,57 @@ namespace Unity.USDToolkit.Native
         public string Name { get; }
         public RUsdMaterial Material { get; }
     }
+
+    // Point instancers (API v8). One record per prototype mesh; the matrices come separately
+    // because there is one per instance and Moore Lane has 297,518 of them.
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct RUsdImportInstancedMesh
+    {
+        public int InstancerNodeIndex;
+        public int MeshIndex;
+        public int InstanceCount;
+    }
+
+    // Scene components (API v7); layouts mirror unity_usd_toolkit_native.h.
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct RUsdImportLight
+    {
+        public int NodeIndex;
+        public int Type;
+        public float ColorR;
+        public float ColorG;
+        public float ColorB;
+        public float Intensity;
+        public float Radius;
+        public float Width;
+        public float Height;
+        public float Length;
+        public float Angle;
+        public float ConeAngle;
+        public float ConeSoftness;
+        public int Normalize;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct RUsdImportCamera
+    {
+        public int NodeIndex;
+        public int Projection;
+        public float FocalLength;
+        public float HorizontalAperture;
+        public float VerticalAperture;
+        public float NearClip;
+        public float FarClip;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct RUsdImportAudio
+    {
+        public int NodeIndex;
+        public int AuralMode;
+        public int Loop;
+        public float Gain;
+        public double StartTime;
+        public double EndTime;
+    }
 }

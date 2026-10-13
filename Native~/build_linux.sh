@@ -24,6 +24,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PACKAGE_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 OPENUSD_ROOT=""
+OPENUSD_SRC=""
 CMAKE_BIN="cmake"
 RECORD_DEPENDENCY_DIGESTS=0
 SKIP_SOURCE_PROVENANCE=0
@@ -37,6 +38,10 @@ Usage:
 
 Options:
   --openusd-root <path>      OpenUSD install root built by Native~/build_openusd.py.
+  --openusd-src <path>       The OpenUSD source tree that install was built from; the image
+                             codecs compile their inflater from the libdeflate it vendors.
+                             Defaults to <openusd-root>/openusd-src, where build_openusd.py
+                             leaves it.
   --cmake <path>             CMake executable. Defaults to cmake.
   --record-dependency-digests
                              Accept the current OpenUSD/TBB tree and rewrite
@@ -56,6 +61,10 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --openusd-root)
             OPENUSD_ROOT="$2"
+            shift 2
+            ;;
+        --openusd-src)
+            OPENUSD_SRC="$2"
             shift 2
             ;;
         --cmake)
@@ -172,6 +181,7 @@ mkdir -p "${DST}"
 "${CMAKE_BIN}" -S "${SCRIPT_DIR}" -B "${BUILD_DIR}" \
     -DCMAKE_BUILD_TYPE=Release \
     -DOPENUSD_ROOT="${OPENUSD_ROOT}" \
+    ${OPENUSD_SRC:+-DOPENUSD_SRC="$(cd "${OPENUSD_SRC}" && pwd)"} \
     -DCMAKE_INSTALL_PREFIX="${DST}" \
     -DUSD_TOOLKIT_SKIP_SOURCE_PROVENANCE="${SKIP_PROVENANCE_VALUE}"
 "${CMAKE_BIN}" --build "${BUILD_DIR}" --parallel
@@ -190,19 +200,38 @@ mkdir -p "${LIBDST}/usd" "${DST}/plugin/usd"
 
 cp -L "${OPENUSD_ROOT}/lib/libusd_ms.so" "${LIBDST}/libusd_ms.so"
 cp -L "${OPENUSD_ROOT}/lib/libtbb.so.2" "${LIBDST}/libtbb.so.2"
+# MaterialX is a link-time dependency of libusd_ms, not an optional plugin: with --materialx the
+# monolithic library absorbs usdMtlx, so `readelf -d libusd_ms.so` lists libMaterialXCore.so.1 and
+# libMaterialXFormat.so.1 as NEEDED. Leaving them out does not degrade to "MaterialX is missing" --
+# libusd_ms fails to load and the whole toolkit is dead. They sit directly in lib/, which the
+# lib/usd/ copy below does not reach, so they are named here. rpath is $ORIGIN, so lib/ is enough.
+for mtlx in libMaterialXCore libMaterialXFormat; do
+    soname=$(readelf -d "${OPENUSD_ROOT}/lib/libusd_ms.so" | sed -n "s/.*\[\(${mtlx}\.so[^]]*\)\].*/\1/p")
+    if [[ -z "${soname}" ]]; then
+        echo "libusd_ms.so does not link ${mtlx}; was it built with --materialx?" >&2
+        exit 1
+    fi
+    cp -L "${OPENUSD_ROOT}/lib/${soname}" "${LIBDST}/${soname}"
+done
 cp -R "${OPENUSD_ROOT}/lib/usd/." "${LIBDST}/usd/"
 if [[ -d "${OPENUSD_ROOT}/plugin/usd" ]]; then
     cp -R "${OPENUSD_ROOT}/plugin/usd/." "${DST}/plugin/usd/"
 fi
 rm -rf "${LIBDST}/usd/usd/resources/codegenTemplates" "${LIBDST}/usd/usd/resources/codegenTemplates.meta"
 
+# Collected above so the strip and verification lists below cover MaterialX too.
+MTLX_SHIPPED=()
+while IFS= read -r -d '' f; do MTLX_SHIPPED+=("${f}"); done \
+    < <(find "${LIBDST}" -maxdepth 1 -name 'libMaterialX*.so*' ! -name '*.meta' -type f -print0)
+
 patchelf --set-rpath '$ORIGIN:$ORIGIN/lib' "${DST}/libUnityUSDToolkitNative.so"
 patchelf --set-rpath '$ORIGIN' "${LIBDST}/libusd_ms.so"
-strip --strip-unneeded "${DST}/libUnityUSDToolkitNative.so" "${LIBDST}/libusd_ms.so" "${LIBDST}/libtbb.so.2"
+for f in "${MTLX_SHIPPED[@]}"; do patchelf --set-rpath '$ORIGIN' "${f}"; done
+strip --strip-unneeded "${DST}/libUnityUSDToolkitNative.so" "${LIBDST}/libusd_ms.so" "${LIBDST}/libtbb.so.2" "${MTLX_SHIPPED[@]}"
 
 # --- Check the result ----------------------------------------------------------------------
 echo "[3/3] Checking the payload ..."
-SHIPPED=("${DST}/libUnityUSDToolkitNative.so" "${LIBDST}/libusd_ms.so" "${LIBDST}/libtbb.so.2")
+SHIPPED=("${DST}/libUnityUSDToolkitNative.so" "${LIBDST}/libusd_ms.so" "${LIBDST}/libtbb.so.2" "${MTLX_SHIPPED[@]}")
 
 # grep without -q throughout: -q exits on the first match, the producer dies of SIGPIPE, and under
 # pipefail the whole condition then reads as false -- the check would pass exactly when it matched.

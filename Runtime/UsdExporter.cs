@@ -11,7 +11,7 @@ using UnityEngine.Rendering;
 
 namespace Unity.USDToolkit
 {
-    public static class UsdExporter
+    public static partial class UsdExporter
     {
         /// <summary>
         /// Allows <see cref="UsdExportOptions.PluginSearchPath"/> to point outside the package's
@@ -126,6 +126,28 @@ namespace Unity.USDToolkit
                 Directory.CreateDirectory(directory);
             }
 
+            // Exporting what UsdImporter built: the import root is a wrapper the importer made, not
+            // a prim, so writing it as one turned /Teapot into /Teapot/Teapot and moved every path.
+            // With no explicit RootPrimName, a flattened export of an import root starts at the
+            // stage's own root prim (its single child) and keeps the stage's units unless the
+            // caller asked for others.
+            float metersPerUnit = options.MetersPerUnit;
+            Transform exportedRootPrim = null;
+            UsdStageSource stageSource = root.GetComponent<UsdStageSource>();
+            if (stageSource != null && options.Composition != UsdCompositionMode.Preserve)
+            {
+                if (string.IsNullOrWhiteSpace(options.RootPrimName) && root.transform.childCount == 1)
+                {
+                    exportedRootPrim = root.transform.GetChild(0);
+                    root = exportedRootPrim.gameObject;
+                }
+
+                if (Mathf.Approximately(options.MetersPerUnit, 1f) && stageSource.MetersPerUnit > 0.0)
+                {
+                    metersPerUnit = (float)stageSource.MetersPerUnit;
+                }
+            }
+
             string rootPrimName = SanitizePrimName(string.IsNullOrWhiteSpace(options.RootPrimName)
                 ? root.name
                 : options.RootPrimName);
@@ -158,14 +180,33 @@ namespace Unity.USDToolkit
                         Path.GetFileNameWithoutExtension(fullOutputPath) + ".usdc");
                 }
 
-                context = UsdNative.BeginExport(
-                    stagePath,
-                    rootPrimName,
-                    options.MetersPerUnit,
-                    options.CaptureNativeDiagnostics);
                 var textureContext = new TextureExportContext(stagePath, options.ExportTextures, options.IgnoreAlbedoInMetallicSlot);
-                ExportMeshes(root, rootPrimName, context, options, result, textureContext);
-                UsdNative.EndExport(context);
+                if (options.Composition == UsdCompositionMode.Preserve)
+                {
+                    // The composed path opens its own layers (the scene plus one per asset file)
+                    // and hands back the scene layer's context, already saved, for the
+                    // diagnostics and packaging below.
+                    ExportComposed(root, rootPrimName, stagePath, packageAsUsdz, options, result, textureContext, ref context);
+                }
+                else
+                {
+                    context = UsdNative.BeginExport(
+                        stagePath,
+                        rootPrimName,
+                        metersPerUnit,
+                        options.CaptureNativeDiagnostics);
+                    if (exportedRootPrim != null)
+                    {
+                        // The stage's root prim keeps its own transform; below it, every prim is
+                        // written relative to it as usual.
+                        UsdNative.AddXform(context, "/" + rootPrimName,
+                            ToUsdMatrix(GetLocalMatrix(exportedRootPrim)), exportedRootPrim.gameObject.activeInHierarchy);
+                    }
+
+                    ExportMeshes(root, rootPrimName, context, options, result, textureContext);
+                    UsdNative.EndExport(context);
+                }
+
                 if (packageAsUsdz)
                 {
                     UsdNative.CreateUsdzPackage(
@@ -315,28 +356,10 @@ namespace Unity.USDToolkit
                     continue;
                 }
 
-                // A mesh with readable=false blocks CPU access (mesh.vertices and friends) in
-                // Play mode. Read the GPU vertex/index buffers back into a temporary readable
-                // copy, use that, and discard it after the export.
-                Mesh workMesh = mesh;
-                bool tempMesh = false;
-                if (!mesh.isReadable)
+                Mesh workMesh = AcquireReadableMesh(filter, mesh, options, out bool tempMesh);
+                if (workMesh == null)
                 {
-                    if (options.RequireReadableMeshes)
-                    {
-                        throw new UsdExportException(
-                            "Mesh is not readable. Enable Read/Write Enabled on the source asset before building. " +
-                            DescribeMeshSource(filter, mesh));
-                    }
-
-                    workMesh = TryCreateReadableCopyFromGpu(mesh);
-                    if (workMesh == null)
-                    {
-                        // The GPU buffers are unreachable (no vertex/index data) -> skip.
-                        continue;
-                    }
-
-                    tempMesh = true;
+                    continue;
                 }
 
                 try
@@ -348,7 +371,8 @@ namespace Unity.USDToolkit
                         ? MakePreservedMeshPrimPath(root.transform, filter.transform, rootPrimName, xformPaths, usedPaths)
                         : MakeBakedMeshPrimPath(root.transform, filter.transform, rootPrimName, usedPaths);
 
-                    BuildMeshPayload(root.transform, filter.transform, workMesh, options, out RUsdVec3[] points,
+                    BuildMeshPayload(root.transform, filter.transform, workMesh, options,
+                        options.TransformPolicy == UsdTransformPolicy.PreserveHierarchy, out RUsdVec3[] points,
                         out int[] indices, out RUsdSubmesh[] submeshes, out RUsdVec3[] normals, out RUsdVec2[] uv0);
 
                     UsdNative.AddMesh(
@@ -379,6 +403,30 @@ namespace Unity.USDToolkit
                     }
                 }
             }
+        }
+
+        // A mesh with readable=false blocks CPU access (mesh.vertices and friends) in Play mode.
+        // Reads the GPU vertex/index buffers back into a temporary readable copy instead, which
+        // the caller destroys after use (`temporary`). Returns null when the mesh is skipped.
+        private static Mesh AcquireReadableMesh(MeshFilter filter, Mesh mesh, UsdExportOptions options, out bool temporary)
+        {
+            temporary = false;
+            if (mesh.isReadable)
+            {
+                return mesh;
+            }
+
+            if (options.RequireReadableMeshes)
+            {
+                throw new UsdExportException(
+                    "Mesh is not readable. Enable Read/Write Enabled on the source asset before building. " +
+                    DescribeMeshSource(filter, mesh));
+            }
+
+            // The GPU buffers are unreachable (no vertex/index data) -> null, and the mesh is skipped.
+            Mesh copy = TryCreateReadableCopyFromGpu(mesh);
+            temporary = copy != null;
+            return copy;
         }
 
         // Builds a readable Mesh copy by reading the GPU vertex/index buffers back.
@@ -572,8 +620,9 @@ namespace Unity.USDToolkit
             Transform[] transforms = root.GetComponentsInChildren<Transform>(options.IncludeInactive);
             foreach (Transform transform in transforms)
             {
-                if (transform == root.transform)
+                if (transform == root.transform || transform.GetComponentInParent<UsdImportHelperObject>(true) != null)
                 {
+                    // The importer's light/camera helpers are not prims (UsdImportHelperObject).
                     continue;
                 }
 
@@ -594,13 +643,13 @@ namespace Unity.USDToolkit
             Transform meshTransform,
             Mesh mesh,
             UsdExportOptions options,
+            bool preserveHierarchy,
             out RUsdVec3[] points,
             out int[] indices,
             out RUsdSubmesh[] submeshes,
             out RUsdVec3[] normals,
             out RUsdVec2[] uv0)
         {
-            bool preserveHierarchy = options.TransformPolicy == UsdTransformPolicy.PreserveHierarchy;
             Matrix4x4 geometryMatrix = preserveHierarchy
                 ? Matrix4x4.identity
                 : root.worldToLocalMatrix * meshTransform.localToWorldMatrix;
@@ -868,6 +917,15 @@ namespace Unity.USDToolkit
                 }
             }
 
+            // Back to USD's linear colours; the inverse of UsdImporter.UsdColorToMaterialColor.
+            if (QualitySettings.activeColorSpace == ColorSpace.Linear)
+            {
+                float alpha = color.a;
+                color = color.linear;
+                color.a = alpha;
+                emissive = emissive.linear;
+            }
+
             return new RUsdMaterial
             {
                 R = color.r,
@@ -903,7 +961,14 @@ namespace Unity.USDToolkit
             private readonly bool enabled;
             private readonly string directoryAbsolute;
             private readonly string directoryRelative;
+            private readonly string outputDirectory;
+            // Texture -> file name in directoryAbsolute ("" when it could not be written).
             private readonly Dictionary<Texture, string> cache = new Dictionary<Texture, string>();
+
+            // The directory of the layer being written. Texture paths are made relative to it, so
+            // a layer in a subfolder (a Preserve export's asset files) still finds the one shared
+            // texture folder. Defaults to the USD output's own directory.
+            public string LayerDirectory { get; set; }
 
             // Whether to auto-correct the misassignment of the albedo texture into the
             // metallic slot.
@@ -916,6 +981,20 @@ namespace Unity.USDToolkit
                 string dir = Path.GetDirectoryName(usdOutputPath) ?? string.Empty;
                 directoryRelative = Path.GetFileNameWithoutExtension(usdOutputPath) + "_textures";
                 directoryAbsolute = Path.Combine(dir, directoryRelative);
+                outputDirectory = dir;
+                LayerDirectory = dir;
+            }
+
+            // The texture folder as the current layer should spell it: exactly
+            // "<usd-name>_textures" for the output's own directory, as it always was.
+            private string RelativeDirectory()
+            {
+                if (string.IsNullOrEmpty(LayerDirectory) || PathsEqual(LayerDirectory, outputDirectory))
+                {
+                    return directoryRelative;
+                }
+
+                return Path.GetRelativePath(LayerDirectory, directoryAbsolute).Replace('\\', '/');
             }
 
             public string ExportAlbedo(Material material) => ExportSlot(material, AlbedoProperties, sRGB: true);
@@ -953,10 +1032,29 @@ namespace Unity.USDToolkit
 
                 if (cache.TryGetValue(texture, out string cached))
                 {
-                    return cached;
+                    return cached.Length == 0 ? string.Empty : RelativeDirectory() + "/" + cached;
                 }
 
-                string relativePath = string.Empty;
+                // A texture the importer decoded from a file, untouched, goes out as that file.
+                // Reading it back from the GPU re-encodes a block-compressed copy of a lossless
+                // image, and an EXR's 16 bits as 8: a round trip through Unity lost quality on
+                // every texture it did not need to touch. The copy is byte-identical and costs
+                // no readback, no encode and no GPU sync.
+                //
+                // A colour slot keeps the copy to 8-bit formats: the exporter declares such a
+                // texture sRGB, which a floating-point image is not.
+                string origin = UsdTextureOrigins.Lookup(texture);
+                if (origin != null && (!sRGB || IsEightBitImage(origin)))
+                {
+                    string copied = CopyOriginal(origin, texture.name);
+                    if (copied.Length > 0)
+                    {
+                        cache[texture] = copied;
+                        return RelativeDirectory() + "/" + copied;
+                    }
+                }
+
+                string writtenName = string.Empty;
                 Texture2D readable = null;
                 try
                 {
@@ -972,7 +1070,7 @@ namespace Unity.USDToolkit
                         Directory.CreateDirectory(directoryAbsolute);
                         string fileName = SanitizeFileName(string.IsNullOrEmpty(texture.name) ? "texture" : texture.name) + ".png";
                         File.WriteAllBytes(Path.Combine(directoryAbsolute, fileName), png);
-                        relativePath = directoryRelative + "/" + fileName; // referenced relatively from the USD
+                        writtenName = fileName;
                     }
                 }
                 catch (Exception exception)
@@ -987,9 +1085,71 @@ namespace Unity.USDToolkit
                     }
                 }
 
-                cache[texture] = relativePath;
-                return relativePath;
+                cache[texture] = writtenName;
+                // Referenced relatively from the layer, so the folder can move as a whole.
+                return writtenName.Length == 0 ? string.Empty : RelativeDirectory() + "/" + writtenName;
             }
+
+            private static bool IsEightBitImage(string path)
+            {
+                string extension = Path.GetExtension(path).ToLowerInvariant();
+                return extension == ".png" || extension == ".jpg" || extension == ".jpeg" ||
+                       extension == ".tga" || extension == ".bmp";
+            }
+
+            // Copies the imported file next to the layer under its own name and extension. A
+            // name already taken by a different file gets a numbered suffix rather than
+            // overwriting it; the same file asked for twice is written once.
+            private string CopyOriginal(string origin, string textureName)
+            {
+                try
+                {
+                    Directory.CreateDirectory(directoryAbsolute);
+                    string extension = Path.GetExtension(origin);
+                    string stem = SanitizeFileName(Path.GetFileNameWithoutExtension(origin));
+                    if (stem.Length == 0)
+                    {
+                        stem = SanitizeFileName(string.IsNullOrEmpty(textureName) ? "texture" : textureName);
+                    }
+
+                    for (int attempt = 0; attempt < 1000; attempt++)
+                    {
+                        string fileName = attempt == 0 ? stem + extension : stem + "_" + attempt + extension;
+                        string target = Path.Combine(directoryAbsolute, fileName);
+                        if (copiedOrigins.TryGetValue(target, out string source))
+                        {
+                            if (PathsEqual(source, origin))
+                            {
+                                return fileName;
+                            }
+
+                            continue; // taken by another file this export wrote
+                        }
+
+                        if (File.Exists(target) && !PathsEqual(target, origin))
+                        {
+                            // Left over from an earlier export; replaced, as the PNG path does.
+                            File.Delete(target);
+                        }
+
+                        if (!PathsEqual(target, origin))
+                        {
+                            File.Copy(origin, target, true);
+                        }
+
+                        copiedOrigins[target] = origin;
+                        return fileName;
+                    }
+                }
+                catch (Exception exception)
+                {
+                    Debug.LogWarning("Unity USD Toolkit: could not copy texture file '" + origin + "': " + exception.Message);
+                }
+
+                return string.Empty;
+            }
+
+            private readonly Dictionary<string, string> copiedOrigins = new Dictionary<string, string>();
 
             // Decodes a Unity normal map (DXT5nm: x=A, y=G, R close to 255; uncompressed/BC5:
             // x=R, y=G) back into a standard USD RGB normal (xyz).
@@ -1104,6 +1264,16 @@ namespace Unity.USDToolkit
             string parentPath = xformPaths != null && xformPaths.TryGetValue(target, out string resolvedPath)
                 ? resolvedPath
                 : "/" + rootPrimName;
+
+            // A mesh the importer created came from a USD Mesh prim, which is its own transform.
+            // Writing it as an Xform with a "<name>_Mesh" child renamed every mesh on a round trip;
+            // it goes back to the Xform's own path instead, which turns that prim into the Mesh.
+            if (target != root && xformPaths != null && xformPaths.ContainsKey(target) &&
+                target.GetComponent<UsdPrimSource>() != null)
+            {
+                return parentPath;
+            }
+
             string meshName = SanitizePrimName(target.name) + "_Mesh";
             return MakeUniquePath(parentPath + "/" + meshName, usedPaths);
         }
@@ -1639,7 +1809,9 @@ namespace Unity.USDToolkit
 
             return string.Equals(name, "plugInfo.json", StringComparison.OrdinalIgnoreCase) ||
                 name.EndsWith(".usda", StringComparison.OrdinalIgnoreCase) ||
-                name.EndsWith(".glslfx", StringComparison.OrdinalIgnoreCase);
+                name.EndsWith(".glslfx", StringComparison.OrdinalIgnoreCase) ||
+                // The MaterialX standard library usdMtlx parses at run time.
+                name.EndsWith(".mtlx", StringComparison.OrdinalIgnoreCase);
         }
 
         private static string ComputeSha256(string path)

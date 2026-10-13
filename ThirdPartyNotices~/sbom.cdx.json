@@ -46,7 +46,7 @@
       },
       {
         "name": "unity:provenanceNote",
-        "value": "Every OpenUSD payload is built from the public v26.05 tag (commit 2095faf) with one Unity patch applied (recorded in the OpenUSD component's pedigree) and the flags recorded on that component. The builds are not bit-reproducible: no SOURCE_DATE_EPOCH, absolute build paths are embedded, and the macOS payload is post-processed with install_name_tool and codesign. The SHA-256 values here identify what shipped; they do not prove upstream authenticity."
+        "value": "Every OpenUSD payload is built from the public v26.05 tag (commit 2095faf) with one Unity patch applied (recorded in the OpenUSD component's pedigree) and the flags recorded on that component. MaterialX 1.39.4 is built by the same build_usd.py run from the upstream source archive whose SHA-256 is pinned on the MaterialX source component; that archive, like every pinned archive, is verified before build_usd.py runs and again after it finishes. The builds are not bit-reproducible: no SOURCE_DATE_EPOCH, absolute build paths are embedded, and the macOS payload is post-processed with install_name_tool and codesign. The SHA-256 values here identify what shipped; they do not prove upstream authenticity."
       }
     ]
   },
@@ -85,7 +85,7 @@
         },
         {
           "name": "unity:buildFlags",
-          "value": "--build-variant release --build-monolithic --no-python --no-imaging --no-usdview --no-examples --no-tutorials --no-tests --no-materialx"
+          "value": "--build-variant release --build-monolithic --no-python --no-imaging --no-usdview --no-examples --no-tutorials --no-tests --materialx --build-args MaterialX,-DMATERIALX_BUILD_RENDER=OFF"
         },
         {
           "name": "unity:licenseText",
@@ -277,6 +277,161 @@
               "url": "https://github.com/Tessil/robin-map"
             }
           ]
+        },
+        {
+          "bom-ref": "libdeflate",
+          "type": "library",
+          "name": "libdeflate",
+          "version": "1.18",
+          "scope": "required",
+          "description": "Vendored inside OpenUSD as pxr/imaging/plugin/hioOpenEXR/OpenEXR/deflate, but in no OpenUSD binary: hioOpenEXR is not built under --no-imaging. Its decompressor is compiled into the wrapper (Native~/src/UsdDeflate.c) as the inflate the image codecs use on every platform; Native~/CMakeLists.txt checks the 29 files against recorded digests.",
+          "purl": "pkg:github/ebiggers/libdeflate@v1.18",
+          "licenses": [
+            {
+              "license": {
+                "id": "MIT"
+              }
+            }
+          ],
+          "properties": [
+            {
+              "name": "unity:licenseText",
+              "value": "ThirdPartyNotices~/licenses/libdeflate-LICENSE.txt"
+            },
+            {
+              "name": "unity:sourceDigests",
+              "value": "Native~/CMakeLists.txt (_RUSD_DEFLATE_FILES)"
+            }
+          ],
+          "externalReferences": [
+            {
+              "type": "vcs",
+              "url": "https://github.com/ebiggers/libdeflate"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "bom-ref": "materialx-source",
+      "type": "library",
+      "name": "MaterialX",
+      "version": "1.39.4",
+      "scope": "required",
+      "description": "The source every shipped MaterialX library is built from: the upstream v1.39.4 archive, pinned by SHA-256 and verified before and after build_usd.py, built by that run with render back-ends off.",
+      "purl": "pkg:github/AcademySoftwareFoundation/MaterialX@v1.39.4",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "unity:sourceArchive",
+          "value": "https://github.com/AcademySoftwareFoundation/MaterialX/archive/v1.39.4.zip"
+        },
+        {
+          "name": "unity:sourceArchiveSha256",
+          "value": "3910b2498d7da6c8e5ac150b9e6a74e530626044309edb077829c024ed691e0e"
+        },
+        {
+          "name": "unity:buildFlags",
+          "value": "--materialx --build-args MaterialX,-DMATERIALX_BUILD_RENDER=OFF"
+        },
+        {
+          "name": "unity:licenseText",
+          "value": "ThirdPartyNotices~/licenses/MaterialX-LICENSE.txt"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/AcademySoftwareFoundation/MaterialX"
+        },
+        {
+          "type": "distribution",
+          "url": "https://github.com/AcademySoftwareFoundation/MaterialX/archive/v1.39.4.zip",
+          "hashes": [
+            {
+              "alg": "SHA-256",
+              "content": "3910b2498d7da6c8e5ac150b9e6a74e530626044309edb077829c024ed691e0e"
+            }
+          ]
+        }
+      ],
+      "components": [
+        {
+          "bom-ref": "pugixml",
+          "type": "library",
+          "name": "pugixml",
+          "version": "1.9",
+          "scope": "required",
+          "description": "Vendored inside MaterialX as source/MaterialXFormat/External/PugiXML and compiled into libMaterialXFormat (PUGIXML_VERSION 190). Its MIT notice is at the end of that pugixml.hpp.",
+          "purl": "pkg:github/zeux/pugixml@v1.9",
+          "licenses": [
+            {
+              "license": {
+                "id": "MIT"
+              }
+            }
+          ],
+          "externalReferences": [
+            {
+              "type": "vcs",
+              "url": "https://github.com/zeux/pugixml"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "bom-ref": "materialx-libraries",
+      "type": "data",
+      "name": "MaterialX data libraries",
+      "version": "1.39.4",
+      "scope": "required",
+      "description": "The MaterialX standard data libraries (stdlib, pbrlib, bxdf, cmlib, lights, nprlib, targets: .mtlx definitions and GLSL/MSL/OSL/MDL shader source) that build_usd.py installs for usdMtlx, from the same MaterialX build. Mostly \"Contributors to the MaterialX Project\" under Apache-2.0; the mdl/materialx files are NVIDIA CORPORATION, Apache-2.0; stdlib/genglsl/lib/mx_noise.glsl and mx_hsv.glsl, the stdlib/genosl/include headers and part of mdl/materialx/noise.mdl are derived from Open Shading Language (Sony Pictures Imageworks / Contributors to the OSL project), BSD-3-Clause. unity:treeSha256 is the SHA-256 of sorted `shasum -a 256` lines over the tree, .meta files excluded.",
+      "licenses": [
+        {
+          "expression": "Apache-2.0 AND BSD-3-Clause"
+        }
+      ],
+      "properties": [
+        {
+          "name": "unity:shippedPath",
+          "value": "Runtime/Plugins/macOS/lib/usd/usdMtlx/resources/libraries"
+        },
+        {
+          "name": "unity:treeSha256",
+          "value": "macOS universal: c36de6a619c2b4eb9b8e704e5a9d19a95a145fe4c69067ea0550e473ddf4e999 (293 files)"
+        },
+        {
+          "name": "unity:shippedPath",
+          "value": "Runtime/Plugins/x86_64/Windows/lib/usd/usdMtlx/resources/libraries"
+        },
+        {
+          "name": "unity:treeSha256",
+          "value": "Windows x64: c36de6a619c2b4eb9b8e704e5a9d19a95a145fe4c69067ea0550e473ddf4e999 (293 files)"
+        },
+        {
+          "name": "unity:shippedPath",
+          "value": "Runtime/Plugins/x86_64/Linux/lib/usd/usdMtlx/resources/libraries"
+        },
+        {
+          "name": "unity:treeSha256",
+          "value": "Linux x64: c36de6a619c2b4eb9b8e704e5a9d19a95a145fe4c69067ea0550e473ddf4e999 (293 files)"
+        },
+        {
+          "name": "unity:licenseText",
+          "value": "ThirdPartyNotices~/licenses/MaterialX-LICENSE.txt"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/AcademySoftwareFoundation/MaterialX"
         }
       ]
     },
@@ -298,7 +453,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "7e2336a3ee28a50bdf631d2db5d68261813f70e4bec93d16c39540dcdf061d2f"
+          "content": "7d28b3a251d8b7053635d29c9add9c43e01f2046b4b79c9dffe4dfdfcfde9430"
         }
       ],
       "properties": [
@@ -348,7 +503,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "96879f4c69033811eee75e0a506283f7a01493e2dea4455512967aebfea61b90"
+          "content": "680f98dd7c4d37eed0667eb3b151eae246fcb4313b27d1bea31dea362d6ce5c8"
         }
       ],
       "properties": [
@@ -398,7 +553,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "4cda1434ea30f032f64189a71de4e5a0df621966890e42688db4ae1e43b539fc"
+          "content": "0bd88b66968991c36fc7c0cef07e10260842faf9ac4ed567b1e511c9eaec7e1c"
         }
       ],
       "properties": [
@@ -448,7 +603,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "245adaa1a8efcd0afce4b204a4c73014e569c87bf8248fff367756e28d935527"
+          "content": "6dcb19f152cf740488be3f3c8be5796bf8af3d0ca03440b56036ae36ee3c90f0"
         }
       ],
       "properties": [
@@ -494,7 +649,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "e5f2bbea7734f4bdec53251687bf76883d8ae3e3822e1eeb8cc0d3f71d94c665"
+          "content": "a47b92e80ed915565b1e3759b3fb204efd98913ed0bd640bbeb8d55a0e28a7e9"
         }
       ],
       "properties": [
@@ -540,7 +695,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "e28b63875078eb74ae77adbfe768dffdb98b96d9d3d82a6b68c5154aca857bad"
+          "content": "15ea9b6e10c7b0554271a7aa8f7a34d7d2c651a7c7e5f1dd1b4b9d9be7733642"
         }
       ],
       "properties": [
@@ -615,13 +770,13 @@
       ]
     },
     {
-      "bom-ref": "tbb-linux",
+      "bom-ref": "materialx-core-linux",
       "type": "library",
-      "name": "oneTBB",
-      "version": "2020.3",
+      "name": "MaterialX",
+      "version": "1.39.4",
       "scope": "required",
-      "description": "oneTBB built from the v2020.3.1 point-release source tag, as OpenUSD's build_usd.py pins it on Linux; the library reports 2020.3.",
-      "purl": "pkg:github/oneapi-src/oneTBB@v2020.3",
+      "description": "MaterialX data model, linked by usdMtlx inside libusd_ms.",
+      "purl": "pkg:github/AcademySoftwareFoundation/MaterialX@v1.39.4",
       "licenses": [
         {
           "license": {
@@ -632,7 +787,175 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "9055354cda2b1e5e29b8ebe73f9b6998e58812d56b0eadb15b44041ba208acb5"
+          "content": "560c63c66f82cdb1dd8f803a0e203b10f8cd6af752f8c8cd27233165905657f0"
+        }
+      ],
+      "properties": [
+        {
+          "name": "unity:shippedPath",
+          "value": "Runtime/Plugins/x86_64/Linux/lib/libMaterialXCore.so.1"
+        },
+        {
+          "name": "unity:platform",
+          "value": "Linux x64"
+        },
+        {
+          "name": "unity:licenseText",
+          "value": "ThirdPartyNotices~/licenses/MaterialX-LICENSE.txt"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/AcademySoftwareFoundation/MaterialX"
+        }
+      ]
+    },
+    {
+      "bom-ref": "materialx-format-linux",
+      "type": "library",
+      "name": "MaterialX",
+      "version": "1.39.4",
+      "scope": "required",
+      "description": "MaterialX document reader/writer from the same v1.39.4 build.",
+      "purl": "pkg:github/AcademySoftwareFoundation/MaterialX@v1.39.4",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "1800d771ef01e88533f6b52335e71d23328266c3c65a90b9da94a329768a14d2"
+        }
+      ],
+      "properties": [
+        {
+          "name": "unity:shippedPath",
+          "value": "Runtime/Plugins/x86_64/Linux/lib/libMaterialXFormat.so.1"
+        },
+        {
+          "name": "unity:platform",
+          "value": "Linux x64"
+        },
+        {
+          "name": "unity:licenseText",
+          "value": "ThirdPartyNotices~/licenses/MaterialX-LICENSE.txt"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/AcademySoftwareFoundation/MaterialX"
+        }
+      ]
+    },
+    {
+      "bom-ref": "materialx-core-windows",
+      "type": "library",
+      "name": "MaterialX",
+      "version": "1.39.4",
+      "scope": "required",
+      "description": "MaterialX data model, imported by usdMtlx inside usd_rt.dll.",
+      "purl": "pkg:github/AcademySoftwareFoundation/MaterialX@v1.39.4",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "f04332afdd38f635111061b6fca65ba1c289a519c3c79a201e89cfb6e2e78775"
+        }
+      ],
+      "properties": [
+        {
+          "name": "unity:shippedPath",
+          "value": "Runtime/Plugins/x86_64/Windows/MaterialXCore.dll"
+        },
+        {
+          "name": "unity:platform",
+          "value": "Windows x64"
+        },
+        {
+          "name": "unity:licenseText",
+          "value": "ThirdPartyNotices~/licenses/MaterialX-LICENSE.txt"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/AcademySoftwareFoundation/MaterialX"
+        }
+      ]
+    },
+    {
+      "bom-ref": "materialx-format-windows",
+      "type": "library",
+      "name": "MaterialX",
+      "version": "1.39.4",
+      "scope": "required",
+      "description": "MaterialX document reader/writer from the same v1.39.4 build.",
+      "purl": "pkg:github/AcademySoftwareFoundation/MaterialX@v1.39.4",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "e573ff460fe0d7079db5eb7c363205b93522afa22d34871943232e622e1538e8"
+        }
+      ],
+      "properties": [
+        {
+          "name": "unity:shippedPath",
+          "value": "Runtime/Plugins/x86_64/Windows/MaterialXFormat.dll"
+        },
+        {
+          "name": "unity:platform",
+          "value": "Windows x64"
+        },
+        {
+          "name": "unity:licenseText",
+          "value": "ThirdPartyNotices~/licenses/MaterialX-LICENSE.txt"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/AcademySoftwareFoundation/MaterialX"
+        }
+      ]
+    },
+    {
+      "bom-ref": "tbb-linux",
+      "type": "library",
+      "name": "oneTBB",
+      "version": "2020.3.1",
+      "scope": "required",
+      "description": "oneTBB built from the v2020.3.1 point-release source tag, as OpenUSD's build_usd.py pins it on Linux; the library reports 2020.3.",
+      "purl": "pkg:github/oneapi-src/oneTBB@v2020.3.1",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "9e42434bcac5052f0fe0617324a5541863ab227f5b751940138f4e82bebd09b2"
         }
       ],
       "properties": [
@@ -677,7 +1000,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "bb8f10f9ef00392afeec1e25a8e2d7827b73a84a50f40cb3dcef35f774550ed8"
+          "content": "5ab0a521d5e5103d91b09098abf7a1e4bfdd258f3a76be702dda36d3413f8b14"
         }
       ],
       "properties": [
@@ -695,7 +1018,7 @@
         },
         {
           "name": "unity:nativeApiVersion",
-          "value": "5"
+          "value": "12"
         }
       ]
     },
@@ -716,7 +1039,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "245e9bd1930bb827cd90d116ea5f59f16744275a441a3f4b35e20618c3dcc1f5"
+          "content": "7e4de9eededcc0a875e182ac8718c5a685834e47059082798096e6712e5b8273"
         }
       ],
       "properties": [
@@ -734,7 +1057,7 @@
         },
         {
           "name": "unity:nativeApiVersion",
-          "value": "5"
+          "value": "12"
         }
       ]
     },
@@ -755,7 +1078,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "f8929e85e4e9a8771afa4a68b2858e3682161f01e99a164701918e2c2a2da281"
+          "content": "962b28f38901f9dcf1c34bf4f27dcab4486afe0347fb7ea8e77167df6ce7777b"
         }
       ],
       "properties": [
@@ -773,7 +1096,91 @@
         },
         {
           "name": "unity:nativeApiVersion",
-          "value": "5"
+          "value": "12"
+        }
+      ]
+    },
+    {
+      "bom-ref": "materialx-core-macos",
+      "type": "library",
+      "name": "MaterialX",
+      "version": "1.39.4",
+      "scope": "required",
+      "description": "MaterialX data model, linked by usdMtlx inside libusd_ms.",
+      "purl": "pkg:github/AcademySoftwareFoundation/MaterialX@v1.39.4",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "bbbdadde187fd1f5146c7e7b80cb49bdd44223b048f6e48f2d57716f6e0de868"
+        }
+      ],
+      "properties": [
+        {
+          "name": "unity:shippedPath",
+          "value": "Runtime/Plugins/macOS/libMaterialXCore.1.dylib"
+        },
+        {
+          "name": "unity:platform",
+          "value": "macOS universal"
+        },
+        {
+          "name": "unity:licenseText",
+          "value": "ThirdPartyNotices~/licenses/MaterialX-LICENSE.txt"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/AcademySoftwareFoundation/MaterialX"
+        }
+      ]
+    },
+    {
+      "bom-ref": "materialx-format-macos",
+      "type": "library",
+      "name": "MaterialX",
+      "version": "1.39.4",
+      "scope": "required",
+      "description": "MaterialX document reader/writer from the same v1.39.4 build.",
+      "purl": "pkg:github/AcademySoftwareFoundation/MaterialX@v1.39.4",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "98cf9d86c965ef6bea18166a39a89388762c2447711bdaecdc6520bc7739cad2"
+        }
+      ],
+      "properties": [
+        {
+          "name": "unity:shippedPath",
+          "value": "Runtime/Plugins/macOS/libMaterialXFormat.1.dylib"
+        },
+        {
+          "name": "unity:platform",
+          "value": "macOS universal"
+        },
+        {
+          "name": "unity:licenseText",
+          "value": "ThirdPartyNotices~/licenses/MaterialX-LICENSE.txt"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/AcademySoftwareFoundation/MaterialX"
         }
       ]
     }
@@ -782,6 +1189,7 @@
     {
       "ref": "com.unity.usd-toolkit",
       "dependsOn": [
+        "materialx-libraries",
         "usd-macos",
         "usd-windows",
         "usd-linux",
@@ -789,10 +1197,16 @@
         "tbbmalloc-macos",
         "tbbmalloc-proxy-macos",
         "tbb-windows",
+        "materialx-core-linux",
+        "materialx-format-linux",
+        "materialx-core-windows",
+        "materialx-format-windows",
         "tbb-linux",
         "wrapper-macos",
         "wrapper-windows",
-        "wrapper-linux"
+        "wrapper-linux",
+        "materialx-core-macos",
+        "materialx-format-macos"
       ]
     },
     {
@@ -805,45 +1219,108 @@
       ]
     },
     {
+      "ref": "materialx-source",
+      "dependsOn": [
+        "pugixml"
+      ]
+    },
+    {
+      "ref": "materialx-libraries",
+      "dependsOn": [
+        "materialx-source"
+      ]
+    },
+    {
       "ref": "usd-macos",
       "dependsOn": [
         "openusd-source",
-        "tbb-macos"
+        "tbb-macos",
+        "materialx-core-macos",
+        "materialx-format-macos"
       ]
     },
     {
       "ref": "usd-windows",
       "dependsOn": [
         "openusd-source",
-        "tbb-windows"
+        "tbb-windows",
+        "materialx-core-windows",
+        "materialx-format-windows"
       ]
     },
     {
       "ref": "usd-linux",
       "dependsOn": [
         "openusd-source",
-        "tbb-linux"
+        "tbb-linux",
+        "materialx-core-linux",
+        "materialx-format-linux"
+      ]
+    },
+    {
+      "ref": "materialx-core-linux",
+      "dependsOn": [
+        "materialx-source"
+      ]
+    },
+    {
+      "ref": "materialx-format-linux",
+      "dependsOn": [
+        "materialx-source",
+        "pugixml",
+        "materialx-core-linux"
+      ]
+    },
+    {
+      "ref": "materialx-core-windows",
+      "dependsOn": [
+        "materialx-source"
+      ]
+    },
+    {
+      "ref": "materialx-format-windows",
+      "dependsOn": [
+        "materialx-source",
+        "pugixml",
+        "materialx-core-windows"
+      ]
+    },
+    {
+      "ref": "materialx-core-macos",
+      "dependsOn": [
+        "materialx-source"
+      ]
+    },
+    {
+      "ref": "materialx-format-macos",
+      "dependsOn": [
+        "materialx-source",
+        "pugixml",
+        "materialx-core-macos"
       ]
     },
     {
       "ref": "wrapper-macos",
       "dependsOn": [
         "usd-macos",
-        "tbb-macos"
+        "tbb-macos",
+        "libdeflate"
       ]
     },
     {
       "ref": "wrapper-windows",
       "dependsOn": [
         "usd-windows",
-        "tbb-windows"
+        "tbb-windows",
+        "libdeflate"
       ]
     },
     {
       "ref": "wrapper-linux",
       "dependsOn": [
         "usd-linux",
-        "tbb-linux"
+        "tbb-linux",
+        "libdeflate"
       ]
     }
   ]

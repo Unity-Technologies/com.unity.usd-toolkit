@@ -34,7 +34,7 @@ The native binary cannot be cross-compiled — build Windows on Windows, macOS o
 macOS. Each is a two-step process: build OpenUSD once, then build this wrapper.
 
 OpenUSD is always built with `Native~/build_openusd.py`, never with `build_usd.py` directly:
-it checks the pinned TBB archive *before* `build_usd.py` compiles it and stamps the install,
+it checks the pinned TBB and MaterialX archives *before* `build_usd.py` compiles them and stamps the install,
 and every wrapper build (the three scripts below and `CMakeLists.txt` itself) refuses an
 install without that stamp. See `REBUILD_WINDOWS_LINUX.md` §5.
 
@@ -57,7 +57,7 @@ install without that stamp. See `REBUILD_WINDOWS_LINUX.md` §5.
 1. Build OpenUSD (monolithic, universal) from a `v26.05` clone into a new directory:
    ```bash
    python3 Native~/build_openusd.py --platform macos --openusd-src <clone> \
-       --install /Users/Shared/usd-26.05/install --build-target universal --require-scan
+       --install /Users/Shared/usd-26.05-mtlx/install --build-target universal --require-scan
    ```
    It sets `MACOSX_DEPLOYMENT_TARGET=12.0` (`--deployment-target`). Nothing in OpenUSD's build
    sets a deployment target, so its dylibs otherwise take the SDK default — the build machine's
@@ -65,7 +65,7 @@ install without that stamp. See `REBUILD_WINDOWS_LINUX.md` §5.
    a macOS player. The wrapper's own `--deployment-target` does not reach them.
 2. From the package root:
    ```bash
-   ./Native~/build_macos.sh --openusd-root /Users/Shared/usd-26.05/install --arch universal \
+   ./Native~/build_macos.sh --openusd-root /Users/Shared/usd-26.05-mtlx/install --arch universal \
        --codesign-id "<Developer ID>"
    ```
    Installs `UnityUSDToolkitNative.dylib` + payload into `Runtime/Plugins/macOS/`.
@@ -78,7 +78,11 @@ After rebuilding, commit the updated `Runtime/Plugins/x86_64/Windows/`,
 tracked with Git LFS — see `.gitattributes`).
 
 ## Common requirements
-- A monolithic (`usd_ms`), `--no-python` OpenUSD 26.05 install built by `build_openusd.py`.
+- A monolithic (`usd_ms`), `--no-python` OpenUSD 26.05 install with MaterialX 1.39.4
+  (`--materialx`), built by `build_openusd.py`. With MaterialX the monolithic library links
+  `MaterialXCore` and `MaterialXFormat`, and every build script fails on an install without them.
+- The OpenUSD source tree beside the install (`<install>/openusd-src`, where `build_openusd.py`
+  leaves it): the wrapper compiles libdeflate from it (`src/UsdDeflate.c`).
 - CMake, a C++17 compiler, and Python 3 (the configure step runs the provenance check).
 
 ---
@@ -92,7 +96,8 @@ Native~/build_linux.sh --openusd-root /opt/usd-26.05/install
 This is the path the shipped Linux payload is built with. The script checks the install's
 provenance stamp and the dependency digests, builds with CMake in a clean
 `Native~/build~/linux-x64`, assembles `libUnityUSDToolkitNative.so`, `lib/libusd_ms.so`,
-`lib/libtbb.so.2`, `lib/usd` and `plugin/usd` under `Runtime/Plugins/x86_64/Linux/`, sets the
+`lib/libtbb.so.2`, `lib/libMaterialXCore.so.1`, `lib/libMaterialXFormat.so.1`, `lib/usd` and
+`plugin/usd` under `Runtime/Plugins/x86_64/Linux/`, sets the
 `$ORIGIN` rpaths with `patchelf`, strips the binaries, and fails on an unresolved `ldd` entry or
 a `/home/` path in any of them. Needs `cmake`, `patchelf`, `binutils` and `python3`.
 

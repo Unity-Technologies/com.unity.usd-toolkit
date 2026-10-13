@@ -4,6 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PACKAGE_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 OPENUSD_ROOT=""
+OPENUSD_SRC=""
 CONFIGURATION="Release"
 ARCH="universal"
 CMAKE_BIN="cmake"
@@ -31,6 +32,10 @@ Usage:
 
 Options:
   --openusd-root <path>      Pixar OpenUSD install root.
+  --openusd-src <path>       The OpenUSD source tree that install was built from; the image
+                             codecs compile their inflater from the libdeflate it vendors.
+                             Defaults to <openusd-root>/openusd-src, where build_openusd.py
+                             leaves it.
   --configuration <value>    CMake configuration. Defaults to Release.
   --arch <value>             native, x86_64, arm64, or universal. Defaults to universal.
   --deployment-target <ver>  Minimum macOS version the plugin runs on. Defaults to 12.0, Unity
@@ -59,6 +64,10 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --openusd-root|-OpenUsdRoot)
             OPENUSD_ROOT="$2"
+            shift 2
+            ;;
+        --openusd-src|-OpenUsdSrc)
+            OPENUSD_SRC="$2"
             shift 2
             ;;
         --configuration|-Configuration)
@@ -244,6 +253,9 @@ CMAKE_CONFIGURE_ARGS=(
     -DOPENUSD_ROOT="${OPENUSD_ROOT}"
     -DCMAKE_INSTALL_PREFIX="${INSTALL_DIR}"
 )
+if [[ -n "${OPENUSD_SRC}" ]]; then
+    CMAKE_CONFIGURE_ARGS+=(-DOPENUSD_SRC="$(cd "${OPENUSD_SRC}" && pwd)")
+fi
 
 # Always passed, ON or OFF: CMake drops it from the cache after each configure, so leaving it out
 # is also OFF -- but saying so here keeps the two gates visibly in step.
@@ -277,6 +289,10 @@ copy_dylibs_from_directory() {
             if [[ "${name}" == *"_debug"* || "${name}" == *"debug"* ]]; then
                 continue
             fi
+            # MaterialX is copied below under the names libusd_ms links, not the versioned file name.
+            if [[ "${name}" == libMaterialX* ]]; then
+                continue
+            fi
 
             cp -L "${file}" "${INSTALL_DIR}/$(basename "${file}")"
         done
@@ -290,13 +306,47 @@ copy_runtime_directory() {
     fi
 
     local destination="${INSTALL_DIR}/${destination_name}"
-    rm -rf "${destination}"
-    mkdir -p "$(dirname "${destination}")"
-    cp -R "${source_dir}" "${destination}"
+    # Old files go so nothing from a previous OpenUSD survives, as in build_linux.sh, but the
+    # committed Unity .meta files stay: deleting them made Unity mint new GUIDs on the next import.
+    # A .meta whose file or folder is gone after the copy is removed, so nothing stale survives.
+    if [[ -d "${destination}" ]]; then
+        find "${destination}" -type f ! -name "*.meta" -delete
+    fi
+    mkdir -p "${destination}"
+    cp -R "${source_dir}/." "${destination}/"
+    # Twice: removing a stale file's .meta can empty its folder, and that folder's own .meta is
+    # orphaned only once the empty folder is gone.
+    local pass
+    for pass in 1 2; do
+        find "${destination}" -type f -name "*.meta" | while IFS= read -r meta; do
+            [[ -e "${meta%.meta}" ]] || rm -f "${meta}"
+        done
+        find "${destination}" -depth -type d -empty -delete
+    done
 }
 
 copy_dylibs_from_directory "${OPENUSD_ROOT}/lib"
 copy_dylibs_from_directory "${OPENUSD_ROOT}/bin"
+
+# MaterialX is a link-time dependency of libusd_ms, not an optional plugin: with --materialx the
+# monolithic library absorbs usdMtlx and links libMaterialXCore and libMaterialXFormat by their
+# compatibility names (libMaterialXCore.1.dylib), which in the install are symlinks to the
+# versioned file (libMaterialXCore.1.39.4.dylib). The find above copies regular files only, so it
+# shipped the versioned file under a name nothing references, and dyld could not load libusd_ms --
+# the whole toolkit dead, not merely MaterialX missing. Same rule as build_linux.sh: read the names
+# libusd_ms asks for, copy each under that name, and fail if the install was not built with them.
+for usd_monolithic in "${OPENUSD_ROOT}/lib/libusd_ms.dylib" "${OPENUSD_ROOT}/lib/libusd_m.dylib"; do
+    [[ -f "${usd_monolithic}" ]] && break
+done
+for mtlx in libMaterialXCore libMaterialXFormat; do
+    mtlx_name="$(otool -L "${usd_monolithic}" | awk 'NR > 1 { print $1 }' |
+        sed -n "s|.*/\(${mtlx}\.[^/]*dylib\)$|\1|p" | head -n 1)"
+    if [[ -z "${mtlx_name}" || ! -e "${OPENUSD_ROOT}/lib/${mtlx_name}" ]]; then
+        echo "$(basename "${usd_monolithic}") does not link ${mtlx}; was OpenUSD built with --materialx?" >&2
+        exit 1
+    fi
+    cp -L "${OPENUSD_ROOT}/lib/${mtlx_name}" "${INSTALL_DIR}/${mtlx_name}"
+done
 copy_runtime_directory "${OPENUSD_ROOT}/lib/usd" "lib/usd"
 copy_runtime_directory "${OPENUSD_ROOT}/plugin" "plugin"
 copy_runtime_directory "${OPENUSD_ROOT}/share" "share"

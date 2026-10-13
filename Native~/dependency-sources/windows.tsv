@@ -5,7 +5,11 @@
 # the commit it applies to). Everything else in the payload is compiled from the OpenUSD tree at
 # the pinned commit, including the four libraries OpenUSD vendors in (pxr/base/tf/pxrCLI11,
 # pxrDoubleConversion, pxrLZ4, pxrTslRobinMap), so those need no row of their own -- except where
-# a patch replaces one, as openusd-26.05-lz4-1.10.0.patch does pxrLZ4 (SECURITY-282834). Verified by Native~/verify_upstream_sources.py; see its docstring for what a pin
+# a patch replaces one, as openusd-26.05-lz4-1.10.0.patch does pxrLZ4 (SECURITY-282834). The same
+# holds for libdeflate 1.18 under pxr/imaging/plugin/hioOpenEXR/OpenEXR/deflate, which our wrapper
+# compiles although OpenUSD is built --no-imaging, and for the pugixml MaterialX vendors into
+# MaterialXFormat: both are inside a pinned tree or archive, so a scan record for that row has to
+# cover them. Verified by Native~/verify_upstream_sources.py; see its docstring for what a pin
 # does and does not establish.
 #
 # Tab-separated: component, version, artifact, url, sha256, git_commit, upstream_evidence, recorded
@@ -13,3 +17,4 @@
 OpenUSD	26.05	git-clone	https://github.com/PixarAnimationStudios/OpenUSD.git	-	2095fafafd033fa23386d7ec6d58c7cc33974518	none published: v26.05 is a lightweight tag and commit 2095faf is unsigned	2026-09-25
 oneTBB	2020.3	release-asset	https://github.com/oneapi-src/oneTBB/releases/download/v2020.3/tbb-2020.3-win.zip	cda37eed5209746a79c88a658f8c1bf3782f58bd9f9f6ba0da3a16624a9bfaa1	eca91f16d7490a8abfdee652dadf457ec820cc37	Authenticode (Intel Corporation) on the DLLs inside; the shipped tbb_usdrt.dll is byte-identical to tbb/bin/intel64/vc14/tbb.dll in this archive, renamed only	2026-09-25
 OpenUSD-patch	lz4-1.10.0	patch	Native~/patches/openusd-26.05-lz4-1.10.0.patch	23a70a125e3d55486139738297cd1ec93f419b7d9be04296a36be2a6744cc565	2095fafafd033fa23386d7ec6d58c7cc33974518	Unity patch, reviewed in this repository: LZ4 1.9.2 -> 1.10.0 and bounds checks in TfFastCompression (CVE-2021-3520)	2026-09-29
+MaterialX	1.39.4	github-archive	https://github.com/AcademySoftwareFoundation/MaterialX/archive/v1.39.4.zip	3910b2498d7da6c8e5ac150b9e6a74e530626044309edb077829c024ed691e0e	-	none published: the v1.39.4 source archive carries no checksum; digest observed 2026-10-10; tag v1.39.4 is commit 270b5cf2ae2be24a3b6ef4b0569f1c93038dda1d (2026-10-11)	2026-10-10

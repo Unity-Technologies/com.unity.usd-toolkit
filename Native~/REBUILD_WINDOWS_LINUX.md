@@ -1,4 +1,6 @@
-# Rebuilding the native plugin for Windows and Linux — package 0.7.2 / native ABI 5
+# Rebuilding the native plugin for Windows and Linux — package 0.7.2 / native API 12
+
+Written for ABI 5; the notes below add what each later API changed in the gates.
 
 **Task:** build `UnityUSDToolkitNative` from the source in this repository for **Windows x64** and
 **Linux x64**, and replace the payloads under `Runtime/Plugins/x86_64/`.
@@ -13,6 +15,51 @@ target distros. Nothing here is cross-compiled.
 > **Rebuilding for the LZ4 patch (branch `security/lz4-1.10.0`)?** Start from
 > `Native~/HANDOFF_LZ4_WINDOWS_LINUX.md`. It is the task, in order, for both machines, with the
 > commands, the expected output and the pitfalls; it points back here for the gates.
+
+> **Native ABI 6 (unreleased, branch `feature/composition-preserve`).** The source now builds
+> ABI 6: twelve additive composition entry points (see `CHANGELOG.md`, *Native API 6*). Gate 4
+> expects **37** `RUsd_*` symbols instead of 25, among them `RUsd_BeginLayerExport`,
+> `RUsd_OpenStageEx` and `RUsd_GetImportComposition`, and `Native~/Tests~/composition_test.cpp`
+> joins the tests in Gate 6 (build and run it the way its header comment says; it prints
+> `all composition checks passed`). An ABI 5 payload keeps working for everything except
+> `UsdCompositionMode.Preserve`, variant selection and payload control.
+>
+> *History, superseded by the API 12 note at the end of this block:* macOS was ABI 6 on
+> 2026-10-08, with only `UnityUSDToolkitNative.dylib` rebuilt (universal, minos 12.0, ad-hoc
+> signed, install names patched the way `build_macos.sh` does) against the OpenUSD and TBB dylibs
+> committed in `a0a756d`. Those were replaced on 2026-10-11 by a full rebuild against
+> `/Users/Shared/usd-26.05-mtlx/install` (OpenUSD with MaterialX), with
+> `dependency-digests/macos.sha256` re-recorded.
+>
+> **All three are ABI 6 (2026-10-10), and `MinimumApiVersion` is 6.** An ABI 5 payload no
+> longer loads.
+>
+> **Import fixes after ABI 6 (2026-10-10).** MaterialX surfaces, primvar-reader colours, smooth
+> normals for split vertices and typeless prims changed the wrapper without changing the ABI, so
+> a payload built before them still reports 6. `Native~/Tests~/material_import_test.cpp` joins
+> Gate 6 (build it like `import_uv_test`, copy `material_import_fixture.usda` and `.mtlx` next to
+> it); it prints `PASS` on a payload that has the fixes and fails 17 checks on one that does not.
+> It needs a payload built with MaterialX. Copy the `material_import_assets/` folder next to it
+> too (the sub-folder texture case).
+>
+> `Native~/Tests~/prim_import_test.cpp` (with `prim_import_fixture.usda`) covers the second batch
+> the same day: purpose, PointInstancer expansion, implicit surfaces, faceVarying merging and the
+> subdivision warning. Same build and run, prints `PASS`.
+>
+> **Native ABI 7 (2026-10-10).** Six additive entry points for scene components:
+> `RUsd_GetImportLightCount`, `RUsd_GetImportLight`, `RUsd_GetImportCameraCount`,
+> `RUsd_GetImportCamera`, `RUsd_GetImportAudioCount`, `RUsd_GetImportAudio`. Gate 4 expects **43**
+> `RUsd_*` symbols. `prim_import_test` checks them (lights, camera, spatial audio). The managed
+> side gates them on `SceneComponentsApiVersion`, and `MinimumApiVersion` stays 6, so a payload
+> that is still ABI 6 keeps loading without them.
+
+> **Security hardening on API 12 (2026-10-11, branch `security/api12-hardening`).** Import
+> budgets, EXR/PNG allocation bounds, UDIM confinement and exception barriers in the native image
+> code (`CHANGELOG.md`, *Security*). The ABI is unchanged, still 12, so a payload built before
+> these fixes reports 12 too: rebuild Windows and Linux from this source. Linux also has to
+> re-record its dependency digests, because `verify_dependency_digests.py` now covers
+> `libMaterialX*.so*` (`--record-dependency-digests`, then review the diff). **macOS is API 12**
+> with these fixes and MaterialX; the Gate 6 tests pass on it.
 
 ---
 
@@ -119,7 +166,7 @@ git lfs pull
 **Gate 1 — you have the right source.** All eleven must be true:
 
 ```bash
-grep -c 'kApiVersion = 5'            Native~/src/UsdExporter.cpp   # 1
+grep -c 'kApiVersion = 12'           Native~/src/UsdExporter.cpp   # 1
 grep -c '#define RUSD_MAX_UV_SETS 3' Native~/include/unity_usd_toolkit_native.h  # 1
 grep -c 'RUsd_GetImportMaterialOpacity' Native~/include/unity_usd_toolkit_native.h  # >= 1
 grep -c 'RUsd_CreateUsdzPackage'     Native~/include/unity_usd_toolkit_native.h  # >= 1
@@ -133,7 +180,7 @@ grep -cE 'IsHolding<(Sdf|Gf|Vt|Tf|Usd)'  Native~/src/UsdExporter.cpp   # must be
 # their absence. A payload built without these is vulnerable and passes every other gate.
 grep -c 'int64_t cursor'                   Native~/src/UsdExporter.cpp   # 1  (topology overflow)
 grep -c 'IsResolvedAssetInsideStageRoot'   Native~/src/UsdExporter.cpp   # >= 2 (asset confinement)
-grep -c 'MinimumApiVersion = 5'            Runtime/Native/UsdNative.cs   # 1  (ABI gate tightened)
+grep -c 'MinimumApiVersion = 6'            Runtime/Native/UsdNative.cs   # 1  (ABI gate: API 6 or newer)
 
 # SECURITY-282834 — the OpenUSD patch (LZ4 1.10.0 + TfFastCompression bounds). It changes OpenUSD,
 # not this source, so check it is pinned for your platform; Gate 10's lz4_bounds_test then proves
@@ -274,6 +321,14 @@ another package's OpenUSD (e.g. `com.unity.pixyz.sdk-plus`), which otherwise win
 causes `DllNotFound` / `PROC_NOT_FOUND`. Expect the line
 `Renamed OpenUSD monolithic usd_ms.dll -> usd_rt.dll ...` in the output.
 
+**Both platforms need the OpenUSD source tree, not only the install.** The image codecs compile
+their inflate from the libdeflate OpenUSD vendors (`pxr/imaging/plugin/hioOpenEXR/OpenEXR/deflate`,
+see `Native~/src/UsdDeflate.c`), which the install does not carry. `build_openusd.py` leaves the
+tree it built from at `<install>/openusd-src`, and that is where CMake looks; a tree elsewhere is
+passed with `-OpenUsdSrc` / `--openusd-src`. Configure prints `Inflater: libdeflate from ...
+(29 files verified)` after checking every file against the digests in `Native~/CMakeLists.txt`,
+and refuses a tree that differs from what OpenUSD v26.05 ships.
+
 **Linux:**
 
 ```bash
@@ -398,7 +453,7 @@ PXR_PLUGINPATH_NAME="$PLUGINS/lib/usd:$PLUGINS/plugin/usd" ./import_uv_test impo
 Expected:
 
 ```
-API 5, fixture import_uv_fixture.usda
+API 12, fixture import_uv_fixture.usda
 PASS
 ```
 
@@ -414,6 +469,12 @@ RUsd_OpenStage on the package
 RUsd_ReadImportAsset
 PASS
 ```
+
+**And `Native~/Tests~/image_codec_test.cpp`**, which proves the inflater is compiled in: it decodes
+`image_codec_fixture.png` and `image_codec_fixture.exr` (a ZIP-compressed OpenEXR) through
+`RUsd_ImageBuild` and checks every pixel. Build it like the others and run it with the two
+fixtures as arguments; expect `PASS`. A payload that reports "zlib not available" here is one
+built without the OpenUSD source tree, which the build now refuses to do.
 
 `PXR_PLUGINPATH_NAME` is mandatory for a standalone host: without it OpenUSD aborts the process
 with *"Failed to find the plugInfo.json file that declares the plugin for ArDefaultResolver"*.
@@ -682,9 +743,9 @@ container matching the oldest glibc you support (§3).
 
 ## Appendix B — what this rebuild must not change
 
-- The managed C# layer. It ships as source and is already correct for ABI 5; the version check is
-  a minimum, so do not "fix" it to an exact match.
-- `kApiVersion`. It is 5 in this source; changing it invalidates the compatibility story.
+- The managed C# layer. It ships as source and is already correct for API 12; the version check
+  is a minimum (`MinimumApiVersion = 6`), so do not "fix" it to an exact match.
+- `kApiVersion`. It is 12 in this source; changing it invalidates the compatibility story.
 - The other platforms' payloads, and any `.meta` file.
 - `Native~/Tests~/import_uv_fixture.usda`. Its two fake texture paths
   (`fixture_cutout.png`, `fixture_blend.png`) are intentional — the importer only reports the

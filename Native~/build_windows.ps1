@@ -2,6 +2,11 @@ param(
     [Parameter(Mandatory = $true)]
     [string] $OpenUsdRoot,
 
+    # The OpenUSD source tree the install was built from; the image codecs compile their inflater
+    # from the libdeflate it vendors. Defaults to <OpenUsdRoot>\openusd-src, where
+    # Native~\build_openusd.py leaves it.
+    [string] $OpenUsdSrc = "",
+
     [string] $Configuration = "Release",
 
     [string] $Generator = "Visual Studio 17 2022",
@@ -78,6 +83,10 @@ New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 # Always passed, ON or OFF: CMake drops it from the cache after each configure, so the skip applies
 # to this build only.
 $SkipProvenanceValue = if ($SkipSourceProvenance) { "ON" } else { "OFF" }
+$OpenUsdSrcArguments = @()
+if ($OpenUsdSrc -ne "") {
+    $OpenUsdSrcArguments = @("-DOPENUSD_SRC=$((Resolve-Path $OpenUsdSrc).Path)")
+}
 
 & $CMakeCommand.Source `
     -S $NativeDir `
@@ -86,7 +95,8 @@ $SkipProvenanceValue = if ($SkipSourceProvenance) { "ON" } else { "OFF" }
     -A x64 `
     -DOPENUSD_ROOT="$OpenUsdRoot" `
     -DCMAKE_INSTALL_PREFIX="$InstallDir" `
-    -DUSD_TOOLKIT_SKIP_SOURCE_PROVENANCE="$SkipProvenanceValue"
+    -DUSD_TOOLKIT_SKIP_SOURCE_PROVENANCE="$SkipProvenanceValue" `
+    @OpenUsdSrcArguments
 if ($LASTEXITCODE -ne 0) {
     throw "CMake configure failed."
 }
@@ -145,10 +155,28 @@ function Copy-RuntimeDirectory {
     # 26.08 and survived the 26.05 rebuild this way, so a 26.05 runtime was registering a plugin
     # descriptor from a version it was not built from -- and the integrity manifest then recorded
     # that stale file as expected content.
-    if (Test-Path $Destination) { Remove-Item -Recurse -Force $Destination }
+    #
+    # The Unity .meta files are kept, though. They are committed with the payload and carry the
+    # GUIDs everything else refers to; deleting them made every rebuild show hundreds of deleted
+    # files, and a new Editor import would mint different GUIDs. Everything else goes, and a .meta
+    # left without its file or folder after the copy goes too, so nothing stale survives.
+    if (Test-Path $Destination) {
+        Get-ChildItem $Destination -Recurse -Force -File |
+            Where-Object { $_.Extension -ne ".meta" } | Remove-Item -Force
+    }
     New-Item -ItemType Directory -Force -Path $Destination | Out-Null
     Get-ChildItem $SourceDir -Force | ForEach-Object {
         Copy-Item $_.FullName -Destination $Destination -Recurse -Force
+    }
+
+    # Twice: removing a stale file's .meta can empty its folder, and that folder's own .meta is
+    # orphaned only once the empty folder is gone.
+    foreach ($pass in 1, 2) {
+        Get-ChildItem $Destination -Recurse -Force -File -Filter "*.meta" | Where-Object {
+            -not (Test-Path -LiteralPath ($_.FullName.Substring(0, $_.FullName.Length - 5)))
+        } | Remove-Item -Force
+        Get-ChildItem $Destination -Recurse -Force -Directory | Sort-Object { $_.FullName.Length } -Descending |
+            Where-Object { -not (Get-ChildItem -LiteralPath $_.FullName -Force) } | Remove-Item -Force
     }
 }
 
@@ -179,6 +207,24 @@ if ($LASTEXITCODE -ne 0) {
 
 Copy-DllsFromDirectory $OpenUsdBin
 Copy-DllsFromDirectory $OpenUsdLib
+
+# MaterialX is a link-time dependency of usd_ms.dll, not an optional plugin: with --materialx the
+# monolithic library absorbs usdMtlx and imports MaterialXCore.dll and MaterialXFormat.dll. Leaving
+# them out does not degrade to "MaterialX is missing" -- usd_rt.dll fails to load and the whole
+# toolkit is dead. The name filter above does not match them, so they are named here, and the
+# build fails early if the install was not built with --materialx (same rule as build_linux.sh).
+$UsdMonolithicSource = Join-Path $OpenUsdLib "usd_ms.dll"
+foreach ($mtlx in @("MaterialXCore.dll", "MaterialXFormat.dll")) {
+    if (-not (Select-String -Path $UsdMonolithicSource -Pattern ([regex]::Escape($mtlx)) -Encoding ascii -Quiet)) {
+        throw "usd_ms.dll does not import $mtlx; was OpenUSD built with --materialx?"
+    }
+    $mtlxSource = @($OpenUsdBin, $OpenUsdLib) | ForEach-Object { Join-Path $_ $mtlx } |
+        Where-Object { Test-Path $_ } | Select-Object -First 1
+    if ($null -eq $mtlxSource) {
+        throw "$mtlx was not found under $OpenUsdBin or $OpenUsdLib."
+    }
+    Copy-Item $mtlxSource -Destination $InstallDir -Force
+}
 Copy-RuntimeDirectory $OpenUsdLibUsd "lib\usd"
 Copy-RuntimeDirectory $OpenUsdPlugin "plugin"
 Copy-RuntimeDirectory $OpenUsdShare "share"
@@ -271,7 +317,12 @@ they had been altered.
 "@
     }
 
-    $ToSign = @(Get-ChildItem $InstallDir -Filter "*.dll" -File | ForEach-Object { $_.FullName })
+    # Intel's TBB is left alone: the DLL is the one from Intel's tbb-2020.3-win.zip and already
+    # carries Intel's Authenticode signature, which signing it here would replace with ours (see
+    # .yamato/sign.yml). tbb.dll is the name a payload built before the rename carries.
+    $ToSign = @(Get-ChildItem $InstallDir -Filter "*.dll" -File |
+        Where-Object { $_.Name -ne "tbb_usdrt.dll" -and $_.Name -ne "tbb.dll" } |
+        ForEach-Object { $_.FullName })
     if ($ToSign.Count -gt 0) {
         & $SignToolPath sign /fd SHA256 /sha1 $SigningCertificateThumbprint `
             /tr $TimestampUrl /td SHA256 @ToSign

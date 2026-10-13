@@ -8,17 +8,22 @@ source has already been fetched and compiled. This script covers that earlier li
 exact upstream revision each payload is built from and refuses a build that is not on it
 (SECURITY-282834, the trust-chain half of the code-signing review).
 
-Under the flags this package builds OpenUSD with
+Under the flags this package builds OpenUSD with (USD_BUILD_FLAGS in Native~/generate_sbom.py)
 
     --build-variant release --build-monolithic --no-python --no-imaging --no-usdview
-    --no-examples --no-tutorials --no-tests --no-materialx
+    --no-examples --no-tutorials --no-tests --materialx
+    --build-args MaterialX,-DMATERIALX_BUILD_RENDER=OFF
 
-`build_usd.py` resolves exactly one downloaded dependency, TBB; everything else in the payload is
-compiled from the OpenUSD tree itself, including the four libraries OpenUSD vendors in
-(`pxr/base/tf/pxrCLI11`, `pxrDoubleConversion`, `pxrLZ4`, `pxrTslRobinMap`). So the whole payload
-is pinned by three things per platform, and that is what the records in Native~/dependency-sources
-hold: the OpenUSD commit, the TBB archive, and the Unity patch applied to that commit before it is
-built (Native~/patches -- it replaces the vendored LZ4 1.9.2 with 1.10.0, SECURITY-282834).
+`build_usd.py` resolves two downloaded dependencies, TBB and MaterialX 1.39.4 (which vendors
+pugixml into MaterialXFormat); everything else in the payload is compiled from the OpenUSD tree
+itself, including the four libraries OpenUSD vendors in (`pxr/base/tf/pxrCLI11`,
+`pxrDoubleConversion`, `pxrLZ4`, `pxrTslRobinMap`) and libdeflate 1.18, which our own wrapper
+compiles from `pxr/imaging/plugin/hioOpenEXR/OpenEXR/deflate` although OpenUSD itself is built
+--no-imaging (Native~/src/UsdDeflate.c; Native~/CMakeLists.txt checks those files against their
+digests). So the whole payload is pinned by four things per platform, and that is what the records
+in Native~/dependency-sources hold: the OpenUSD commit, the TBB archive, the MaterialX archive, and
+the Unity patch applied to that commit before it is built (Native~/patches -- it replaces the
+vendored LZ4 1.9.2 with 1.10.0, SECURITY-282834).
 
     # the clone is the pinned revision, unmodified, from the recorded remote
     python3 Native~/verify_upstream_sources.py --platform linux --openusd-src /opt/usd-26.05/src
@@ -295,6 +300,10 @@ def scan_record_problems(row: Row, rows, text: str):
     if fields["Commit scanned"] != row.git_commit:
         problems.append(f"scanned commit {fields['Commit scanned'][:12]}, the record pins {row.git_commit[:12]} "
                         "(give the full SHA)")
+    # An archive row is pinned by its digest. MaterialX pins no commit ("-"), so without this a record
+    # saying "Commit scanned: -" passed without naming what was scanned at all.
+    if row.sha256 != "-" and row.sha256 not in text:
+        problems.append(f"does not name the archive scanned (sha256 {row.sha256[:12]}...); give the full digest")
     try:
         datetime.strptime(fields["Date"], "%Y-%m-%d")
     except ValueError:

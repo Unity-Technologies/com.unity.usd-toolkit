@@ -73,6 +73,7 @@ On Windows, the target machine needs the Microsoft Visual C++ Redistributable.
 | PBR textures | Yes | Written as PNGs to `<usd-name>_textures/`. |
 | `.usdz` packages | Yes | With an optional ARKit-compatible mode. |
 | Inactive objects and disabled renderers | Yes | Authored as `visibility = "invisible"`. |
+| Keep USD composition | Yes | Sublayers, references, instancing and overrides, with `UsdCompositionMode.Preserve`. See [Keep USD composition](#keep-usd-composition). Needs native API 6. |
 | Skinned meshes and animation | No | |
 
 ### Import
@@ -80,16 +81,29 @@ On Windows, the target machine needs the Microsoft Visual C++ Redistributable.
 | Feature | Supported | Notes |
 | --- | --- | --- |
 | `.usd`, `.usda`, `.usdc`, `.usdz` | Yes | Textures inside a `.usdz` are supported. |
-| Static `UsdGeomMesh` | Yes | |
-| Transform hierarchy | Yes | Every transformable prim becomes a Unity `Transform`. |
+| Static `UsdGeomMesh` | Yes | Smooth normals are generated when none are authored. Face-varying normals and UVs that match are merged into shared vertices. |
+| Implicit surfaces | Yes | `Cube`, `Sphere`, `Cylinder`, `Cone`, `Capsule` and `Plane` become meshes. |
+| `PointInstancer` | Yes | Each instance becomes its own GameObjects. Prototypes aren't drawn in place. |
+| Subdivision surfaces | Partly | The control cage is imported without subdividing, with a warning. |
+| Transform hierarchy | Yes | Every transformable prim becomes a Unity `Transform`. Typeless and custom-schema prims become empty GameObjects. Prims with `proxy` or `guide` purpose are skipped. |
 | Multiple materials per mesh | Yes | Each `materialBind` subset becomes a submesh. |
 | `UsdPreviewSurface` materials and PBR textures | Yes | Albedo, normal, metallic-smoothness, emission. |
+| MaterialX materials | Yes | `standard_surface`, `open_pbr_surface` and `UsdPreviewSurface` nodes, authored in the stage or in a referenced `.mtlx` file. See [Materials and textures](#7-materials-and-textures). |
+| MDL materials | Partly | Colors and textures of `OmniPBR`, `OmniSurface` and `OmniGlass`. Other MDL materials aren't read. |
+| Primvar colors | Yes | A `UsdPrimvarReader` on `diffuseColor`, such as `displayColor`, sets the base color. |
+| Meshes without a material | Yes | Get a shared grey `UsdDefaultMaterial`. See `AssignDefaultMaterial`. |
+| Shared meshes | Yes | Instances with identical geometry share one Unity `Mesh`. See `ShareIdenticalMeshes`. |
+| Lights | Yes | UsdLux distant, sphere, disk, cylinder and rect lights become Unity `Light`s. Intensity mapping is heuristic. Needs native API 7. |
+| Dome lights | Partly | Recorded on a `UsdDomeLight` component. With `ApplyDomeLightToEnvironment`, they set the ambient color and a panoramic skybox. Needs native API 7. |
+| Cameras | Yes | `UsdGeomCamera` becomes a disabled Unity `Camera`. Needs native API 7. |
+| Spatial audio | Partly | `UsdMediaSpatialAudio` becomes an `AudioSource` with a `UsdSpatialAudio` component. The clip isn't loaded. Needs native API 7. |
 | Asynchronous import | Yes | Parses off the main thread and creates objects across several frames. |
 | Statistics preview | Yes | Mesh, material, triangle and vertex counts before importing. |
 | Folder scanning | Yes | `UsdLibraryScanner.ScanFolder`. |
-| Up axis and unit conversion | No | Reported, but not applied. See [Up axis and units](#up-axis-and-units). |
-| Skinned meshes, animation, variant sets, payload streaming | No | |
-| Materials other than `UsdPreviewSurface`, including MaterialX | No | |
+| Up axis and unit conversion | Yes | Applied on the import root by default. See [Up axis and units](#up-axis-and-units). |
+| Variant selection and payload loading | Yes | Choose variants and which payloads load. See [Variant sets and payloads](#variant-sets-and-payloads). Needs native API 6. |
+| Composition, instancing | Yes | References, payloads, inherits, specializes and instances are composed; each instance becomes its own GameObjects. |
+| Skinned meshes, animation | No | |
 | Physics schemas | No | |
 
 ## 3. Install the package
@@ -185,6 +199,68 @@ With `PreserveHierarchy`, the export root becomes the USD root prim, and each ch
 
 In Play mode, the exporter reads meshes without **Read/Write Enabled** back from the GPU, so you don't need to reimport shipped content. Set `RequireReadableMeshes = false` to allow this. GPU readback needs a graphics device; in batch mode or with `-nographics`, enable **Read/Write Enabled** on the meshes instead.
 
+### Keep USD composition
+
+By default the exporter writes every object out in full, into one layer. Set `Composition = UsdCompositionMode.Preserve` to keep USD composition instead. Three kinds of content are then written as composition rather than as copies.
+
+**An imported stage is written back as overrides on its source file.** The importer adds a `UsdStageSource` component to the root it creates and a `UsdPrimSource` component to every object, recording the prim each object stands for and the state it arrived in. When the export root is that import root, the output sublayers the source file and holds only what changed in Unity:
+
+| Change in Unity | Written as |
+| --- | --- |
+| Moved, rotated or scaled an object | `over` with an `xformOp:transform` |
+| Deactivated an object, or disabled a renderer | `visibility = "invisible"` |
+| Deleted an object | `active = false` on the prim |
+| Added an object | A new prim under its parent's prim |
+| Imported with a variant selection | That variant selection |
+| Changed an object below an instance | `instanceable = false` on the instance, then the change |
+| Replaced a mesh or its materials | `active = false` on the source prim and a new prim beside it |
+
+```csharp
+UsdImportResult imported = UsdImporter.Import(sourcePath);
+// ... the user edits imported.RootObject ...
+UsdExporter.ExportGameObjectWithResult(imported.RootObject, editedPath, new UsdExportOptions
+{
+    Composition = UsdCompositionMode.Preserve,
+});
+```
+
+The output looks like this, and every reference, payload, variant set, inherit and specialize in the source survives untouched:
+
+```usda
+#usda 1.0
+(
+    defaultPrim = "World"
+    subLayers = [@./scene.usda@]
+)
+
+over "World"
+{
+    over "Robot" { matrix4d xformOp:transform = ( ... ) ... }
+    over "Heavy" ( active = false ) { }
+}
+```
+
+The output depends on the source file, so keep them together, or export to `.usdz`, which packages the source with it. The output can't replace its own source file. Objects are identified by their prim path, not their name, so renaming an object changes nothing. Moving an object under another parent can't be expressed as an override: the original prim is deactivated, and the object is written as new content where it now is.
+
+When an imported stage sits deeper in the exported hierarchy, or `ImportedContent = UsdImportedContentMode.ReferenceSource`, the object that stands for the stage's default prim references the source file, and the changes are written as overrides through that reference. Root prims other than the default prim can't come through a reference, so they're written as content. `UsdImportedContentMode.Inline` writes imported objects like any others.
+
+**Prefab instances become references to one asset per prefab.** The prefab is written once, and each instance references it. What an instance changes (a moved child, a hidden child, an added or removed child, a different mesh or material) is written as overrides on that instance. An instance with no changes is also marked `instanceable`. `Layout` controls where the prefab assets go:
+
+| Layout | Result |
+| --- | --- |
+| `SingleFile` (default) | One file. Prefab assets are `class` prims under `/UnityPrototypes`, referenced internally. |
+| `FolderWithAssets` | The scene file, plus one file per prefab in `<usd-name>_assets/`, each referenced by a relative path. |
+
+An output path ending in `.usdz` packages either layout, asset files included.
+
+Unity only keeps the link between a prefab and its instances in the Editor. To carry it into Play mode and players, the package adds a `UsdPrefabMarker` component to every prefab instance root of a scene when the scene is built or enters Play mode. Only that copy of the scene changes; scene files and prefabs on disk don't. For a prefab instantiated at runtime, use `UsdPrefabMarker.Instantiate(prefab, parent)` instead of `Object.Instantiate`, or call `UsdPrefabMarker.Attach(instance, prefab)`. A plain `Object.Instantiate` copy has no link and is exported as ordinary objects. In the Editor outside Play mode, the exporter reads the prefab link directly. To turn off the automatic markers, define the scripting symbol `USD_TOOLKIT_DISABLE_PREFAB_MARKERS`.
+
+**Repeated meshes become instances of one prototype** when `ShareMeshes = true`. Objects that share one `Mesh` and the same materials reference a single prototype mesh and are marked `instanceable`.
+
+`UsdExportResult` reports `ReferenceCount`, `OverrideCount`, `PrototypeCount`, the `SourceLayer` an override export depends on, and the `AssetFiles` it wrote.
+
+`Preserve` always keeps the hierarchy, whatever `TransformPolicy` says. It needs native API 6; with an older native plugin, the export throws an exception that says so.
+
 ### Export options
 
 | Option | Default | Description |
@@ -209,6 +285,11 @@ In Play mode, the exporter reads meshes without **Read/Write Enabled** back from
 | `CaptureNativeDiagnostics` | `false` | Captures OpenUSD warnings and errors. |
 | `NativeDiagnosticsLogPath` | `null` | Writes captured diagnostics to this file. |
 | `LogExportSummary` | `false` | Logs a summary after a successful export. |
+| `Composition` | `Flatten` | `Flatten` writes every object in full. `Preserve` keeps USD composition. See [Keep USD composition](#keep-usd-composition). |
+| `Layout` | `SingleFile` | With `Preserve`: `SingleFile` or `FolderWithAssets`. |
+| `ImportedContent` | `OverrideSource` | With `Preserve`: how imported stages are written. `OverrideSource`, `ReferenceSource` or `Inline`. |
+| `ExportPrefabsAsReferences` | `true` | With `Preserve`: writes each prefab once and references it from its instances. |
+| `ShareMeshes` | `false` | With `Preserve`: objects that share a mesh and materials reference one prototype. |
 
 ## 5. Import at runtime
 
@@ -233,6 +314,16 @@ UsdImportResult result = await UsdImporter.ImportAsync(path, new UsdImportOption
 
 `ImportAsync` reads the stage on a worker thread and creates GameObjects on the main thread, spread across frames so the application stays responsive. Call it from the main thread. To import synchronously, use `UsdImporter.Import`.
 
+By default (`StreamTextures = true`), `ImportAsync` returns as soon as the hierarchy, meshes and untextured materials exist, and attaches the textures as they finish decoding on a worker thread. Until then a material shows its authored constant values. Before you export, capture, save a prefab or read material textures, await `UsdImportResult.TexturesReady`:
+
+```csharp
+UsdImportResult result = await UsdImporter.ImportAsync(path);
+await result.TexturesReady; // every texture is on its material
+UsdExporter.ExportGameObject(result.RootObject, outputPath);
+```
+
+`TexturesReady` never faults. A texture that fails to load is logged as a warning, and its material keeps its constant values. If the import root is destroyed before the textures arrive, the remaining textures are dropped and their memory is freed. To have `ImportAsync` return only after everything, textures included, is loaded, set `StreamTextures = false`.
+
 To list the USD files in a folder, with their thumbnails:
 
 ```csharp
@@ -241,22 +332,41 @@ IReadOnlyList<UsdLibraryItem> items = UsdLibraryScanner.ScanFolder(folderPath);
 
 ### Up axis and units
 
-The importer converts from USD's coordinate system to Unity's, but it doesn't rotate or scale the stage for its `upAxis` or `metersPerUnit`. Both values are returned in `UsdImportPreviewInfo` and `UsdImportResult`.
+The importer converts from USD's coordinate system to Unity's and, with `ApplyStageUpAxisAndUnits = true` (the default), applies the stage's `upAxis` and `metersPerUnit` to the import root, so the content arrives Y-up and in meters. A Z-up stage, such as one from Isaac Sim, gets a -90 degree rotation about X on the root, and the root is scaled by `metersPerUnit` (0.01 for a centimeter stage).
 
-Stages from Isaac Sim are Z-up by default, so they appear rotated in Unity. To correct this, import under a parent GameObject, and rotate and scale that parent:
+The correction sits only on the root's local rotation and scale. Vertices and every prim's local transform stay exactly as authored, so a `Preserve` export writes no override for it. `UsdImportResult.StageCorrectionRotation` and `UsdImportResult.StageCorrectionScale` report what was applied, and `UpAxis` and `MetersPerUnit` are still returned in `UsdImportPreviewInfo` and `UsdImportResult`.
+
+To get the stage's raw coordinates under an identity root, as imports did before, turn the correction off:
 
 ```csharp
-var stageRoot = new GameObject("UsdStageRoot").transform;
-
-UsdImportResult result = await UsdImporter.ImportAsync(path, new UsdImportOptions { Parent = stageRoot });
-
-if (result.UpAxis == "Z")
+UsdImportResult result = await UsdImporter.ImportAsync(path, new UsdImportOptions
 {
-    stageRoot.localRotation = Quaternion.Euler(-90f, 0f, 0f); // Stage +Z becomes Unity +Y.
-}
-
-stageRoot.localScale = Vector3.one * (float)result.MetersPerUnit; // Stage units to meters.
+    ApplyStageUpAxisAndUnits = false
+});
 ```
+
+### Variant sets and payloads
+
+Choose a variant before the stage is composed, and choose which payloads load. The source file isn't changed.
+
+```csharp
+var options = new UsdImportOptions { LoadPayloads = false };
+options.VariantSelections.Add(new UsdVariantSelection("/World/Robot", "color", "red"));
+options.PayloadsToLoad.Add("/World/Robot/Arm");
+
+UsdImportResult result = UsdImporter.Import(path, options);
+```
+
+Selections apply in list order, so a variant set nested inside another set's variant can follow the outer selection. A selection that doesn't exist is skipped with a warning in the diagnostics. With `LoadPayloads = false`, only the prims in `PayloadsToLoad` load their payloads. An unloaded payload's own prim still becomes an empty GameObject, so it keeps its place in the hierarchy.
+
+`result.Source` (a `UsdStageSource`) lists what the stage offers: `VariantSets` with their variants and current selection, `Payloads` and whether each was loaded, and the direct references, payloads, inherits, specializes and relocates in `Arcs`. To switch a variant, import again with the options `CreateOptionsWithVariant` returns:
+
+```csharp
+UsdImportOptions next = result.Source.CreateOptionsWithVariant("/World/Robot", "color", "blue");
+UsdImportResult switched = UsdImporter.Import(result.Source.SourcePath, next);
+```
+
+A `Preserve` export writes the import's variant selections back, so the output shows the variants that were chosen in Unity.
 
 ### Import options
 
@@ -264,16 +374,36 @@ stageRoot.localScale = Vector3.one * (float)result.MetersPerUnit; // Stage units
 | --- | --- | --- |
 | `Parent` | `null` | The parent `Transform` of the imported root. |
 | `RootObjectName` | `null` | The root GameObject name. Uses the file name when empty. |
-| `ImportMaterials` | `true` | Creates Unity materials from `UsdPreviewSurface` values. |
+| `ImportMaterials` | `true` | Creates Unity materials from `UsdPreviewSurface`, MaterialX and MDL (`OmniPBR`, `OmniSurface`, `OmniGlass`) values. See [Materials and textures](#7-materials-and-textures). |
 | `ImportTextures` | `true` | Loads the PBR textures that materials reference. |
 | `IncludeInvisible` | `true` | Also creates prims marked `visibility = "invisible"`. |
 | `GenerateColliders` | `false` | Adds a `MeshCollider` to each mesh. |
-| `RecalculateNormalsIfMissing` | `true` | Computes normals when the file has none. |
+| `RecalculateNormalsIfMissing` | `true` | Computes smooth normals when the file has none. |
 | `AllowExternalAssetPaths` | `false` | Allows textures outside the stage folder. See [Untrusted USD files](#8-untrusted-usd-files). |
 | `MaxMillisecondsPerFrame` | `10f` | The time `ImportAsync` can spend on the main thread each frame. |
-| `ProgressCallback` | `null` | Receives progress from `0` to `1` and the current phase, on the main thread. |
+| `StreamTextures` | `true` | `ImportAsync` returns before textures are attached. Await `UsdImportResult.TexturesReady` for the final materials. Ignored by `UsdImporter.Import`. |
+| `ProgressCallback` | `null` | Receives progress from `0` to `1` and the current phase, on the main thread. With `StreamTextures`, `ImportAsync` returns at `0.9` ("Streaming textures"), and `1` ("Done") is reported when the textures are attached. |
 | `CaptureNativeDiagnostics` | `false` | Captures OpenUSD warnings and errors. |
 | `NativeDiagnosticsLogPath` | `null` | Writes captured diagnostics to this file. |
+| `VariantSelections` | empty | Variant selections to compose with, in order. See [Variant sets and payloads](#variant-sets-and-payloads). |
+| `LoadPayloads` | `true` | When `false`, only the prims in `PayloadsToLoad` load their payloads. |
+| `PayloadsToLoad` | empty | Payload prims to load when `LoadPayloads` is `false`. |
+| `RecordSource` | `true` | Adds `UsdStageSource` and `UsdPrimSource` components, which a `Preserve` export needs to write only the changes. |
+| `ApplyStageUpAxisAndUnits` | `true` | Applies the stage's `upAxis` and `metersPerUnit` to the import root. See [Up axis and units](#up-axis-and-units). |
+| `AssignDefaultMaterial` | `true` | Gives a mesh or submesh with no material binding a shared grey lit material, `UsdDefaultMaterial`, instead of none, which renders magenta under URP and HDRP. Only used while `ImportMaterials` is on. |
+| `ShareIdenticalMeshes` | `true` | Builds one Unity `Mesh` per distinct geometry and shares it among every imported mesh with the same points, indices, normals, UV sets and submesh ranges, as instanceable prims and `PointInstancer` instances produce. Editing `MeshFilter.sharedMesh` changes every object that uses it; `MeshFilter.mesh` gives an object its own copy. Turn it off to get one `Mesh` per prim. |
+| `ImportLights` | `true` | Adds a Unity `Light` for each UsdLux distant, sphere, disk, cylinder and rect light. See [Lights, cameras and spatial audio](#lights-cameras-and-spatial-audio). |
+| `ImportCameras` | `true` | Adds a disabled Unity `Camera` for each `UsdGeomCamera`, so the scene's existing camera keeps rendering until you enable one. |
+| `ImportSpatialAudio` | `true` | Adds an `AudioSource` and a `UsdSpatialAudio` component for each `UsdMediaSpatialAudio`. The clip isn't loaded. |
+| `ApplyDomeLightToEnvironment` | `false` | Applies a `UsdLuxDomeLight` to the scene: its color times intensity becomes the flat ambient color, and a PNG or JPG texture becomes a panoramic skybox. This changes `RenderSettings` for the whole scene. The dome is always recorded on a `UsdDomeLight` component. |
+
+### Lights, cameras and spatial audio
+
+These need native API 7. The Windows payload has it today. With a native plugin at API 6 (currently Linux and macOS, until their plugin is rebuilt), the import still works and these components are simply not added.
+
+- **Lights and cameras.** USD lights emit, and cameras look, along their local -Z axis, and Unity's along +Z. The `Light` or `Camera` therefore sits on a child GameObject turned 180 degrees about Y and marked with `UsdImportHelperObject`. That child is not a prim, so exporters skip it and everything below it. USD has no single unit convention for light intensity, so the mapping to Unity is heuristic. Check the result against the source renderer.
+- **Dome lights.** Unity has no dome light. The authored color, intensity and texture path are recorded on a `UsdDomeLight` component. Set `ApplyDomeLightToEnvironment = true` to also apply them to `RenderSettings`.
+- **Spatial audio.** The importer sets up an `AudioSource` but doesn't load the clip, because audio files load asynchronously. Load `UsdSpatialAudio.FilePath`, for example with `UnityWebRequestMultimedia`, and assign the clip.
 
 ## 6. Threading
 
@@ -308,6 +438,17 @@ Source textures don't need **Read/Write Enabled**. Each texture is exported once
 ### Import
 
 Imported materials use the first shader available from `Universal Render Pipeline/Lit`, `HDRP/Lit` and `Standard`. Textures are assigned to `_BaseMap`, `_BumpMap`, `_MetallicGlossMap` and `_EmissionMap`, with tiling and offset from `UsdTransform2d`. Each texture file is loaded once and shared between materials.
+
+The importer reads these surface shaders:
+
+| Source | What is read |
+| --- | --- |
+| `UsdPreviewSurface` | Base color, opacity, metallic, roughness, emission and their textures. |
+| MaterialX (`standard_surface`, `open_pbr_surface`, `UsdPreviewSurface`) | The same values and textures, from a material authored in the stage or in a referenced `.mtlx` file. |
+| MDL `OmniPBR`, `OmniSurface`, `OmniGlass` | Colors and textures. Other MDL materials aren't read. |
+| `UsdPrimvarReader` on `diffuseColor` | The primvar color, such as `displayColor`, as the base color. |
+
+Textures referenced from a material layer in a sub-folder resolve relative to that layer. A mesh or submesh with no material binding gets the shared grey `UsdDefaultMaterial` unless `AssignDefaultMaterial = false`.
 
 ### Albedo texture in the metallic slot
 
@@ -379,9 +520,10 @@ For setup instructions, see the [Live Sync Example guide](../Samples~/Runtime%20
 | The surface renders black in Isaac Sim | The albedo texture is also in the metallic slot. | See [Albedo texture in the metallic slot](#albedo-texture-in-the-metallic-slot). |
 | Textures are missing after import | A texture path points outside the stage folder. | Read the warning in the Console. For a trusted file, set `AllowExternalAssetPaths = true`. |
 | Some meshes are missing after import | A mesh has inconsistent face data. | The warning in the Console names the prim. Fix the source file. |
-| The imported stage is rotated | The stage is Z-up. | See [Up axis and units](#up-axis-and-units). |
+| The imported stage is rotated or scaled differently than expected | `ApplyStageUpAxisAndUnits` applies the stage's `upAxis` and `metersPerUnit` on the import root. | See [Up axis and units](#up-axis-and-units). Set `ApplyStageUpAxisAndUnits = false` to keep the stage's raw coordinates. |
+| A smooth surface looks faceted after import | The mesh is a subdivision surface, and only its control cage is imported. | The warning names the prim. Export a subdivided mesh from the source tool. |
 | No file is written | The output folder isn't writable, or the export threw an exception. | Write under `Application.persistentDataPath`, and check the Console. |
-| The package works in the Editor but not in a player | The player targets an unsupported platform, or the native files are missing from the build. | Build for Windows x64 or macOS, and check the player's `Plugins` folder. |
+| The package works in the Editor but not in a player | The player targets an unsupported platform, or the native files are missing from the build. | Build for Windows x64, macOS or Linux x64, and check the player's `Plugins` folder. |
 
 To print the native plugin version, OpenUSD version and search paths:
 
@@ -411,6 +553,10 @@ All public types are in the `Unity.USDToolkit` namespace.
 | `UsdRuntimeInfo` | Native plugin version, OpenUSD version and search paths. |
 | `UsdExportException`, `UsdImportException` | Errors, with diagnostics. |
 | `UsdTransformPolicy` | `BakedMesh` or `PreserveHierarchy`. |
+| `UsdCompositionMode`, `UsdExportLayout`, `UsdImportedContentMode` | Composition settings for export. |
+| `UsdStageSource`, `UsdPrimSource` | Components that record where imported objects came from. |
+| `UsdPrefabMarker` | Links a runtime object to its prefab for export. |
+| `UsdVariantSelection`, `UsdVariantSetInfo`, `UsdPayloadInfo`, `UsdCompositionArcInfo`, `UsdPrimCompositionFlags` | Composition data of an imported stage. |
 
 Types in `Unity.USDToolkit.Native` are internal and can change without notice.
 

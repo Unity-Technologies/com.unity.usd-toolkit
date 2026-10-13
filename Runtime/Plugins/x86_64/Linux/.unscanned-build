@@ -1,2 +1,2 @@
-Built against /opt/usd-26.05-lz4/install, which build_openusd.py did not build with --require-scan.
+Built against /opt/usd-26.05/install, which build_openusd.py did not build with --require-scan.
 Not for release: Native~/generate_native_hashes.py --release refuses this payload.
