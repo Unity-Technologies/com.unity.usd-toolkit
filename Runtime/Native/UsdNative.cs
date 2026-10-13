@@ -16,11 +16,13 @@ namespace Unity.USDToolkit.Native
         // topology and asset-path fixes among them — are simply absent from an older binary, and
         // nothing in the version number says so. An older plugin is now refused outright.
         // API 6 added composition (layers, references, overrides, variant/payload control). A 5
-        // was accepted while the Windows and Linux payloads caught up; all three desktop payloads
-        // are API 6 as of 2026-10-10 (Windows a9e4036), so the match is exact again, for the same
-        // reason as above.
+        // was accepted while the Windows and Linux payloads caught up; since 2026-10-10 every
+        // desktop payload is at least 6, so a 5 is refused. Newer plugins load, and the features
+        // below switch on by the version the plugin reports. LatestApiVersion is the version the
+        // source is written against (kApiVersion in UsdExporter.cpp) and is only quoted in the
+        // mismatch message.
         internal const int MinimumApiVersion = 6;
-        internal const int LatestApiVersion = 7;
+        internal const int LatestApiVersion = 12;
         // usdz packaging and resolver-backed asset reads (textures inside a .usdz).
         internal const int UsdzApiVersion = 5;
         // Sublayers, references, payloads, instancing, variant selections and sparse overrides

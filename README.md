@@ -174,10 +174,10 @@ On import, `UsdImportOptions.VariantSelections` picks variants and `LoadPayloads
 | | Export (`UsdExporter`) | Import (`UsdImporter`) |
 | --- | --- | --- |
 | **Formats** | `.usd`, `.usda`, `.usdc`, `.usdz` (with an optional ARKit-compatible mode) | `.usd`, `.usda`, `.usdc`, `.usdz` |
-| **Geometry** | Static meshes, including meshes without **Read/Write Enabled** | Static `UsdGeomMesh`, implicit surfaces (`Cube`, `Sphere`, `Cylinder`, `Cone`, `Capsule`, `Plane`) as meshes, and `PointInstancer` instances drawn from their arrays (culled by cell, with optional Mesh LOD for prototypes), with optional `MeshCollider`. Smooth normals are generated when none are authored. Subdivision surfaces arrive as their control cage, with a warning |
+| **Geometry** | Static meshes, including meshes without **Read/Write Enabled** | Static `UsdGeomMesh`, implicit surfaces (`Cube`, `Sphere`, `Cylinder`, `Cone`, `Capsule`, `Plane`) as meshes, with optional `MeshCollider`. `PointInstancer` placements are drawn from their arrays by a `UsdPointInstancer` component (culled by cell; Mesh LOD levels for the prototypes from **GameObject > USD > Generate Mesh LODs for Point Instancers**), not as GameObjects, so instances cannot be selected one by one and get no collider. Smooth normals are generated when none are authored. Subdivision surfaces arrive as their control cage, with a warning |
 | **Transforms** | Baked into mesh points, or kept as an `Xform` hierarchy | Every transformable prim becomes a GameObject, including typeless and custom-schema prims; `proxy` and `guide` purpose prims are skipped. The stage's up axis and units are applied on the import root |
 | **Materials** | `UsdPreviewSurface`: base color, opacity, metallic, roughness, emission; one binding per submesh | `UsdPreviewSurface`, MaterialX (`standard_surface`, `open_pbr_surface`, `UsdPreviewSurface`, including `.mtlx` files) and MDL `OmniPBR`, `OmniSurface` and `OmniGlass` colors and textures become URP, HDRP or Built-in materials. A `UsdPrimvarReader` color such as `displayColor` on `diffuseColor` is read. Unbound meshes get a grey `UsdDefaultMaterial` |
-| **Textures** | Albedo, normal, metallic-smoothness and emission as PNG, with UV tiling and offset | The same set from PNG, JPEG and OpenEXR, including UDIM sets (stitched into an atlas), separate metallic, roughness and occlusion maps and OmniPBR ORM maps (packed for Unity), `material:binding:full` and `preview` bindings, textures inside `.usdz` packages and textures referenced from material layers in sub-folders. Block-compressed (BC1/BC3) by default |
+| **Textures** | Albedo, normal, metallic-smoothness and emission as PNG, with UV tiling and offset | The same set from PNG, OpenEXR and JPEG (JPEG through Unity's decoder on the main thread), including UDIM sets of PNG or EXR tiles (stitched into an atlas), separate metallic, roughness and occlusion maps and OmniPBR ORM maps (packed for Unity), `material:binding:full` and `preview` bindings, textures inside `.usdz` packages and textures referenced from material layers in sub-folders. Block-compressed (BC1/BC3) by default |
 | **Lights, cameras, audio** | | UsdLux distant, sphere, disk, cylinder and rect lights become Unity `Light`s, `UsdGeomCamera` becomes a disabled `Camera`, and `UsdMediaSpatialAudio` becomes an `AudioSource` (clip not loaded). A dome light is recorded on `UsdDomeLight` and can set the ambient color and skybox. Needs native API 7 |
 | **Composition** | Sublayers, references, prefab assets, instancing and sparse overrides (`UsdCompositionMode.Preserve`) | Fully composed; variant selection and payload loading control |
 | **Performance** | | Asynchronous import, spread across frames, with textures streamed in after the geometry (`TexturesReady`); textures decoded and compressed in parallel in native code; statistics preview before import, whose stage the import reuses; instances with identical geometry share one `Mesh` |
@@ -189,7 +189,7 @@ On import, `UsdImportOptions.VariantSelections` picks variants and `LoadPayloads
 The package has three layers. Only the C# API is public.
 
 1. **C# API** (`Unity.USDToolkit`): `UsdExporter`, `UsdImporter` and `UsdLibraryScanner` convert between Unity objects and USD data.
-2. **Native plugin** (`UnityUSDToolkitNative`): a C++ library that wraps the OpenUSD API behind a small C interface, called through P/Invoke.
+2. **Native plugin** (`UnityUSDToolkitNative`): a C++ library that wraps the OpenUSD API behind a small C interface, called through P/Invoke. The shipped plugin is native API 12; the package accepts API 6 or newer and switches features on by the version the plugin reports.
 3. **OpenUSD 26.05**: Pixar's OpenUSD libraries and oneTBB, built for each platform and shipped in `Runtime/Plugins`.
 
 ```mermaid
@@ -236,6 +236,7 @@ The package does not depend on `com.unity.formats.usd`, `com.unity.importer.usd`
 | Symptom | Cause | Solution |
 | --- | --- | --- |
 | `DllNotFoundException` | The native libraries are missing or are still Git LFS pointer files. | Run `git lfs pull`. |
+| `native API version mismatch` | A locally built plugin is older than API 6. | Rebuild it from `Native~`, or use the shipped payload. |
 | The surface renders black in Isaac Sim | The albedo texture is also assigned to the metallic slot. | Keep `IgnoreAlbedoInMetallicSlot` enabled (the default), or assign a separate metallic map. |
 | Materials are flat right after `ImportAsync` | Textures stream in after the objects are built. | `await result.TexturesReady` before exporting, capturing or inspecting materials, or set `StreamTextures = false`. |
 | Textures are missing after import | A texture path points outside the stage folder. | Move the textures next to the stage. For files you trust, set `AllowExternalAssetPaths = true`. |

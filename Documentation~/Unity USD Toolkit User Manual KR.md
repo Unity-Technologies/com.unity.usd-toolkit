@@ -40,7 +40,7 @@ Unity USD Toolkit은 Editor와 빌드된 플레이어에서, 실행 중인 Unity
 
 이 패키지는 Unity의 다른 USD 패키지나 USD.NET에 의존하지 않습니다.
 
-C# API는 네이티브 플러그인을 로드할 때 버전을 확인하고, 패키지와 정확히 일치하지 않는 플러그인은 거부합니다. 이를 통해 패키지의 모든 수정 사항이 실제로 실행되는 바이너리에 포함되어 있음을 보장합니다.
+C# API는 네이티브 플러그인을 로드할 때 API 버전을 확인합니다. API 6 이상인 플러그인(`UsdNative.MinimumApiVersion`)은 모두 받아들이고, 그보다 오래된 플러그인은 거부합니다. API 버전으로 구분되지 않는 수정 사항이 오래된 바이너리에는 빠져 있기 때문입니다. API 7~12가 필요한 기능은 로드된 플러그인이 해당 레벨을 갖추면 켜지고, 그렇지 않으면 그 기능만 건너뛰고 나머지 import는 그대로 동작합니다. [네이티브 API 레벨](#네이티브-api-레벨)을 참고하세요.
 
 ## 2. 지원 플랫폼과 기능
 
@@ -83,7 +83,7 @@ Windows에서는 대상 PC에 Microsoft Visual C++ 재배포 가능 패키지가
 | `.usd`, `.usda`, `.usdc`, `.usdz` | 지원 | `.usdz` 내부 텍스처도 지원합니다. |
 | Static `UsdGeomMesh` | 지원 | Normal이 기록되지 않은 mesh는 smooth normal을 생성합니다. 값이 같은 face-varying normal과 UV는 하나의 vertex로 합칩니다. |
 | Implicit surface | 지원 | `Cube`, `Sphere`, `Cylinder`, `Cone`, `Capsule`, `Plane`을 mesh로 만듭니다. |
-| `PointInstancer` | 지원 | 인스턴스마다 별도의 GameObject가 생깁니다. Prototype은 원래 위치에 그리지 않습니다. |
+| `PointInstancer` | 지원 | 각 prototype은 한 번만 import되고 숨겨집니다. Instancer는 `UsdPointInstancer` 컴포넌트를 가진 GameObject 하나가 되며, 이 컴포넌트가 인스턴스 배열의 모든 placement를 `Graphics.RenderMeshInstanced`로 cell 단위 culling을 적용해 그립니다. 인스턴스는 개별 선택이 되지 않고 collider도 없습니다. `invisibleIds`를 반영합니다. [Point instancer](#point-instancer)를 참고하세요. 네이티브 API 8이 필요합니다. |
 | Subdivision surface | 일부 지원 | Subdivision 없이 control cage를 가져오고 경고를 남깁니다. |
 | Transform 계층 | 지원 | Transform을 가진 모든 prim이 Unity `Transform`이 됩니다. 타입이 없거나 custom schema인 prim은 빈 GameObject가 됩니다. Purpose가 `proxy`나 `guide`인 prim은 건너뜁니다. |
 | Mesh당 여러 material | 지원 | 각 `materialBind` subset이 submesh가 됩니다. |
@@ -97,12 +97,12 @@ Windows에서는 대상 PC에 Microsoft Visual C++ 재배포 가능 패키지가
 | Dome light | 일부 지원 | `UsdDomeLight` 컴포넌트에 기록합니다. `ApplyDomeLightToEnvironment`를 켜면 ambient 색상과 panoramic skybox로 적용합니다. 네이티브 API 7이 필요합니다. |
 | Camera | 지원 | `UsdGeomCamera`가 비활성화된 Unity `Camera`가 됩니다. 네이티브 API 7이 필요합니다. |
 | Spatial audio | 일부 지원 | `UsdMediaSpatialAudio`가 `AudioSource`와 `UsdSpatialAudio` 컴포넌트가 됩니다. Clip은 로드하지 않습니다. 네이티브 API 7이 필요합니다. |
-| 비동기 import | 지원 | 메인 스레드 밖에서 파싱하고, 여러 프레임에 걸쳐 오브젝트를 생성합니다. |
+| 비동기 import | 지원 | 메인 스레드 밖에서 파싱하고, 여러 프레임에 걸쳐 오브젝트를 생성합니다. `ImportAsync`는 텍스처가 붙기 전에 반환되고, 텍스처가 모두 붙으면 `UsdImportResult.TexturesReady`가 완료됩니다(`StreamTextures`, 기본값 켜짐). |
 | 통계 미리보기 | 지원 | Import 전에 mesh, material, triangle, vertex 수를 확인합니다. |
 | 폴더 스캔 | 지원 | `UsdLibraryScanner.ScanFolder` |
 | Up axis와 단위 변환 | 지원 | 기본값으로 import 루트에 적용합니다. [5. 런타임 Import](#5-런타임-import)의 Up axis와 단위를 참고하세요. |
 | Variant 선택, payload 로드 제어 | 지원 | Variant를 고르고 로드할 payload를 정합니다. [Variant set과 payload](#variant-set과-payload)를 참고하세요. 네이티브 API 6이 필요합니다. |
-| Composition, instancing | 지원 | Reference, payload, inherit, specialize, instance를 합성해 읽습니다. 인스턴스마다 별도의 GameObject가 생깁니다. |
+| Composition, instancing | 지원 | Reference, payload, inherit, specialize, instance를 합성해 읽습니다. 인스턴스마다 별도의 GameObject가 생깁니다. Geometry가 같은 인스턴스는 `Mesh` 하나를 공유합니다(`ShareIdenticalMeshes`. 고유 mesh 수는 `UsdImportResult.UniqueMeshCount`로 확인합니다). |
 | Skinned mesh, 애니메이션 | 미지원 | |
 | Physics schema | 미지원 | |
 
@@ -150,6 +150,20 @@ Runtime/Plugins/x86_64/Linux/
 ```
 
 Windows에서는 같은 프로세스에 로드된 다른 사본(예: Unity Editor 자체의 `tbb.dll`)과 충돌하지 않도록 OpenUSD와 oneTBB 라이브러리의 이름을 바꿔 두었습니다.
+
+### 네이티브 API 레벨
+
+네이티브 플러그인은 `RUsd_GetApiVersion`으로 API 버전을 보고합니다. 배포된 Windows, macOS, Linux payload는 모두 API 12입니다. C# API는 API 6 이상을 받아들이고, 이후 레벨의 기능은 로드된 플러그인이 해당 레벨에 도달했을 때만 사용합니다.
+
+| API | 추가된 기능 | `UsdNative`의 상수 |
+| --- | --- | --- |
+| 6 | Composition. Export에서 sublayer, reference, payload, instancing, variant 선택, override를 기록하고, import에서 variant와 payload를 제어합니다. 허용되는 최소 버전입니다. | `CompositionApiVersion` |
+| 7 | Import에서 light, camera, spatial audio | `SceneComponentsApiVersion` |
+| 8 | Point instancer를 prim으로 펼치지 않고 prototype과 행렬 배열로 전달 | `InstancedMeshApiVersion` |
+| 9 | Material의 metallic 맵이 packing된 방식 | `MetallicLayoutApiVersion` |
+| 10 | 단독 metallic 맵과 별도의 roughness 맵. C# 쪽에서 텍스처 하나로 packing합니다. | `TextureLayoutApiVersion` |
+| 11 | 네이티브 코드의 EXR 디코딩과 block compression | `ImageCodecApiVersion` |
+| 12 | 네이티브 코드에서 텍스처 전체와 UDIM atlas를 한 번의 호출로 빌드 | `ImageBuildApiVersion` |
 
 ## 4. 런타임 Export
 
@@ -368,6 +382,16 @@ UsdImportResult switched = UsdImporter.Import(result.Source.SourcePath, next);
 
 `Preserve` export는 import 때의 variant 선택을 다시 기록하므로, 출력 파일에도 Unity에서 고른 variant가 보입니다.
 
+### Point instancer
+
+`UsdGeomPointInstancer`는 prototype 하나를 여러 placement에 흩뿌린 것이고, importer도 그 형태를 유지합니다. 각 prototype은 숨겨진 GameObject로 한 번만 import되고, instancer prim은 `UsdPointInstancer` 컴포넌트를 가진 GameObject가 됩니다. 이 컴포넌트는 prototype의 `Mesh`를 `Materials`와 함께 모든 placement에 `Graphics.RenderMeshInstanced`로 그립니다. Placement는 각각 자체 bounds를 가진 cell 격자로 정렬되므로, 화면 밖의 cell은 그리지 않습니다. 인스턴스는 개별 선택이 되지 않고 collider도 없습니다. 부품을 하나씩 선택해야 하는 stage라면 instancer보다 prim이 적합합니다.
+
+`UsdPointInstancer`는 `Mesh`, `Materials`, `InstanceCount`, `LodDistance`, `CellCount`, `Draw`를 제공합니다. 컴포넌트가 매 프레임 `Draw`를 호출하며, 커스텀 렌더 루프나 벤치마크에서 직접 호출할 수 있도록 public입니다. Import 한 번에 허용되는 placement는 모든 instancer를 합쳐 최대 4,000,000개(인스턴스 수 × prototype mesh 수)이고, 이를 넘으면 import가 거부됩니다.
+
+모든 placement는 거리와 관계없이 최대 디테일로 그려집니다. Mesh LOD를 쓰려면 import 루트를 선택하고 **GameObject > USD > Generate Mesh LODs for Point Instancers**(`Unity.USDToolkit.Editor.UsdMeshLodGenerator`)를 선택하세요. 각 prototype mesh에 최대 4개의 추가 레벨을 만들고, placement가 퍼진 범위로 `LodDistance`를 설정합니다. 레벨은 cell마다 메인 카메라까지의 거리로 고르며, `LodDistance`에서 가장 낮은 디테일 레벨에 도달합니다. 0이면 항상 최대 디테일로 그립니다. 레벨 생성은 mesh decimation이 Editor API이므로 Editor에서만 가능하지만, mesh에 이미 레벨이 있으면 레벨 선택은 플레이어에서도 동작합니다. Decimation은 나뭇잎 같은 geometry를 눈에 띄게 줄이므로 stage마다 결과를 확인하세요.
+
+`UsdImportResult.DefaultMaterial`은 material binding이 없는 mesh에 할당된 공유 회색 material을 담고, 필요한 mesh가 없었으면 `null`입니다. `UniqueMeshCount`는 import가 만든 고유 `Mesh` 오브젝트 수입니다.
+
 ### Import 옵션
 
 | 옵션 | 기본값 | 설명 |
@@ -376,6 +400,8 @@ UsdImportResult switched = UsdImporter.Import(result.Source.SourcePath, next);
 | `RootObjectName` | `null` | 루트 GameObject 이름. 비어 있으면 파일 이름을 사용합니다. |
 | `ImportMaterials` | `true` | `UsdPreviewSurface`, MaterialX, MDL(`OmniPBR`, `OmniSurface`, `OmniGlass`) 값으로 Unity material을 만듭니다. [7. Material과 텍스처](#7-material과-텍스처)를 참고하세요. |
 | `ImportTextures` | `true` | Material이 참조하는 PBR 텍스처를 로드합니다. |
+| `VerifyNativeRuntimeIntegrity` | `true` | 플러그인을 처음 호출하기 전에 각 네이티브 파일의 SHA-256 digest를 확인합니다. Editor와 development 빌드에서만 반영되며, release 플레이어는 항상 확인합니다. |
+| `CompressTextures` | `true` | Import한 텍스처를 worker 스레드에서 mipmap과 함께 block compression합니다. 불투명 이미지는 BC1, alpha가 있는 이미지는 BC3입니다. 식별자나 lookup table처럼 외형이 아니라 데이터를 담은 텍스처는 압축하면 값이 틀어지므로 끄세요. |
 | `IncludeInvisible` | `true` | `visibility = "invisible"`인 prim도 생성합니다. |
 | `GenerateColliders` | `false` | 각 mesh에 `MeshCollider`를 추가합니다. |
 | `RecalculateNormalsIfMissing` | `true` | 파일에 normal이 없으면 smooth normal을 계산합니다. |
@@ -399,7 +425,7 @@ UsdImportResult switched = UsdImporter.Import(result.Source.SourcePath, next);
 
 ### Light, camera, spatial audio
 
-이 기능들은 네이티브 API 7이 필요합니다. 현재는 Windows payload만 API 7입니다. 네이티브 플러그인이 API 6이면(Linux와 macOS는 플러그인을 다시 빌드하기 전까지 해당) import는 그대로 동작하고 이 컴포넌트만 추가되지 않습니다.
+이 기능들은 네이티브 API 7이 필요하며, 배포된 모든 payload에 포함되어 있습니다. 네이티브 플러그인이 API 7보다 오래된 경우에도 import는 그대로 동작하고, 이 prim들은 컴포넌트 없이 빈 transform으로 들어옵니다.
 
 - **Light와 camera.** USD의 light와 camera는 로컬 -Z 방향을, Unity는 +Z 방향을 기준으로 합니다. 그래서 `Light`나 `Camera`는 Y축으로 180도 돌린 자식 GameObject에 붙고, 이 자식에는 `UsdImportHelperObject`가 표시됩니다. 이 자식은 prim이 아니므로 exporter는 이 오브젝트와 그 아래를 건너뜁니다. USD에는 light intensity의 단일 단위 규약이 없어 Unity로의 변환은 근사값입니다. 원본 렌더러와 결과를 비교해 확인하세요.
 - **Dome light.** Unity에는 dome light가 없습니다. 기록된 색상, intensity, 텍스처 경로는 `UsdDomeLight` 컴포넌트에 남습니다. `RenderSettings`에도 적용하려면 `ApplyDomeLightToEnvironment = true`로 설정하세요.
@@ -409,13 +435,17 @@ UsdImportResult switched = UsdImporter.Import(result.Source.SourcePath, next);
 
 Unity 오브젝트를 생성하거나 읽는 메서드는 메인 스레드에서 실행해야 합니다.
 
+`ImportAsync`는 import 작업을 여러 스레드로 나눕니다. 메인 스레드에서 호출하세요. Stage 읽기, PNG와 EXR 디코딩, UDIM 타일 합치기, metallic과 roughness 맵 및 albedo와 opacity 맵 packing, block compression은 worker 스레드에서 병렬로 실행됩니다. 플러그인이 API 11이나 12이면 네이티브 코드로, 그렇지 않으면 managed 코드로 실행됩니다. GameObject, mesh, material은 메인 스레드에서 프레임당 `MaxMillisecondsPerFrame` 안에서 생성됩니다. `ImportAsync`는 오브젝트와 텍스처 없는 material이 만들어지면 반환되고, 이후 디코딩이 끝나는 텍스처를 `TexturesReady`가 완료될 때까지 메인 스레드에서 계속 붙입니다. JPEG 파일과 16-bit PNG는 메인 스레드에서 `Texture2D.LoadImage`로 디코딩합니다.
+
 | 메서드 | 스레드 |
 | --- | --- |
-| `UsdImporter.ImportAsync` | 메인 스레드에서 호출합니다. Stage 읽기는 worker 스레드에서 실행됩니다. |
-| `UsdImporter.Import` | 호출한 스레드에서 실행됩니다. 메인 스레드에서 호출하세요. |
+| `UsdImporter.ImportAsync` | 메인 스레드에서 호출합니다. Stage 읽기와 텍스처 디코딩은 worker 스레드에서, 오브젝트 생성은 메인 스레드에서 실행됩니다. |
+| `UsdImporter.Import` | 호출한 스레드에서 실행됩니다. 텍스처 디코딩만 worker 스레드를 사용합니다. 메인 스레드에서 호출하세요. |
 | `UsdImporter.GetPreviewInfo` | 모든 스레드. Unity 오브젝트를 사용하지 않습니다. |
 | `UsdImporter.LoadImageFile` | 메인 스레드. `Texture2D`를 생성합니다. |
+| `UsdLibraryScanner.ScanFolder` | 모든 스레드. 파일 목록만 읽고 Unity 오브젝트를 사용하지 않습니다. |
 | `UsdExporter.ExportGameObject`, `ExportGameObjectWithResult` | 메인 스레드. Mesh, material, 텍스처를 읽습니다. |
+| `UsdPointInstancer.Draw` | 메인 스레드, 매 프레임. 컴포넌트가 `Update`에서 호출합니다. |
 
 모든 public 메서드는 처음 사용할 때 OpenUSD 런타임을 설정하므로, 별도로 초기화할 필요가 없습니다.
 
@@ -437,7 +467,7 @@ Unity 오브젝트를 생성하거나 읽는 메서드는 메인 스레드에서
 
 ### Import
 
-Import된 material은 `Universal Render Pipeline/Lit`, `HDRP/Lit`, `Standard` 중 처음 사용할 수 있는 셰이더를 사용합니다. 텍스처는 `_BaseMap`, `_BumpMap`, `_MetallicGlossMap`, `_EmissionMap`에 할당되며, tiling과 offset은 `UsdTransform2d`에서 가져옵니다. 각 텍스처 파일은 한 번만 로드되어 material 간에 공유됩니다.
+Import된 material은 `Universal Render Pipeline/Lit`, `HDRP/Lit`, `Standard` 중 처음 사용할 수 있는 셰이더를 사용합니다. 텍스처는 `_BaseMap`, `_BumpMap`, `_MetallicGlossMap`, `_OcclusionMap`, `_EmissionMap`에 할당되며, tiling과 offset은 `UsdTransform2d`에서 가져옵니다. 각 텍스처 파일은 한 번만 로드되어 material 간에 공유됩니다.
 
 Importer가 읽는 surface shader는 다음과 같습니다.
 
@@ -449,6 +479,22 @@ Importer가 읽는 surface shader는 다음과 같습니다.
 | `diffuseColor`에 연결된 `UsdPrimvarReader` | `displayColor` 같은 primvar 색상을 base color로 사용합니다. |
 
 하위 폴더에 있는 material layer가 참조하는 텍스처는 그 layer 기준으로 경로를 찾습니다. Material binding이 없는 mesh나 submesh에는 `AssignDefaultMaterial = false`가 아니면 공유 회색 material `UsdDefaultMaterial`이 할당됩니다.
+
+### 텍스처 포맷과 packing
+
+Importer가 읽는 이미지 포맷은 다음과 같습니다.
+
+| 포맷 | 비고 |
+| --- | --- |
+| PNG | 8-bit, non-interlaced 파일은 메인 스레드 밖에서 디코딩합니다. 그 외 PNG는 메인 스레드에서 `Texture2D.LoadImage`로 읽습니다. |
+| JPEG | 메인 스레드에서 `Texture2D.LoadImage`로 읽습니다. |
+| OpenEXR | `NONE`, `RLE`, `ZIPS`, `ZIP` compression의 scanline과 tiled 파일. half, float, uint를 지원합니다. Mipmap이 있는 파일은 level 0을 읽습니다. 픽셀은 8 bit로 양자화되고, 색상 슬롯에서는 sRGB로 인코딩됩니다. |
+
+`<UDIM>` 텍스처 경로는 타일 격자를 뜻합니다. 한 set의 타일은 UV 공간에서의 위치대로 atlas 하나로 합쳐지며, atlas에는 set에 있는 행과 열만 들어갑니다. Mesh의 UV는 그대로이고, material의 base map scale과 offset이 UV를 atlas 위에 배치합니다. 그래픽 장치가 허용하는 크기보다 큰 atlas는 들어갈 때까지 절반으로 줄입니다. 타일은 PNG나 OpenEXR이어야 하며, 다른 포맷의 타일은 경고와 함께 제외됩니다.
+
+Mesh와 `GeomSubset`의 material은 `material:binding:full`, `material:binding:preview`, 범용 `material:binding` 순서로 찾습니다.
+
+별도의 metallic, roughness, occlusion 맵은 worker 스레드에서 Unity 레이아웃으로 packing됩니다. `_MetallicGlossMap`의 red 채널에 metallic, alpha 채널에 smoothness(1 − roughness)가 들어가고, occlusion 맵은 `_OcclusionMap`에 들어갑니다. OmniPBR의 ORM 맵(red, green, blue에 occlusion, roughness, metallic)도 같은 방식으로 다시 packing되어 occlusion은 green에 들어가고, 두 슬롯 모두에 할당됩니다. Albedo의 alpha가 아닌 별도의 opacity 맵은 albedo의 alpha 채널로 합쳐집니다. 텍스처는 기본적으로 block compression됩니다. `CompressTextures`를 참고하세요.
 
 ### Metallic 슬롯의 albedo 텍스처
 
@@ -462,9 +508,9 @@ Importer는 다운로드한 에셋, 공유받은 `.usdz`, 스캔한 폴더의 �
 
 ### 텍스처 경로
 
-USD 파일은 자체적으로 텍스처 경로를 지정하며, 이 경로는 디스크의 어느 곳이든 가리킬 수 있습니다. Importer는 stage나 그 레이어의 폴더 밖으로 해석되는 텍스처를 건너뛰고, 파일에 적힌 경로로 경고를 출력합니다. `.usdz` 내부 텍스처는 영향을 받지 않습니다.
+USD 파일은 자체적으로 텍스처 경로를 지정하며, 이 경로는 디스크의 어느 곳이든 가리킬 수 있습니다. Importer는 stage나 그 레이어의 폴더 밖으로 해석되는 텍스처를 건너뛰고, 파일에 적힌 경로로 경고를 출력합니다. `.usdz` 내부 텍스처는 영향을 받지 않습니다. Stage 폴더 아래의 symbolic link나 junction을 거치는 경로도 거부합니다. Link는 어디든 가리킬 수 있기 때문입니다. `<UDIM>` set의 타일은 폴더 목록으로 찾으며, 타일마다 같은 방식으로 범위를 제한합니다.
 
-다른 폴더의 공용 텍스처 라이브러리를 참조하는 신뢰할 수 있는 stage라면 `UsdImportOptions.AllowExternalAssetPaths = true`로 설정하세요.
+다른 폴더의 공용 텍스처 라이브러리를 참조하거나 link를 거쳐 텍스처를 읽는 신뢰할 수 있는 stage라면 `UsdImportOptions.AllowExternalAssetPaths = true`로 설정하세요.
 
 ### Mesh topology
 
@@ -472,7 +518,11 @@ Face 데이터가 일치하지 않는 mesh는 건너뛰고, prim 경로와 함�
 
 ### 텍스처 크기
 
-한 변이 16,384 픽셀을 넘거나 전체 6,400만 픽셀을 넘는다고 선언한 PNG와 JPEG 텍스처는 거부합니다.
+한 변이 16,384 픽셀을 넘거나 전체 6,400만 픽셀을 넘는다고 선언한 이미지는 모두 거부합니다. 이 제한은 PNG, JPEG, OpenEXR 파일과 UDIM atlas에 적용됩니다. 512 MB를 넘는 이미지 파일은 읽기 전에 거부합니다. 헤더가 압축된 바이트로 풀 수 있는 것보다 많은 픽셀을 선언한 PNG나 EXR은 메모리를 할당하기 전에 거부합니다.
+
+### Point instancer
+
+Point instancer의 placement 합계가 4,000,000개(인스턴스 수 × prototype mesh 수)를 넘는 import는 제한값을 알려 주는 오류와 함께 거부됩니다. 자기 instancer, 그 상위 prim, 또는 이미 펼치는 중인 instancer를 포함하는 prototype은 자신을 다시 import하게 되므로 경고와 함께 건너뜁니다.
 
 ### 플러그인 탐색 경로
 
@@ -480,7 +530,7 @@ OpenUSD는 `plugInfo.json` 파일이 지정한 라이브러리를 실행합니�
 
 ## 9. Standalone 플레이어 빌드
 
-1. **Build Profiles**에서 Windows 또는 macOS를 선택합니다. macOS에서는 플레이어 아키텍처가 네이티브 라이브러리와 일치해야 합니다.
+1. **Build Profiles**에서 Windows, macOS, Linux 중 하나를 선택합니다. macOS에서는 플레이어 아키텍처가 네이티브 라이브러리와 일치해야 합니다.
 2. Mono 또는 IL2CPP로 빌드합니다.
 3. 출력 파일은 `Application.persistentDataPath` 아래에 기록하세요.
 
@@ -489,6 +539,7 @@ OpenUSD는 `plugInfo.json` 파일이 지정한 라이브러리를 실행합니�
 ```text
 <Build>/<App>_Data/Plugins/x86_64/Windows/     (Windows)
 <Build>/<App>.app/Contents/PlugIns/            (macOS)
+<Build>/<App>_Data/Plugins/x86_64/Linux/       (Linux)
 ```
 
 다른 PC에 배포하려면 Unity가 빌드한 macOS 앱 번들에 서명하세요.
@@ -512,7 +563,7 @@ OpenUSD는 `plugInfo.json` 파일이 지정한 라이브러리를 실행합니�
 | 증상 | 원인 | 해결 방법 |
 | --- | --- | --- |
 | `DllNotFoundException` | 네이티브 파일이 없거나 아직 Git LFS 포인터 파일입니다. | `git lfs pull`을 실행하고 `Runtime/Plugins` 아래 플랫폼 폴더를 확인하세요. |
-| 네이티브 API 버전 불일치 | 네이티브 플러그인이 다른 버전의 패키지에서 왔습니다. | 패키지를 다시 설치하거나 플러그인을 다시 빌드하세요. [부록 C](#부록-c-네이티브-플러그인-다시-빌드하기)를 참고하세요. |
+| 네이티브 API 버전 불일치 | 네이티브 플러그인이 패키지가 허용하는 최소 버전인 API 6보다 오래되었습니다. | 패키지를 다시 설치하거나 플러그인을 다시 빌드하세요. [부록 C](#부록-c-네이티브-플러그인-다시-빌드하기)를 참고하세요. |
 | Digest 불일치로 네이티브 플러그인이 거부됨 | 네이티브 파일이 패키지에 포함된 파일과 다릅니다. | 패키지를 다시 설치하세요. 플러그인을 다시 빌드했다면 digest를 다시 생성하세요. [부록 C](#부록-c-네이티브-플러그인-다시-빌드하기)를 참고하세요. |
 | OpenUSD 플러그인 경로 오류 | `plugin/usd` 또는 `lib/usd` 폴더가 없습니다. | `plugInfo.json` 파일이 있는지 확인하세요. |
 | `PluginSearchPath`가 거부됨 | 경로가 패키지의 네이티브 폴더 밖에 있습니다. | [8. 신뢰할 수 없는 USD 파일](#8-신뢰할-수-없는-usd-파일)을 참고하세요. |
@@ -524,6 +575,11 @@ OpenUSD는 `plugInfo.json` 파일이 지정한 라이브러리를 실행합니�
 | Import 후 매끄러운 표면이 각져 보임 | Subdivision surface이고 control cage만 가져왔습니다. | 경고에 prim이 표시됩니다. 원본 도구에서 subdivision을 적용한 mesh로 export하세요. |
 | 파일이 생성되지 않음 | 출력 폴더에 쓸 수 없거나 export 중 예외가 발생했습니다. | `Application.persistentDataPath` 아래에 기록하고 Console을 확인하세요. |
 | Editor에서는 동작하지만 플레이어에서는 동작하지 않음 | 지원하지 않는 플랫폼이거나 빌드에 네이티브 파일이 없습니다. | Windows x64, macOS, Linux x64 중 하나로 빌드하고 플레이어의 `Plugins` 폴더를 확인하세요. |
+| `ImportAsync` 직후 material이 단색으로 보임 | `StreamTextures`(기본값)에서는 `ImportAsync`가 텍스처를 붙이기 전에 반환됩니다. | `UsdImportResult.TexturesReady`를 await하거나 `StreamTextures = false`로 설정하세요. |
+| UDIM 타일이 빠지거나 atlas가 예상보다 작음 | 타일이 PNG나 OpenEXR이 아니거나, 그래픽 장치의 텍스처 제한에 맞춰 atlas를 절반으로 줄였습니다. | Console 경고를 확인하세요. 타일 이름 또는 atlas 크기와 제한값이 표시됩니다. |
+| EXR 텍스처가 거부됨 | `NONE`, `RLE`, `ZIPS`, `ZIP` 이외의 compression을 쓰거나, 채널이 64개를 넘거나, 크기 제한을 넘습니다. | 지원되는 compression과 더 적은 채널로 텍스처를 다시 export하세요. [8. 신뢰할 수 없는 USD 파일](#8-신뢰할-수-없는-usd-파일)을 참고하세요. |
+| Point instancer 인스턴스가 선택되지 않고 collider가 없음 | 의도된 동작입니다. `UsdPointInstancer`는 GameObject가 아니라 배열로 placement를 그립니다. | [Point instancer](#point-instancer)를 참고하세요. 개별 선택이 필요한 부품은 prim으로 작성하세요. |
+| Point instancer가 너무 조밀하다며 거부됨 | Stage가 placement 예산 4,000,000개(인스턴스 수 × prototype mesh 수)를 넘습니다. | 원본에서 인스턴스 수나 prototype mesh 수를 줄이세요. |
 
 네이티브 플러그인 버전, OpenUSD 버전, 탐색 경로를 출력하려면 다음과 같이 합니다.
 
@@ -549,14 +605,24 @@ Debug.Log(UsdExporter.GetRuntimeInfo().ToString());
 | `UsdExportOptions`, `UsdImportOptions`, `UsdLibraryScanOptions` | 옵션 |
 | `UsdExportResult`, `UsdExportedMeshInfo` | Export 결과 |
 | `UsdImportResult`, `UsdImportedMeshInfo`, `UsdImportPreviewInfo` | Import 결과와 통계 |
+| `UsdImportResult.TexturesReady` | 모든 텍스처가 material에 붙으면 완료되는 `Task`. 실패 상태로 끝나지 않습니다. |
+| `UsdImportResult.UniqueMeshCount` | Import가 만든 고유 `Mesh` 오브젝트 수 |
+| `UsdImportResult.DefaultMaterial` | 공유 회색 `UsdDefaultMaterial`. 필요한 mesh가 없었으면 `null` |
 | `UsdLibraryItem` | `ScanFolder`가 찾은 USD 파일 |
 | `UsdRuntimeInfo` | 네이티브 플러그인 버전, OpenUSD 버전, 탐색 경로 |
 | `UsdExportException`, `UsdImportException` | 진단 정보를 포함한 오류 |
 | `UsdTransformPolicy` | `BakedMesh` 또는 `PreserveHierarchy` |
 | `UsdCompositionMode`, `UsdExportLayout`, `UsdImportedContentMode` | Export composition 설정 |
 | `UsdStageSource`, `UsdPrimSource` | Import한 오브젝트의 출처를 기록하는 컴포넌트 |
+| `UsdStageSource.CreateOptionsWithVariant` | 다른 variant를 선택해 stage를 다시 import하는 옵션을 반환합니다. |
 | `UsdPrefabMarker` | Export를 위해 런타임 오브젝트를 prefab과 연결합니다. |
+| `UsdPrefabMarker.Instantiate`, `UsdPrefabMarker.Attach` | 연결 정보를 가진 prefab 인스턴스를 생성하거나, 기존 인스턴스에 연결 정보를 붙입니다. |
 | `UsdVariantSelection`, `UsdVariantSetInfo`, `UsdPayloadInfo`, `UsdCompositionArcInfo`, `UsdPrimCompositionFlags` | Import한 stage의 composition 정보 |
+| `UsdPointInstancer` | Point instancer의 prototype을 모든 placement에 그리는 컴포넌트. `Mesh`, `Materials`, `InstanceCount`, `LodDistance`, `CellCount`, `Draw` |
+| `UsdDomeLight` | `UsdLuxDomeLight`의 색상, intensity, 텍스처 경로를 기록하는 컴포넌트 |
+| `UsdSpatialAudio` | `UsdMediaSpatialAudio`의 파일 경로, 시작 시간, 종료 시간을 기록하는 컴포넌트 |
+| `UsdImportHelperObject` | Light나 camera를 Unity 방향에 맞추기 위해 importer가 만든 자식 오브젝트 표시. Exporter는 이를 건너뜁니다. |
+| `UsdMeshLodGenerator` | Editor 전용, `Unity.USDToolkit.Editor` 어셈블리. Point instancer prototype의 Mesh LOD 레벨을 생성합니다. `Generate(root, levels)` |
 
 `Unity.USDToolkit.Native`의 타입은 internal이며 예고 없이 변경될 수 있습니다.
 
