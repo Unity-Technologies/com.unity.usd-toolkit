@@ -15,18 +15,42 @@ Every row in `Native~/dependency-sources/<platform>.tsv`, at the version pinned 
 
 | Component | Version | Record |
 | --- | --- | --- |
-| OpenUSD | 26.05 | `openusd-26.05.md` |
+| OpenUSD | 26.05 | `openusd-26.05.md` (all platforms; must cover libdeflate, below) |
 | oneTBB | 2020.3 | `onetbb-2020.3.md` (macOS, Windows) |
 | oneTBB | 2020.3.1 | `onetbb-2020.3.1.md` (Linux) |
+| MaterialX | 1.39.4 | `materialx-1.39.4.md` (all platforms; must cover its vendored pugixml) |
+
+The record's file name is the row's component, lowercased, and its version:
+`verify_upstream_sources.py` looks for `<component>-<version>.md` and nothing else.
 
 The four libraries OpenUSD vendors into the monolithic build — `pxr/base/tf/pxrCLI11`,
 `pxrDoubleConversion`, `pxrLZ4`, `pxrTslRobinMap` — live in the OpenUSD tree, so the OpenUSD scan
 covers them. Note their versions in that record rather than giving them files of their own.
 
-Intel's TBB on Windows (shipped as `tbb_usdrt.dll`) needs no record: it is a prebuilt binary, not
-source we compile. Its evidence is Intel's Authenticode signature and the byte-identity of the
-shipped file with the one in `tbb-2020.3-win.zip`, both recorded in
-`dependency-sources/windows.tsv`.
+libdeflate 1.18 also lives in the OpenUSD tree, at `pxr/imaging/plugin/hioOpenEXR/OpenEXR/deflate`,
+and is the one vendored library we compile that OpenUSD itself does not: OpenUSD is built
+`--no-imaging`, but `Native~/src/UsdDeflate.c` compiles its decompressor into
+`UnityUSDToolkitNative` on every platform, after `Native~/CMakeLists.txt` has checked each file it
+uses against the v26.05 digests. A scan scoped to the directories the OpenUSD build compiles would
+therefore miss it. The OpenUSD record has to name that directory as scanned, and say so under
+"Coverage gaps" if it was not.
+
+MaterialX vendors pugixml 1.9 (with MaterialX's own modifications) at
+`source/MaterialXFormat/External/PugiXML`, compiled into `MaterialXFormat`. It is MaterialX's tree,
+so the MaterialX record covers it; note its version there, as for OpenUSD's vendored libraries.
+
+The gate asks for a record for every row that is not a patch, prebuilt or not. So Windows needs
+`onetbb-2020.3.md` too, even though Intel's TBB there (shipped as `tbb_usdrt.dll`) is a prebuilt
+binary, not source we compile. The Windows row pins the same v2020.3 commit as the macOS one, so
+one record serves both, but it has to name both rows' archive digests (below). For Windows that
+record vouches for the source Intel's binary was released from, not for the binary; the binary's
+own evidence is Intel's Authenticode signature and the byte-identity of the shipped file with the
+one in `tbb-2020.3-win.zip`, both recorded in `dependency-sources/windows.tsv`.
+
+Two things tie a record to its row. "Commit scanned" has to equal the row's `git_commit` exactly,
+and for a row that pins an archive the record has to contain that archive's full SHA-256
+somewhere. The MaterialX row pins the source archive and no commit (`-`), so for it the digest is
+what identifies the tree that was scanned.
 
 ## Running a scan
 
@@ -98,5 +122,7 @@ the payload just cannot be packed.
 
 ## Status
 
-**No scan has been run yet.** Cycode covers this repository's own code, not the upstream source. The three committed
-payloads carry `.unscanned-build` for that reason
+**No scan has been run yet.** Cycode covers this repository's own code, not the upstream source,
+so there is no record here for OpenUSD, oneTBB or MaterialX. The three committed payloads carry
+`.unscanned-build` for that reason, and the pack job refuses them until they are rebuilt from
+source with a passing record for each version.

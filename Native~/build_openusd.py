@@ -288,7 +288,12 @@ def main() -> int:
     command = [sys.executable, str(build_usd)] + USD_BUILD_FLAGS.split() + [
         "--src", str(downloads), "--jobs", str(args.jobs)]
     env = dict(os.environ)
-    for name in PROXY_VARIABLES:
+    # Windows environment names are case-insensitive. dict(os.environ) holds them upper-cased, so
+    # adding the lower-case spellings yields two entries for one variable, and MSBuild then dies
+    # configuring the first CMake dependency ("Item has already been added. Key in dictionary:
+    # 'ALL_PROXY'  Key being added: 'all_proxy'"). One spelling per variable is all Windows needs.
+    proxy_names = {n.upper() for n in PROXY_VARIABLES} if os.name == "nt" else PROXY_VARIABLES
+    for name in proxy_names:
         env[name] = UNREACHABLE_PROXY
     env.pop("no_proxy", None)
     env.pop("NO_PROXY", None)

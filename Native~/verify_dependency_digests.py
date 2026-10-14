@@ -84,7 +84,7 @@ SCAN_RULES = {
         "trees": ["lib/usd", "plugin", "share", "resources"],
     },
     "linux": {
-        "flat": [("lib", "libusd_ms.so"), ("lib", "libtbb.so*")],
+        "flat": [("lib", "libusd_ms.so"), ("lib", "libtbb.so*"), ("lib", "libMaterialX*.so*")],
         "trees": ["lib/usd", "plugin/usd"],
     },
 }

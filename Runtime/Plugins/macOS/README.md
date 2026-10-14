@@ -5,7 +5,13 @@ Expected runtime payload:
 - `UnityUSDToolkitNative.dylib`
 - `libusd_ms.dylib` or `libusd_m.dylib`
 - OpenUSD dependency dylibs such as `libtbb*.dylib`
+- `libMaterialXCore.1.dylib` and `libMaterialXFormat.1.dylib` (MaterialX 1.39.4).
+  `libusd_ms` links them by these `.1` names, so they are copied under those names
+  rather than as the install's versioned `*.1.39.4.dylib` files.
 - `lib/usd/**/plugInfo.json` and schema resources
+- `lib/usd/usdMtlx/resources/libraries/**`, the MaterialX standard library
+  (`.mtlx` node definitions and shader-generator sources) that `usdMtlx` reads
+  at run time
 - `plugin/usd/**/plugInfo.json` and shader resources
 - optional `share` and `resources` directories from the OpenUSD install
 

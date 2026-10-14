@@ -11,7 +11,8 @@ Thumbs.db
 __pycache__/
 *.pyc
 
-# Development-only assets stay outside the package tree.
+# Local test data. Scene exports and the files they reference stay next to a test project:
+# the package is installed from this tree as-is, so anything committed here reaches every consumer.
 DevSamples~/
 *.usd
 *.usdc
@@ -19,3 +20,4 @@ DevSamples~/
 *.usda
 !Runtime/Plugins/**/*.usda
 !Native~/Tests~/*.usda
+!Native~/Tests~/**/*.usda
