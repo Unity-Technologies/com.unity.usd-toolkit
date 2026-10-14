@@ -29,7 +29,7 @@
       "bom-ref": "com.unity.usd-toolkit",
       "type": "library",
       "name": "com.unity.usd-toolkit",
-      "version": "0.7.2-exp.1",
+      "version": "0.8.0-exp.1",
       "description": "Runtime USD toolkit for Unity applications using a custom native OpenUSD wrapper. A C# integration layer for connecting Unity to NVIDIA's Omniverse/OpenUSD ecosystem. Wraps Pixar's OpenUSD 26.05 native binaries via P/Invoke so Unity can read, write, and round-trip USD stages.",
       "licenses": [
         {
@@ -987,7 +987,7 @@
       "bom-ref": "wrapper-macos",
       "type": "library",
       "name": "Unity USD Toolkit native wrapper",
-      "version": "0.7.2-exp.1",
+      "version": "0.8.0-exp.1",
       "scope": "required",
       "description": "First-party native wrapper (Native~/src) built for macOS universal.",
       "licenses": [
@@ -1026,7 +1026,7 @@
       "bom-ref": "wrapper-windows",
       "type": "library",
       "name": "Unity USD Toolkit native wrapper",
-      "version": "0.7.2-exp.1",
+      "version": "0.8.0-exp.1",
       "scope": "required",
       "description": "First-party native wrapper (Native~/src) built for Windows x64.",
       "licenses": [
@@ -1065,7 +1065,7 @@
       "bom-ref": "wrapper-linux",
       "type": "library",
       "name": "Unity USD Toolkit native wrapper",
-      "version": "0.7.2-exp.1",
+      "version": "0.8.0-exp.1",
       "scope": "required",
       "description": "First-party native wrapper (Native~/src) built for Linux x64.",
       "licenses": [

@@ -4,7 +4,7 @@ Read and write OpenUSD stages from Unity at runtime, on Windows, macOS and Linux
 
 | | |
 | --- | --- |
-| **Package version** | 0.7.2-exp.1 |
+| **Package version** | 0.8.0-exp.1 |
 | **Unity** | 6.4 and newer |
 | **OpenUSD** | 26.05 |
 

@@ -4,7 +4,7 @@ Windows, macOS, Linux에서 Unity 런타임으로 OpenUSD stage를 읽고 씁니
 
 | | |
 | --- | --- |
-| **패키지 버전** | 0.7.2-exp.1 |
+| **패키지 버전** | 0.8.0-exp.1 |
 | **Unity** | 6.4 이상 |
 | **OpenUSD** | 26.05 |
 
