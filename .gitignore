@@ -21,3 +21,6 @@ DevSamples~/
 !Runtime/Plugins/**/*.usda
 !Native~/Tests~/*.usda
 !Native~/Tests~/**/*.usda
+# The Runtime Demo sample ships its own USD files (tracked with Git LFS, see .gitattributes).
+!Samples~/Runtime Demo/USDSamples/*.usda
+!Samples~/Runtime Demo/USDSamples/*.usdc

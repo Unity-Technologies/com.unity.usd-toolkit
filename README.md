@@ -5,7 +5,7 @@
 ![Status: experimental](https://img.shields.io/badge/status-experimental-orange)
 [![License](https://img.shields.io/badge/license-Unity%20Companion-lightgrey)](LICENSE.md)
 
-<p align="center"><img src="Documentation~/images/hero-unity-isaac-side-by-side.png" alt="The same USD stage open in the Unity Editor and in NVIDIA Isaac Sim, side by side" width="1268"/></p>
+<p align="center"><img src="Documentation~/images/usd-toolkit-hero.png" alt="USD Toolkit: native OpenUSD for Unity. Import and export USD in the Editor and in shipped builds. A layer diagram shows the C# API on top of a C/C++ interop shim on top of the OpenUSD native libraries" width="1268"/></p>
 
 Read and write OpenUSD stages from Unity at runtime, in the Editor and in built players, through Pixar's native OpenUSD 26.05 libraries.
 
@@ -18,7 +18,7 @@ The package includes four key capabilities:
 - **Runtime export,** which writes any GameObject hierarchy to USD from a running application, with `UsdPreviewSurface` materials and optional PNG textures.
 - **Runtime import,** which loads USD stages into GameObjects without freezing the frame, with a preview of mesh and triangle counts before you commit.
 - **Safe handling of untrusted files,** which confines texture paths to the stage folder, checks mesh topology and caps image sizes, so you can open USD files from any source.
-- **USD Live Sync (prototype),** a sample that streams transform changes between the Unity Editor and Isaac Sim 6.0.1 in both directions.
+- **USD Live Sync (prototype),** a sample that streams transform changes between the Unity Editor and Isaac Sim 6.1.0 in both directions.
 
 > **Experimental package.** `com.unity.usd-toolkit` is experimental. The API can change in any `0.x` release, and the package is not supported for production use.
 
@@ -114,27 +114,20 @@ To add the samples to your project:
 
 1. Open **Window > Package Management > Package Manager**.
 2. Select **Unity USD Toolkit**, then open the **Samples** tab.
-3. Next to **Runtime Examples**, select **Import**.
+3. Next to **Runtime Examples**, **Live Sync Example** or **Runtime Demo**, select **Import**.
 
-Unity copies the samples to `Assets/Samples/Unity USD Toolkit/<version>/Runtime Examples`, where you can open and edit the scenes. This works the same for every install method, including Git URLs and tarballs, which Unity installs as read-only packages. The three scenes share one UI theme, so they import together. The package doesn't compile the samples until you import them.
+Unity copies each sample to `Assets/Samples/Unity USD Toolkit/<version>/<sample>`, where you can open and edit the scenes. This works the same for every install method, including Git URLs and tarballs, which Unity installs as read-only packages. The two Runtime Examples scenes share one UI theme, so they import together. The package doesn't compile the samples until you import them.
 
-| Sample | Scene | What it shows |
-| --- | --- | --- |
-| **Export Example** | `Export Example/RuntimeExportExample.unity` | A runtime UI that exports the open scene to any USD format, with or without textures, as baked meshes or a preserved hierarchy. |
-| **Import Example** | `Import Example/RuntimeImportBrowser.unity` | A runtime browser that scans a folder for USD files, previews their statistics and imports them. |
-| **[USD Live Sync](Samples~/Runtime%20Examples/Live%20Sync%20Example/README.md)** | `Live Sync Example/LiveSyncExample.unity` | Two-way transform sync between the Unity Editor and Isaac Sim 6.0.1 or a Python client. |
+| Preview | Sample | Scene | What it shows |
+| --- | --- | --- | --- |
+| <a href="Samples~/Runtime%20Examples/Export%20Example/README.md"><img src="Documentation~/images/runtime_export.png" alt="Export Example" width="240"></a> | **[Export Example](Samples~/Runtime%20Examples/Export%20Example/README.md)** | `Export Example/RuntimeExportExample.unity` | A runtime UI that exports the open scene to any USD format, with or without textures, as baked meshes or a preserved hierarchy. |
+| <a href="Samples~/Runtime%20Examples/Import%20Example/README.md"><img src="Documentation~/images/runtime_import.png" alt="Import Example" width="240"></a> | **[Import Example](Samples~/Runtime%20Examples/Import%20Example/README.md)** | `Import Example/RuntimeImportBrowser.unity` | A runtime browser that scans a folder for USD files, previews their statistics and imports them. |
+| <a href="Samples~/Live%20Sync%20Example/README.md"><img src="Documentation~/images/hero-unity-isaac-side-by-side.png" alt="USD Live Sync" width="240"></a> | **[USD Live Sync](Samples~/Live%20Sync%20Example/README.md)** | `LiveSyncExample.unity` | Two-way transform sync between the Unity Editor and Isaac Sim 6.1.0 or a Python client. |
+| <a href="Samples~/Runtime%20Demo/README.md"><img src="Documentation~/images/usd_runtime_demo.png" alt="Runtime Demo" width="240"></a> | **[Runtime Demo](Samples~/Runtime%20Demo/README.md)** | `Scenes/USDRuntimeDemo.unity` | A runtime app that imports several USD files, lets you select and move parts with a transform gizmo, corrects Z-up and centimetre files, and exports the result as a referencing layer or a flattened stage. |
+
+The Export and Import examples import together as **Runtime Examples**. **Live Sync Example** and **Runtime Demo** are separate samples; Runtime Demo needs URP, the Input System and uGUI in the project.
 
 If you imported the samples before, delete the old copy under `Assets/Samples/Unity USD Toolkit` before you import them again.
-
-### USD Live Sync
-
-![Unity Editor and Isaac Sim side by side on one machine: moving a cube in Unity moves the same prim in Isaac Sim, and a pose pushed from Isaac Sim moves it back in Unity](Documentation~/images/sample-usd-live-sync.gif)
-
-Unity exports the scene geometry once as `base_stage.usda`, then streams transform changes over loopback TCP. An Omniverse Kit extension, `unity.usd.livesync`, mounts the stage in Isaac Sim, converts it from Y-up to Z-up, and applies the streamed transforms. Isaac Sim can send poses back, including physics-driven poses, for objects you mark as accepting remote writes.
-
-The sample synchronizes transforms only, on a single machine. Isaac Sim is not included with this package; install it separately from NVIDIA under NVIDIA's license terms.
-
-To try it, see the [Live Sync Example guide](Samples~/Runtime%20Examples/Live%20Sync%20Example/README.md) and the [Isaac Sim client guide](Samples~/Runtime%20Examples/Live%20Sync%20Example/Tools~/isaacsim/README.md).
 
 ## Workflows
 
@@ -227,8 +220,8 @@ The package does not depend on `com.unity.formats.usd`, `com.unity.importer.usd`
 | Document | Contents |
 | --- | --- |
 | [User Manual](Documentation~/Unity%20USD%20Toolkit%20User%20Manual%20EN.md) | Export and import options, threading, materials, untrusted file handling, standalone builds, troubleshooting and the API reference. |
-| [Live Sync Example](Samples~/Runtime%20Examples/Live%20Sync%20Example/README.md) | Setup, wire protocol, ownership, coordinate conversion and security. |
-| [Isaac Sim client](Samples~/Runtime%20Examples/Live%20Sync%20Example/Tools~/isaacsim/README.md) | The Kit extension, launchers and troubleshooting. |
+| [Live Sync Example](Samples~/Live%20Sync%20Example/README.md) | Setup, wire protocol, ownership, coordinate conversion and security. |
+| [Isaac Sim client](Samples~/Live%20Sync%20Example/Tools~/isaacsim/README.md) | The Kit extension, launchers and troubleshooting. |
 | [Changelog](CHANGELOG.md) | Release history. |
 
 ## Troubleshooting

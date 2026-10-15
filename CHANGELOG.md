@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Runtime Demo sample**
+  The standalone USD Runtime Demo project now ships as a second package sample,
+  `Samples~/Runtime Demo`: multi-file import through a native file dialog, a translate/rotate
+  gizmo, up-axis and unit correction, and export as a referencing layer or a flattened stage. It
+  locates its own folder instead of assuming `Assets/USDRuntimeDemo`, carries its three USD files
+  in `USDSamples/` (copied into StreamingAssets by a build preprocessor for player builds), and
+  its assemblies are skipped rather than failing to compile when the Input System or uGUI is
+  missing.
+
 - **MaterialX in every shipped payload**
   OpenUSD was built without `usdMtlx`, so a `.mtlx` reference composed to nothing, silently:
   OpenChessSet lost all 21 materials and rendered magenta while `GetPreviewInfo` already reported

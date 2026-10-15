@@ -6,12 +6,20 @@ Unity is the host. It exports the scene geometry once as `base_stage.usda`, then
 
 The sample synchronizes transforms only, and accepts connections from the same machine only.
 
+## With Isaac Sim
+
+![Unity Editor and Isaac Sim side by side on one machine: moving a cube in Unity moves the same prim in Isaac Sim, and a pose pushed from Isaac Sim moves it back in Unity](../../Documentation~/images/sample-usd-live-sync.gif)
+
+An Omniverse Kit extension, `unity.usd.livesync`, mounts the stage in Isaac Sim, converts it from Y-up to Z-up, and applies the streamed transforms. Isaac Sim can send poses back, including physics-driven poses, for objects you mark as accepting remote writes.
+
+Isaac Sim is not included with this package; install it separately from NVIDIA under NVIDIA's license terms. To set it up, see the [Isaac Sim client guide](Tools~/isaacsim/README.md).
+
 ## Requirements
 
 | Requirement | Detail |
 | --- | --- |
 | **Python** | Python 3, for `Tools~/usd_live_sync.py`. Saving a checkpoint also needs `pip install usd-core`. |
-| **Isaac Sim** | Optional. Isaac Sim 6.0.1 on Windows. See the [Isaac Sim client guide](Tools~/isaacsim/README.md). |
+| **Isaac Sim** | Optional. Isaac Sim 6.1.0 on Windows. See the [Isaac Sim client guide](Tools~/isaacsim/README.md). |
 
 ## Quick start
 

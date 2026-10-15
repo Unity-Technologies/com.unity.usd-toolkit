@@ -34,3 +34,11 @@ Runtime/Plugins/**/usdMtlx/resources/libraries/**/*.h  -text
 # A patch applied to the OpenUSD tree is pinned by SHA-256 in Native~/dependency-sources, so a
 # Windows checkout converting it to CRLF would make every Windows build refuse it.
 Native~/patches/*.patch  -text
+
+# USD files shipped with the Runtime Demo sample are tracked with Git LFS. The rule is scoped to
+# this folder so the hashed Runtime/Plugins/**/*.usda descriptors above stay plain text.
+Samples~/Runtime[[:space:]]Demo/USDSamples/*.usda  filter=lfs diff=lfs merge=lfs -text
+Samples~/Runtime[[:space:]]Demo/USDSamples/*.usdc  filter=lfs diff=lfs merge=lfs -text
+
+# Animated GIFs used as README and sample hero images are large, so they are tracked with Git LFS.
+Documentation~/images/*.gif  filter=lfs diff=lfs merge=lfs -text

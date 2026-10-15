@@ -1,0 +1,33 @@
+{
+    "name": "Unity.USDToolkit.Samples.RuntimeDemo.Editor",
+    "rootNamespace": "Unity.USDToolkit.RuntimeDemo.Editor",
+    "references": [
+        "Unity.USDToolkit.Samples.RuntimeDemo",
+        "UnityEngine.UI"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [
+        "USD_RUNTIME_DEMO_INPUT_SYSTEM",
+        "USD_RUNTIME_DEMO_UGUI"
+    ],
+    "versionDefines": [
+        {
+            "name": "com.unity.inputsystem",
+            "expression": "1.7.0",
+            "define": "USD_RUNTIME_DEMO_INPUT_SYSTEM"
+        },
+        {
+            "name": "com.unity.ugui",
+            "expression": "2.0.0",
+            "define": "USD_RUNTIME_DEMO_UGUI"
+        }
+    ],
+    "noEngineReferences": false
+}
