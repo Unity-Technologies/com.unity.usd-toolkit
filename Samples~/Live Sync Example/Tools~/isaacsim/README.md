@@ -10,7 +10,7 @@ Isaac Sim connects to the same `UsdLiveSyncServer` as `Tools~/usd_live_sync.py`,
 
 | Requirement | Detail |
 | --- | --- |
-| **Isaac Sim** | 6.0.1, installed on the same machine as Unity. |
+| **Isaac Sim** | 6.1.0, installed on the same machine as Unity. |
 | **Operating system** | Windows. The launchers are batch files. |
 | **Unity** | The [Live Sync Example](../../README.md) scene, in Play mode. |
 

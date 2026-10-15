@@ -1,0 +1,21 @@
+﻿{
+    "name": "Unity.USDToolkit.Samples.LiveSync",
+    "rootNamespace": "Unity.USDToolkit.Samples.LiveSync",
+    "references": [
+        "GUID:71fa65d963c37aa448e37e287c77298b"
+    ],
+    "includePlatforms": [
+        "Editor",
+        "LinuxStandalone64",
+        "macOSStandalone",
+        "WindowsStandalone64"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

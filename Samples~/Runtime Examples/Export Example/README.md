@@ -1,5 +1,7 @@
 # Export Example
 
+![The Runtime USD Export Example: output folder, file name, format, root prim, transform policy and export options on the left, the export target and status on the right](../../../Documentation~/images/runtime_export.png)
+
 Exports a scene to USD from a runtime UI.
 
 1. Open `RuntimeExportExample.unity` and enter Play mode, or build a player that contains the scene.

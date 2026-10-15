@@ -1,5 +1,7 @@
 # Import Example
 
+![The Runtime USD Import Browser: folder, format and import options on the left, a scrollable list of scanned USD files with Select and Import buttons on the right](../../../Documentation~/images/runtime_import.png)
+
 Scans a folder for USD files, previews their statistics, and imports them at runtime.
 
 1. Open `RuntimeImportBrowser.unity` and enter Play mode.
