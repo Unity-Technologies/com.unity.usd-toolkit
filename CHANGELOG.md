@@ -5,6 +5,65 @@ All notable changes to the Unity USD Toolkit are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **AGV Fleet LiveSync Demo sample**
+  `Samples~/AGVFleet_LiveSync Demo` ports the AGV fleet LiveSync booth demo into the package. Unity
+  is the operator front end; NVIDIA Isaac Sim 6.1.0 simulates the fleet with physics, plans the paths
+  and manages the fleet; both open one USD stage, with one writer per prim and a separate layer per
+  side. Unity places obstacles and goals in its own layer (`unity_ops.usda`); Isaac Sim streams AGV
+  poses, paths and assignments back at 30 Hz.
+
+- **AGV Fleet sample: NVIDIA factory or a generated warehouse hall**
+  The hall is NVIDIA's Factory scene from the USD Explorer Sample Asset Pack, which users download
+  from NVIDIA and unzip next to `Assets` (no NVIDIA content ships with the sample), or a warehouse
+  hall the sample generates: racks with aisles, pick and drop stations, charging docks and obstacles,
+  deterministic per seed. The generated hall is written as USD with UsdPhysics collision and imported
+  through this package, and its lanes come from the same generator as its geometry, so the AGVs'
+  routes always match it. With the environment on Auto the sample uses the factory when it finds the
+  file and the generated hall otherwise, with one log line that links the download.
+
+- **AGV Fleet sample: Isaac Sim follows Unity's environment**
+  Unity writes `environment.json` to the shared stage folder (the environment's USD file, planning
+  area, spawn poses, loops and, for the generated hall, the exact obstacle boxes); the Isaac Sim side
+  loads it at launch, so both always run the same environment. In Auto mode Unity hands the fleet to
+  Isaac Sim as soon as it streams that environment and back when it stops, in either start order, and
+  ignores an Isaac Sim that runs another one. Regenerate builds the next seed while Isaac Sim is not
+  driving.
+
+- **AGV Fleet sample: authenticated hub**
+  The Isaac Sim hub requires a token, as in the Live Sync Example: `AGV_FLEET_HUB_TOKEN`, or one
+  written per launch to an owner-only `hub_token.txt`; clients that do not authenticate first, or
+  within 3 seconds, are dropped and receive nothing.
+
+- **AGV Fleet sample: tests**
+  36 EditMode tests (generator determinism, lane connectivity and clearance, the generated USD and
+  its collision, environment selection, the `environment.json` contract) and a standard-library
+  Python suite for the Isaac Sim side (`Tools~/agv_fleet/tests`: environment loading, colours, hub
+  authentication).
+
+- **Documentation for the AGV Fleet sample**
+  The package README lists the sample with a thumbnail and a video link, the user manual has a
+  section for it, and `ThirdPartyNotices.md` describes its Isaac Sim integration, the user-downloaded
+  asset pack and the documentation screenshot that shows the factory.
+
+- **Runtime Demo: animated sample**
+  `USDSamples/plm_indexer_anim.usda` has a default prim with its own translate and rotate and a
+  time-sampled turntable and clamp (0–48 at 24 fps), so a referencing export shows both fixes below.
+
+### Fixed
+
+- **Runtime Demo: a referencing export keeps each part's own transform**
+  The placement was authored on the referencing prim and replaced the referenced default prim's
+  `xformOpOrder`, so a part whose default prim is transformed in its source landed offset (0.5 m
+  for the indexer sample). Each source now sits under a wrapper `Xform` that carries the placement.
+- **Runtime Demo: a referencing export keeps the sources' time range**
+  A stage reads time metadata from its root layer only, so the assembled layer had none. The
+  writer now copies the first source's rates and the union of the ranges, converted to that rate.
+  Only text (`.usda`) headers can be read; binary sources add nothing and are named in one log line.
+
 ## [0.8.0-exp.1] - 2026-10-14
 
 ### Added

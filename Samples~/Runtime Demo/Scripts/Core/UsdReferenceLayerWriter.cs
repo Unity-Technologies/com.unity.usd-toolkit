@@ -22,6 +22,16 @@ namespace Unity.USDToolkit.RuntimeDemo
     /// The consequence is that referencing mode emits .usda. That is not an ASCII dump of
     /// geometry, it is a couple of kilobytes of pointers and transforms, which is exactly the
     /// artifact you want to show a PLM audience.
+    ///
+    /// Each source gets a wrapper Xform that carries the placement, with the reference one level
+    /// below it. Authoring the placement on the referencing prim itself would replace the source
+    /// defaultPrim's own xformOpOrder, and with it any transform the source puts on that prim.
+    ///
+    /// A stage takes its time metadata from its root layer only, so the sources' time range
+    /// would otherwise be lost: the layer carries the first source's timeCodesPerSecond and
+    /// framesPerSecond and the union of the sources' ranges, converted to that rate. Only what a
+    /// source authors is copied, and only text sources can be read (see
+    /// <see cref="UsdLayerTimeMetadata"/>).
     /// </remarks>
     public static class UsdReferenceLayerWriter
     {
@@ -76,6 +86,7 @@ namespace Unity.USDToolkit.RuntimeDemo
             builder.AppendLine($"    defaultPrim = \"{rootPrim}\"");
             builder.AppendLine("    metersPerUnit = 1");
             builder.AppendLine("    upAxis = \"Y\"");
+            AppendTimeMetadata(builder, entries);
             builder.AppendLine("    doc = \"\"\"Assembled in Unity at runtime by the USD Toolkit demo.");
             builder.AppendLine("Geometry is composed in by reference; the source layers remain the authority.\"\"\"");
             builder.AppendLine(")");
@@ -109,13 +120,23 @@ namespace Unity.USDToolkit.RuntimeDemo
                     reference += "<" + entry.DefaultPrimPath + ">";
                 }
 
+                // The placement goes on a wrapper so the referenced prim keeps its own xformOps.
+                // The referenced prim is typeless so it takes its type from the source.
+                string referencedName = SanitizeIdentifier(
+                    entry.DefaultPrimPath?.Substring(entry.DefaultPrimPath.LastIndexOf('/') + 1),
+                    primName);
+
                 builder.AppendLine();
-                builder.AppendLine($"    def Xform \"{primName}\" (");
-                builder.AppendLine($"        prepend references = {reference}");
-                builder.AppendLine("    )");
+                builder.AppendLine($"    def Xform \"{primName}\"");
                 builder.AppendLine("    {");
                 builder.AppendLine($"        matrix4d xformOp:transform = {FormatMatrix(entry.SourceToWorld)}");
                 builder.AppendLine("        uniform token[] xformOpOrder = [\"xformOp:transform\"]");
+                builder.AppendLine();
+                builder.AppendLine($"        def \"{referencedName}\" (");
+                builder.AppendLine($"            prepend references = {reference}");
+                builder.AppendLine("        )");
+                builder.AppendLine("        {");
+                builder.AppendLine("        }");
                 builder.AppendLine("    }");
             }
 
@@ -126,6 +147,99 @@ namespace Unity.USDToolkit.RuntimeDemo
             File.WriteAllText(fullOutputPath, contents, new UTF8Encoding(false));
             report.ByteCount = new FileInfo(fullOutputPath).Length;
             return report;
+        }
+
+        /// <summary>
+        /// Writes timeCodesPerSecond / framesPerSecond (from the first source that authors each)
+        /// and startTimeCode / endTimeCode (the union of the sources' ranges), each only when some
+        /// source authors it. Sources without time metadata leave the header as it was.
+        /// </summary>
+        /// <remarks>
+        /// USD scales a referenced layer's time samples by the root's time codes per second over
+        /// the source's, so each source's range is converted into the root's rate before the union:
+        /// a 30 tcps source with 0-30 covers 0-24 under a 24 tcps root.
+        /// </remarks>
+        private static void AppendTimeMetadata(StringBuilder builder, IReadOnlyList<UsdSceneEntry> entries)
+        {
+            var sources = new List<UsdLayerTimeMetadata>();
+            var skippedBinary = new List<string>();
+            var read = new HashSet<string>(StringComparer.Ordinal);
+            foreach (UsdSceneEntry entry in entries)
+            {
+                if (!File.Exists(entry.SourcePath) || !read.Add(Path.GetFullPath(entry.SourcePath)))
+                {
+                    continue;
+                }
+
+                UsdLayerTimeMetadata time;
+                try
+                {
+                    time = UsdLayerTimeMetadata.Read(entry.SourcePath);
+                }
+                catch (Exception exception) when (exception is IOException || exception is UnauthorizedAccessException)
+                {
+                    Debug.LogWarning($"Referencing export: could not read the time metadata of {entry.DisplayName}, so its time range and rate are unknown. {exception.Message}");
+                    continue;
+                }
+
+                if (time.IsBinary)
+                {
+                    // Not a problem in itself: most binary sources carry no animation at all, and
+                    // whether this one does cannot be told without the toolkit reporting it.
+                    skippedBinary.Add(entry.DisplayName);
+                    continue;
+                }
+
+                sources.Add(time);
+            }
+
+            if (skippedBinary.Count > 0)
+            {
+                Debug.Log(
+                    $"Referencing export: time range not read from {skippedBinary.Count} binary source(s) (.usdc/.usd/.usdz): " +
+                    $"{string.Join(", ", skippedBinary)}. Only .usda headers are read.");
+            }
+
+            double? timeCodesPerSecond = null, framesPerSecond = null;
+            foreach (UsdLayerTimeMetadata time in sources)
+            {
+                timeCodesPerSecond ??= time.TimeCodesPerSecond;
+                framesPerSecond ??= time.FramesPerSecond;
+            }
+
+            double rootRate = UsdLayerTimeMetadata.EffectiveTimeCodesPerSecond(timeCodesPerSecond, framesPerSecond);
+            double? start = null, end = null;
+            foreach (UsdLayerTimeMetadata time in sources)
+            {
+                double scale = rootRate / time.EffectiveRate;
+                if (time.StartTimeCode.HasValue)
+                {
+                    start = Math.Min(start ?? double.MaxValue, Round(time.StartTimeCode.Value * scale));
+                }
+
+                if (time.EndTimeCode.HasValue)
+                {
+                    end = Math.Max(end ?? double.MinValue, Round(time.EndTimeCode.Value * scale));
+                }
+            }
+
+            AppendNumber(builder, "startTimeCode", start);
+            AppendNumber(builder, "endTimeCode", end);
+            AppendNumber(builder, "timeCodesPerSecond", timeCodesPerSecond);
+            AppendNumber(builder, "framesPerSecond", framesPerSecond);
+        }
+
+        private static void AppendNumber(StringBuilder builder, string key, double? value)
+        {
+            if (value.HasValue)
+            {
+                builder.AppendLine($"    {key} = {FormatNumber(value.Value)}");
+            }
+        }
+
+        private static string FormatNumber(double value)
+        {
+            return value.ToString("R", CultureInfo.InvariantCulture);
         }
 
         private static string ResolveAssetPath(string sourcePath, string outputDirectory, bool relative)

@@ -35,6 +35,11 @@
       "displayName": "Runtime Demo",
       "description": "A PLM-style runtime demo: import several USD files through a native file dialog, select and move parts with a transform gizmo, correct Z-up and centimetre stages, and export the result as a referencing layer or a flattened stage. Requires URP, the Input System and uGUI.",
       "path": "Samples~/Runtime Demo"
+    },
+    {
+      "displayName": "AGV Fleet LiveSync Demo",
+      "description": "An AGV fleet in a factory hall that runs locally in Unity or is simulated by Isaac Sim 6.1.0 over a shared USD stage. Requires URP and the Input System.",
+      "path": "Samples~/AGVFleet_LiveSync Demo"
     }
   ]
 }

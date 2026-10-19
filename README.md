@@ -114,7 +114,7 @@ To add the samples to your project:
 
 1. Open **Window > Package Management > Package Manager**.
 2. Select **Unity USD Toolkit**, then open the **Samples** tab.
-3. Next to **Runtime Examples**, **Live Sync Example** or **Runtime Demo**, select **Import**.
+3. Next to **Runtime Examples**, **Live Sync Example**, **Runtime Demo** or **AGV Fleet LiveSync Demo**, select **Import**.
 
 Unity copies each sample to `Assets/Samples/Unity USD Toolkit/<version>/<sample>`, where you can open and edit the scenes. This works the same for every install method, including Git URLs and tarballs, which Unity installs as read-only packages. The two Runtime Examples scenes share one UI theme, so they import together. The package doesn't compile the samples until you import them.
 
@@ -124,8 +124,9 @@ Unity copies each sample to `Assets/Samples/Unity USD Toolkit/<version>/<sample>
 | <a href="Samples~/Runtime%20Examples/Import%20Example/README.md"><img src="Documentation~/images/runtime_import.png" alt="Import Example" width="240"></a> | **[Import Example](Samples~/Runtime%20Examples/Import%20Example/README.md)** | `Import Example/RuntimeImportBrowser.unity` | A runtime browser that scans a folder for USD files, previews their statistics and imports them. |
 | <a href="Samples~/Live%20Sync%20Example/README.md"><img src="Documentation~/images/hero-unity-isaac-side-by-side.png" alt="USD Live Sync" width="240"></a> | **[USD Live Sync](Samples~/Live%20Sync%20Example/README.md)** | `LiveSyncExample.unity` | Two-way transform sync between the Unity Editor and Isaac Sim 6.1.0 or a Python client. |
 | <a href="Samples~/Runtime%20Demo/README.md"><img src="Documentation~/images/usd_runtime_demo.png" alt="Runtime Demo" width="240"></a> | **[Runtime Demo](Samples~/Runtime%20Demo/README.md)** | `Scenes/USDRuntimeDemo.unity` | A runtime app that imports several USD files, lets you select and move parts with a transform gizmo, corrects Z-up and centimetre files, and exports the result as a referencing layer or a flattened stage. |
+| <a href="Samples~/AGVFleet_LiveSync%20Demo/README.md"><img src="Documentation~/images/agv_fleet_livesync.png" alt="AGV Fleet LiveSync Demo: Isaac Sim and Unity side by side, both showing the factory with the AGV fleet" width="240"></a> | **[AGV Fleet LiveSync Demo](Samples~/AGVFleet_LiveSync%20Demo/README.md)** | `Scenes/AGVFleet_LiveSync.unity` | An AGV fleet in NVIDIA's factory scene (downloaded separately) or a generated warehouse hall, with Unity as the operator front end and Isaac Sim 6.1.0 simulating the fleet over a shared USD stage. [Video](https://youtu.be/P8_rpQgEzSU). |
 
-The Export and Import examples import together as **Runtime Examples**. **Live Sync Example** and **Runtime Demo** are separate samples; Runtime Demo needs URP, the Input System and uGUI in the project.
+The Export and Import examples import together as **Runtime Examples**. **Live Sync Example**, **Runtime Demo** and **AGV Fleet LiveSync Demo** are separate samples; Runtime Demo needs URP, the Input System and uGUI in the project, and AGV Fleet LiveSync Demo needs URP and the Input System.
 
 If you imported the samples before, delete the old copy under `Assets/Samples/Unity USD Toolkit` before you import them again.
 
@@ -236,7 +237,7 @@ The package does not depend on `com.unity.formats.usd`, `com.unity.importer.usd`
 | Exporting a mesh fails in batch mode | Meshes without **Read/Write Enabled** need a graphics device. | Enable **Read/Write Enabled** on the meshes. |
 | The package works in the Editor but not in a player | The player targets an unsupported platform. | Build for Windows x64, macOS or Linux x64. |
 
-For more, see [Troubleshooting](Documentation~/Unity%20USD%20Toolkit%20User%20Manual%20EN.md#12-troubleshooting) in the User Manual.
+For more, see [Troubleshooting](Documentation~/Unity%20USD%20Toolkit%20User%20Manual%20EN.md#13-troubleshooting) in the User Manual.
 
 ---
 

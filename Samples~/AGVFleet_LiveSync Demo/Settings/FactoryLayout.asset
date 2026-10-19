@@ -1,0 +1,132 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 8dc7e19228ec47d9afe07d44721362b3, type: 3}
+  m_Name: FactoryLayout
+  m_EditorClassIdentifier: AGVFleet.LiveSyncDemo::Unity.USDToolkit.Samples.AGVFleet.LiveSyncDemo.FactoryLayout
+  metersPerUnit: 0.01
+  layout:
+    gridBounds:
+      serializedVersion: 2
+      x: -18
+      y: -31
+      width: 38
+      height: 62
+    freeSeed: {x: 2, y: 20}
+    spawns:
+    - agvId: AGV_01
+      position: {x: -5, y: 18.5}
+      yawDeg: 0
+    - agvId: AGV_02
+      position: {x: 6.8, y: -18}
+      yawDeg: 90
+    - agvId: AGV_03
+      position: {x: -7.2, y: -18}
+      yawDeg: 90
+    loops:
+    - agvId: AGV_01
+      waypoints:
+      - {x: -5, y: 18.5}
+      - {x: 8, y: 18.5}
+      - {x: 8, y: 23}
+      - {x: -5, y: 23}
+      stations:
+      - Dock_01
+      - North_Pick
+      - 
+      - North_Drop
+    - agvId: AGV_02
+      waypoints:
+      - {x: 6.8, y: -18}
+      - {x: 6.8, y: 8}
+      - {x: 9.3, y: 8}
+      - {x: 9.3, y: -18}
+      stations:
+      - Dock_02
+      - East_Pick
+      - 
+      - East_Drop
+    - agvId: AGV_03
+      waypoints:
+      - {x: -7.2, y: -18}
+      - {x: -7.2, y: 8}
+      - {x: -5.6, y: 8}
+      - {x: -5.6, y: -18}
+      stations:
+      - Dock_03
+      - West_Pick
+      - 
+      - West_Drop
+    routeGraph:
+      nodes:
+      - {x: -5, y: 18.5}
+      - {x: 8, y: 18.5}
+      - {x: 8, y: 23}
+      - {x: -5, y: 23}
+      - {x: 6.8, y: -18}
+      - {x: 6.8, y: 8}
+      - {x: 9.3, y: 8}
+      - {x: 9.3, y: -18}
+      - {x: -7.2, y: -18}
+      - {x: -7.2, y: 8}
+      - {x: -5.6, y: 8}
+      - {x: -5.6, y: -18}
+      edges:
+      - {x: 0, y: 1}
+      - {x: 1, y: 2}
+      - {x: 2, y: 3}
+      - {x: 0, y: 3}
+      - {x: 4, y: 5}
+      - {x: 5, y: 6}
+      - {x: 6, y: 7}
+      - {x: 4, y: 7}
+      - {x: 8, y: 9}
+      - {x: 9, y: 10}
+      - {x: 10, y: 11}
+      - {x: 8, y: 11}
+    stations:
+    - name: Dock_01
+      kind: 2
+      position: {x: -5, y: 18.5}
+      yawDeg: 0
+    - name: North_Pick
+      kind: 0
+      position: {x: 8, y: 18.5}
+      yawDeg: 0
+    - name: North_Drop
+      kind: 1
+      position: {x: -5, y: 23}
+      yawDeg: 0
+    - name: Dock_02
+      kind: 2
+      position: {x: 6.8, y: -18}
+      yawDeg: 0
+    - name: East_Pick
+      kind: 0
+      position: {x: 6.8, y: 8}
+      yawDeg: 0
+    - name: East_Drop
+      kind: 1
+      position: {x: 9.3, y: -18}
+      yawDeg: 0
+    - name: Dock_03
+      kind: 2
+      position: {x: -7.2, y: -18}
+      yawDeg: 0
+    - name: West_Pick
+      kind: 0
+      position: {x: -7.2, y: 8}
+      yawDeg: 0
+    - name: West_Drop
+      kind: 1
+      position: {x: -5.6, y: -18}
+      yawDeg: 0
+    staticObstacles: []
