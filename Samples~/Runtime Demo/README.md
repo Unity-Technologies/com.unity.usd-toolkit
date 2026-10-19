@@ -39,7 +39,7 @@ Three things worth knowing about how the demo works.
 The demo exports the assembled scene in one of two ways, chosen at export time.
 
 **Referencing** keeps your PLM or DCC files as the single source of truth. The export is a
-small layer, about 1.5 KB for the three samples, that points at the original files and records
+small layer, under 2 KB for the three samples, that points at the original files and records
 only what changed in Unity: where each part sits and how it is oriented. The geometry is never
 copied. When an upstream file is revised, the assembly picks up the change the next time it is
 opened. Materials, metadata and anything else in the source files reach every consumer
@@ -51,6 +51,34 @@ you see your own file paths and the placement of each part. It is standard USD: 
 layer. The demo writes this layer with its own writer (`Scripts/Core/UsdReferenceLayerWriter.cs`),
 because the toolkit's exporter writes geometry, not references.
 
+What the layer keeps from each source:
+
+- **The part's own transform.** Each source sits under a wrapper `Xform` named after the file,
+  which holds the placement from Unity. The reference is one level below it, on a prim named
+  after the source's default prim. If the default prim carries its own translate, rotate or
+  scale, it keeps them, and the placement applies on top. Putting the placement on the
+  referencing prim itself would replace the default prim's `xformOpOrder`, and the part would
+  land offset by whatever transform it carried.
+- **The time range.** A stage reads `startTimeCode`, `endTimeCode`, `timeCodesPerSecond` and
+  `framesPerSecond` from its root layer only, so the export copies them from the sources. It
+  writes the rates of the first source that authors them, and the union of the sources' ranges.
+  USD rescales a referenced layer's time samples to the root's time codes per second, so each
+  range is converted to that rate first: a source at 30 time codes per second with a range of
+  0–30 covers 0–24 in a layer at 24. A key that no source authors is not written, so a source
+  without time metadata leaves the layer unchanged.
+
+Two limitations:
+
+- **Time metadata is read from text sources only.** The toolkit's import does not report a
+  stage's time metadata, so the demo reads it from the layer header itself (see
+  `Scripts/Core/UsdLayerTimeMetadata.cs`). That works for `.usda` and for a text `.usd`. Binary
+  `.usdc` files, binary `.usd` files and `.usdz` packages add no time range; each export logs one
+  info line naming the binary sources it skipped. Most Isaac Sim and Omniverse output is binary
+  `.usd`, so for now an export assembled from those files carries no time range.
+- **Only the default prim is referenced.** A reference brings in one prim and everything below
+  it, which is standard USD behaviour. Top-level prims next to the source's default prim, such
+  as a second root or a material scope outside it, are not part of the export.
+
 **Flattening** bakes all geometry into one self-contained stage, written as compact binary
 `.usdc` by default (`.usda` is available for inspection). Use it when the file has to travel
 without its sources, for example to a supplier, to a review tool or into an archive.
@@ -60,7 +88,7 @@ without its sources, for example to a supplier, to a review tool or into an arch
 | Source files stay the authority | yes | no, it is a snapshot |
 | Picks up upstream revisions | yes | no |
 | Needs the source files to open | yes | no |
-| Size (three samples) | ~1.5 KB | ~35 KB |
+| Size (three samples) | < 2 KB | ~35 KB |
 
 ### 2. Z-up and centimetre files arrive the right way up and the right size
 
@@ -131,7 +159,7 @@ hidden.
 |---|---|---|
 | Composition | `prepend references` to the original layers | all geometry baked into one stage |
 | Format | `.usda` (see above) | `.usdc`, `.usda` as debug fallback |
-| Size (3 samples) | **1.5 KB** | **35 KB** |
+| Size (3 samples) | **< 2 KB** | **35 KB** |
 | Source stays authority | yes | no |
 | External dependencies | yes — the source files | none |
 
@@ -141,7 +169,7 @@ hidden.
 
 Everything below was run against this build; none of it needs repeating on the day.
 
-**Samples** — `USDSamples/` holds three pre-validated files, all passing `usdchecker`. The
+**Samples** — `USDSamples/` holds four pre-validated files, all passing `usdchecker`. The
 Editor reads them in place; a player build reads the copy the build preprocessor puts in
 `Assets/StreamingAssets/USDSamples/` (an existing copy there takes precedence in both).
 
@@ -150,6 +178,7 @@ Editor reads them in place; a player build reads the copy the build preprocessor
 | `plm_bracket.usdc` | Y-up, metres, binary | the clean case |
 | `plm_housing.usda` | Y-up, metres, ASCII | proves ASCII input works too |
 | `plm_gearbox_zup_cm.usdc` | **Z-up, centimetres** | proves the conversion config is real |
+| `plm_indexer_anim.usda` | Y-up, metres, ASCII, **animated** 0–48 at 24 fps | its default prim has its own transform and two child prims are time-sampled, so a referencing export shows that both survive |
 
 **Round trip** — all three imported, moved and rotated, then exported and re-imported:
 
@@ -162,6 +191,12 @@ Editor reads them in place; a player build reads the copy the build preprocessor
 
 Both modes compose to identical geometry. The Z-up/cm gearbox lands at 0.32 × 0.345 × 0.32 m in
 the exported stage — the correction survives the round trip.
+
+**Animated sample** — `plm_indexer_anim.usda` and `plm_bracket.usdc` were imported, moved and
+rotated, then exported as a referencing layer and re-imported. Every prim landed within 1e-7 m of
+where it was. The layer carries `startTimeCode = 0`, `endTimeCode = 48`, `timeCodesPerSecond = 24`
+and `framesPerSecond = 24`, and the indexer's default prim keeps its own
+`translate`/`rotateY`.
 
 **Relative-path fragility — tested specifically, because it is the likely failure:**
 
@@ -234,6 +269,7 @@ Runtime Demo/
       UsdImportService.cs          import + failure messages + load-in beat
       UsdExportService.cs          both export modes behind one call
       UsdReferenceLayerWriter.cs   the composition layer the toolkit cannot write
+      UsdLayerTimeMetadata.cs      time metadata from a text layer's header
       UsdStageConversion.cs        up-axis / unit correction
       UsdSceneEntry.cs             one loaded stage
     Interaction/                   gizmo, outline, selection, orbit camera
@@ -246,7 +282,7 @@ Runtime Demo/
     DemoSampleFilesBuildStep.cs    copies USDSamples/ into StreamingAssets for a player build
   Resources/RuntimeShaders/        materials + variant collection written by RuntimeShaderIncludes
   Shaders/                         outline, stencil mask, gizmo handle
-  USDSamples/                      the three pre-validated files
+  USDSamples/                      the four pre-validated files
 ```
 
 The scene (camera, lights, gizmo) is built in code on purpose: a demo that constructs itself cannot

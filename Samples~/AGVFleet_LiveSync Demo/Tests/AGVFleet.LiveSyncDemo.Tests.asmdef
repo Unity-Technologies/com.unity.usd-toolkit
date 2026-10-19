@@ -1,0 +1,32 @@
+{
+    "name": "AGVFleet.LiveSyncDemo.Tests",
+    "rootNamespace": "Unity.USDToolkit.Samples.AGVFleet.LiveSyncDemo.Tests",
+    "references": [
+        "AGVFleet.LiveSyncDemo",
+        "GUID:71fa65d963c37aa448e37e287c77298b",
+        "UnityEngine.TestRunner",
+        "UnityEditor.TestRunner"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": true,
+    "precompiledReferences": [
+        "nunit.framework.dll"
+    ],
+    "autoReferenced": false,
+    "defineConstraints": [
+        "UNITY_INCLUDE_TESTS",
+        "AGV_FLEET_INPUT_SYSTEM"
+    ],
+    "versionDefines": [
+        {
+            "name": "com.unity.inputsystem",
+            "expression": "1.7.0",
+            "define": "AGV_FLEET_INPUT_SYSTEM"
+        }
+    ],
+    "noEngineReferences": false
+}

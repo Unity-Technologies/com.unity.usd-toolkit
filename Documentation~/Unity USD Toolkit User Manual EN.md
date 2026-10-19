@@ -22,8 +22,9 @@ Read and write OpenUSD stages from Unity at runtime, on Windows, macOS and Linux
 8. [Untrusted USD files](#8-untrusted-usd-files)
 9. [Build a standalone player](#9-build-a-standalone-player)
 10. [The USD Live Sync sample](#10-the-usd-live-sync-sample)
-11. [Check exported USD files](#11-check-exported-usd-files)
-12. [Troubleshooting](#12-troubleshooting)
+11. [The AGV Fleet LiveSync Demo sample](#11-the-agv-fleet-livesync-demo-sample)
+12. [Check exported USD files](#12-check-exported-usd-files)
+13. [Troubleshooting](#13-troubleshooting)
 - [Appendix A. API reference](#appendix-a-api-reference)
 - [Appendix B. Verify the package's integrity](#appendix-b-verify-the-packages-integrity)
 - [Appendix C. Rebuild the native plugin](#appendix-c-rebuild-the-native-plugin)
@@ -552,13 +553,21 @@ Every connection must authenticate with a token before it receives data. The ser
 
 For setup instructions, see the [Live Sync Example guide](../Samples~/Live%20Sync%20Example/README.md).
 
-## 11. Check exported USD files
+## 11. The AGV Fleet LiveSync Demo sample
+
+`Samples~/AGVFleet_LiveSync Demo` shows a fleet of AGVs in a factory hall, with Unity as the operator front end and NVIDIA Isaac Sim 6.1.0 as the simulator. Both open one USD stage: Isaac Sim simulates the AGVs and streams their state to Unity; Unity writes the obstacles and goals the operator places to its own USD layer, which Isaac Sim reloads.
+
+The hall is either NVIDIA's Factory scene from the USD Explorer Sample Asset Pack, which you download from NVIDIA, or a warehouse hall the sample generates as USD and imports with this package. Without Isaac Sim, Unity shows the hall and the AGVs at their charging docks.
+
+The sample needs URP and the Input System. For setup instructions, see the [AGV Fleet LiveSync Demo guide](../Samples~/AGVFleet_LiveSync%20Demo/README.md).
+
+## 12. Check exported USD files
 
 - `usdchecker <file>` checks the structure and validity.
 - `usdcat <file>` prints the contents as text.
 - usdview, Isaac Sim, Omniverse or Blender display the geometry and materials.
 
-## 12. Troubleshooting
+## 13. Troubleshooting
 
 | Symptom | Cause | Solution |
 | --- | --- | --- |

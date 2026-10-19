@@ -1,0 +1,32 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 07634e3d02f1441086a54a00b59b25f8, type: 3}
+  m_Name: AgvFleetSettings
+  m_EditorClassIdentifier: AGVFleet.LiveSyncDemo::Unity.USDToolkit.Samples.AGVFleet.LiveSyncDemo.AgvFleetSettings
+  environment: 0
+  assetPackPath: ExternalAssets/USD_Explorer_Sample
+  factoryUsdInPack: Usd_Explorer/Samples/Examples/2023_2/Factory/Factory.usd
+  factoryLayout: {fileID: 11400000, guid: ddd22a57ff61492458c245f27b3776f9, type: 2}
+  generator:
+    hallLength: 48
+    hallWidth: 32
+    rackRows: 4
+    rackColumns: 3
+    aisleWidth: 3.2
+    stationCount: 3
+    agvCount: 3
+    seed: 1
+  simulation: 0
+  stageDir: UsdSync/AGVFleet
+  hubHost: 127.0.0.1
+  hubPort: 10010
+  agvModelUsd: 

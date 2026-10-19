@@ -238,6 +238,14 @@ Nature of the integration:
   standalone runner under
   `Samples~/Live Sync Example/Tools~/isaacsim` that connect an Isaac Sim stage to
   the sample's `UsdLiveSyncServer`.
+- The `AGV Fleet LiveSync Demo` sample ships an Isaac Sim launcher and fleet
+  simulation scripts under `Samples~/AGVFleet_LiveSync Demo/Tools~/agv_fleet`
+  that run in the user's Isaac Sim installation and stream AGV state to the
+  sample's Unity scene. At run time they load the idealworks iw_hub robot from
+  the user's Isaac Sim assets and, optionally, the "Factory" scene from NVIDIA's
+  USD Explorer Sample Asset Pack, which the user downloads from NVIDIA
+  (`https://d4i3qtqj3r0z5.cloudfront.net/USD_Explorer_Sample_NVD%4010011.zip`).
+  The pack states that it is bound by the NVIDIA Omniverse terms.
 
 Redistributed files:
 
@@ -253,9 +261,9 @@ Redistributed files:
 
 License:
 
-- The integration code under `Samples~/Live Sync Example/Tools~/isaacsim` is
-  Unity code licensed under the Unity Companion License for Unity-dependent
-  projects. See `LICENSE.md`.
+- The integration code under `Samples~/Live Sync Example/Tools~/isaacsim` and
+  `Samples~/AGVFleet_LiveSync Demo/Tools~/agv_fleet` is Unity code licensed under
+  the Unity Companion License for Unity-dependent projects. See `LICENSE.md`.
 - NVIDIA Isaac Sim, NVIDIA Omniverse, and any NVIDIA components they install are
   licensed to the user solely by NVIDIA under NVIDIA's own terms. Unity grants no
   rights in any NVIDIA software. Obtain Isaac Sim from NVIDIA and review the
