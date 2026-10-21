@@ -55,7 +55,7 @@ if (-not (Test-Path $UsdStageHeader)) {
     throw "OpenUSD headers were not found under $OpenUsdRoot. Expected: $UsdStageHeader"
 }
 
-# --- Source provenance gate (SECURITY-282834, trust chain) ---------------------------------
+# --- Source provenance gate (trust chain) ---------------------------------
 # The digest gate below establishes that the tree being copied is the tree that was reviewed. It
 # cannot establish where that tree came from -- by this point OpenUSD has already been fetched and
 # compiled. That earlier link is what the stamp carries: verify_upstream_sources.py writes it into
@@ -123,10 +123,12 @@ function Copy-DllsFromDirectory {
         return
     }
 
+    # No zlib: with --alembic, build_usd.py builds zlib on Windows for OpenEXR, which is compiled
+    # only to build Imath. Nothing the payload loads imports it, and an unsigned zlib DLL in the
+    # payload would fail pack.yml's signed-file list.
     Get-ChildItem $SourceDir -Filter "*.dll" | Where-Object {
         $_.Name -like "usd*.dll" -or
         $_.Name -ieq "tbb.dll" -or
-        $_.Name -like "zlib*.dll" -or
         $_.Name -like "boost*.dll"
     } | Where-Object {
         $_.Name -notlike "*_debug.dll" -and
@@ -180,7 +182,7 @@ function Copy-RuntimeDirectory {
     }
 }
 
-# --- Dependency digest gate (SECURITY-282834, CWE-347) -------------------------------------
+# --- Dependency digest gate (CWE-347) -------------------------------------
 # Everything below is copied verbatim off this machine into the shipped package, so a tampered
 # local OpenUSD/TBB tree would ride in unnoticed. Check what is about to be copied against the
 # checked-in record first.
@@ -191,16 +193,29 @@ foreach ($dir in @($OpenUsdBin, $OpenUsdLib)) {
             Where-Object { $_.Name -notlike "*debug*" } | ForEach-Object { $_.FullName }
     }
 }
+# CMake and pkg-config packages and manuals under share (zlib, which --alembic builds here for
+# OpenEXR, installs share\pkgconfig and share\man) are for building against the install, not for
+# running it, and carry the build machine's paths: they are neither recorded nor shipped.
+$BuildOnlyShare = @("cmake", "pkgconfig", "man", "doc")
+$BuildOnlySharePrefixes = $BuildOnlyShare | ForEach-Object { (Join-Path $OpenUsdShare $_) + [IO.Path]::DirectorySeparatorChar }
 foreach ($dir in @($OpenUsdLibUsd, $OpenUsdPlugin, $OpenUsdShare, $OpenUsdResources)) {
     if (Test-Path $dir) {
-        $DependencyFiles += Get-ChildItem $dir -Recurse -File |
-            Where-Object { $_.Extension -ne ".meta" } | ForEach-Object { $_.FullName }
+        $DependencyFiles += Get-ChildItem $dir -Recurse -File | Where-Object {
+            $file = $_.FullName
+            $_.Extension -ne ".meta" -and
+            -not ($BuildOnlySharePrefixes | Where-Object { $file.StartsWith($_, [StringComparison]::OrdinalIgnoreCase) })
+        } | ForEach-Object { $_.FullName }
     }
 }
 
 $DependencyMode = if ($RecordDependencyDigests) { "--record" } else { "--verify" }
 $VerifyScript = Join-Path $NativeDir "verify_dependency_digests.py"
-& python "$VerifyScript" --platform windows --root "$OpenUsdRoot" $DependencyMode @DependencyFiles
+# The list goes in a file (@file): passed as arguments it runs past Windows' 32767-character
+# command line once the install has Alembic's plugin in it.
+$DependencyList = Join-Path $BuildDir "dependency-files.txt"
+New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
+[IO.File]::WriteAllLines($DependencyList, [string[]]$DependencyFiles)
+& python "$VerifyScript" --platform windows --root "$OpenUsdRoot" $DependencyMode "@$DependencyList"
 if ($LASTEXITCODE -ne 0) {
     throw "Refusing to copy an unverified dependency tree into the package."
 }
@@ -229,6 +244,23 @@ Copy-RuntimeDirectory $OpenUsdLibUsd "lib\usd"
 Copy-RuntimeDirectory $OpenUsdPlugin "plugin"
 Copy-RuntimeDirectory $OpenUsdShare "share"
 Copy-RuntimeDirectory $OpenUsdResources "resources"
+
+$InstalledShare = Join-Path $InstallDir "share"
+foreach ($name in $BuildOnlyShare) {
+    $path = Join-Path $InstalledShare $name
+    foreach ($item in @($path, "$path.meta")) {
+        if (Test-Path -LiteralPath $item) {
+            Remove-Item -LiteralPath $item -Recurse -Force
+        }
+    }
+}
+if ((Test-Path $InstalledShare) -and
+    -not (Get-ChildItem $InstalledShare -Recurse -File | Where-Object { $_.Extension -ne ".meta" })) {
+    Remove-Item -LiteralPath $InstalledShare -Recurse -Force
+    if (Test-Path -LiteralPath "$InstalledShare.meta") {
+        Remove-Item -LiteralPath "$InstalledShare.meta" -Force
+    }
+}
 
 $UsdCodegenTemplates = Join-Path $InstallDir "lib\usd\usd\resources\codegenTemplates"
 if (Test-Path $UsdCodegenTemplates) {
@@ -279,7 +311,7 @@ if (Test-Path $UsdMonolithic) {
     Write-Host "Renamed OpenUSD monolithic usd_ms.dll -> $RenamedName and patched UnityUSDToolkitNative import."
 }
 
-# --- Rename Intel's TBB for the same reason (SECURITY-282834) -------------------------------
+# --- Rename Intel's TBB for the same reason (security review) -------------------------------
 # The Unity Editor ships its own tbb.dll in Frameworks, and Windows resolves an import by base
 # name against what is already loaded: whichever tbb.dll got there first wins, and the payload
 # runs against a build it was not compiled for. Both happen to be TBB 2020.3 today, so it works
@@ -303,7 +335,7 @@ if (Test-Path $TbbDll) {
     Write-Host "Renamed Intel tbb.dll -> $TbbRenamed and repointed usd_rt.dll's import."
 }
 
-# --- Authenticode signing (SECURITY-282834, CWE-347) ---------------------------------------
+# --- Authenticode signing (CWE-347) ---------------------------------------
 # Last step on purpose: the in-place import patch above rewrites bytes inside the DLL, which
 # would invalidate a signature applied before it. Failing here rather than shipping unsigned is
 # the point -- a silent fallback is how unsigned artifacts end up released.
@@ -319,7 +351,7 @@ they had been altered.
 
     # Intel's TBB is left alone: the DLL is the one from Intel's tbb-2020.3-win.zip and already
     # carries Intel's Authenticode signature, which signing it here would replace with ours (see
-    # .yamato/sign.yml). tbb.dll is the name a payload built before the rename carries.
+    # the CI signing job). tbb.dll is the name a payload built before the rename carries.
     $ToSign = @(Get-ChildItem $InstallDir -Filter "*.dll" -File |
         Where-Object { $_.Name -ne "tbb_usdrt.dll" -and $_.Name -ne "tbb.dll" } |
         ForEach-Object { $_.FullName })

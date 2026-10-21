@@ -12,7 +12,7 @@
 *.meta  text -filter -diff -merge
 
 # OpenUSD plugin descriptors are hashed byte-for-byte by the runtime integrity
-# check (SECURITY-282834, CWE-494), so their bytes must be identical on every
+# check (CWE-494), so their bytes must be identical on every
 # checkout. Without -text, core.autocrlf=true rewrites them to CRLF on Windows
 # and the digests in Runtime/Native/NativeRuntimeHashes.g.cs stop matching --
 # invisibly, because autocrlf converts back when git compares.

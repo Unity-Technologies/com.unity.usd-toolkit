@@ -76,7 +76,7 @@ The ABI stays at v2, so no version bump and no other platform is affected.
 ## 3. Get the repository
 
 ```powershell
-git clone https://github.cds.internal.unity3d.com/unity/com.unity.usd-toolkit C:\Dev\com.unity.usd-toolkit
+git clone https://github.com/Unity-Technologies/com.unity.usd-toolkit C:\Dev\com.unity.usd-toolkit
 cd C:\Dev\com.unity.usd-toolkit
 git lfs pull
 git switch main

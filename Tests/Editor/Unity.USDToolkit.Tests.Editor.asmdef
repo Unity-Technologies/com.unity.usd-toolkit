@@ -1,0 +1,33 @@
+{
+  "name": "Unity.USDToolkit.Tests.Editor",
+  "rootNamespace": "Unity.USDToolkit.Tests",
+  "references": [
+    "Unity.USDToolkit",
+    "Unity.USDToolkit.Editor",
+    "Unity.USDToolkit.Timeline",
+    "Unity.Timeline",
+    "UnityEngine.TestRunner",
+    "UnityEditor.TestRunner"
+  ],
+  "includePlatforms": [
+    "Editor"
+  ],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": true,
+  "precompiledReferences": [
+    "nunit.framework.dll"
+  ],
+  "autoReferenced": false,
+  "defineConstraints": [
+    "UNITY_INCLUDE_TESTS"
+  ],
+  "versionDefines": [
+    {
+      "name": "com.unity.timeline",
+      "expression": "1.7.0",
+      "define": "USD_TOOLKIT_TIMELINE"
+    }
+  ],
+  "noEngineReferences": false
+}

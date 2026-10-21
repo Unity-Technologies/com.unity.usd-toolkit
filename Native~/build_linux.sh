@@ -18,7 +18,7 @@ set -euo pipefail
 # This is the path the shipped Linux payload is built with. It used to be a sequence of manual
 # commands in Native~/REBUILD_WINDOWS_LINUX.md, which left the source-provenance check to whoever
 # ran them; as a script it enforces the same gates build_macos.sh and build_windows.ps1 do
-# (SECURITY-282834). It no longer builds the packman + Python layout it once targeted.
+# (security review). It no longer builds the packman + Python layout it once targeted.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PACKAGE_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -134,7 +134,7 @@ DST="${PACKAGE_DIR}/Runtime/Plugins/x86_64/Linux"
 LIBDST="${DST}/lib"
 BUILD_DIR="${SCRIPT_DIR}/build~/linux-x64"
 
-# --- Source provenance gate (SECURITY-282834, trust chain) ---------------------------------
+# --- Source provenance gate (trust chain) ---------------------------------
 # The digest gate below establishes that the tree being copied is the tree that was reviewed. It
 # cannot establish where that tree came from -- by this point OpenUSD has already been fetched and
 # compiled. That earlier link is what the stamp carries: Native~/build_openusd.py writes it into
@@ -151,7 +151,7 @@ elif ! python3 "${SCRIPT_DIR}/verify_upstream_sources.py" --platform linux \
     exit 1
 fi
 
-# --- Dependency digest gate (SECURITY-282834, CWE-347) -------------------------------------
+# --- Dependency digest gate (CWE-347) -------------------------------------
 # Everything below is copied verbatim off this machine into the shipped package, so a tampered
 # local OpenUSD/TBB tree would ride in unnoticed. --scan enumerates exactly what the assembly step
 # copies (SCAN_RULES["linux"] in the verifier); --record-dependency-digests updates the record

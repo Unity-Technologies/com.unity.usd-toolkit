@@ -1,0 +1,175 @@
+#usda 1.0
+(
+    doc = """PhysxMimicJointAPI the way Isaac Sim's Franka authors it: finger_joint2 has no drive and
+follows finger_joint1 with gearing -1, so both fingers open together. Beside it a revolute pair,
+follower_hinge following lead_hinge with gearing -2 and an offset of 0.1745 radians (10 degrees),
+to check the units: PhysX holds follower + gearing * reference + offset = 0 in radians."""
+    defaultPrim = "gripper_robot"
+    kilogramsPerUnit = 1
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "gripper_robot" (
+    prepend apiSchemas = ["PhysicsArticulationRootAPI"]
+)
+{
+    def PhysicsFixedJoint "rootJoint"
+    {
+        rel physics:body1 = </gripper_robot/hand>
+        point3f physics:localPos0 = (0, 0, 0.5)
+        point3f physics:localPos1 = (0, 0, 0)
+        quatf physics:localRot0 = (1, 0, 0, 0)
+        quatf physics:localRot1 = (1, 0, 0, 0)
+    }
+
+    def Xform "hand" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+    )
+    {
+        float physics:mass = 0.7
+        float3 physics:diagonalInertia = (0.002, 0.002, 0.002)
+        double3 xformOp:translate = (0, 0, 0.5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+        def Cube "collision" (
+            prepend apiSchemas = ["PhysicsCollisionAPI"]
+        )
+        {
+            double size = 1
+            double3 xformOp:scale = (0.2, 0.05, 0.05)
+            uniform token[] xformOpOrder = ["xformOp:scale"]
+        }
+
+        def PhysicsPrismaticJoint "finger_joint1" (
+            prepend apiSchemas = ["PhysicsDriveAPI:linear"]
+        )
+        {
+            uniform token physics:axis = "X"
+            rel physics:body0 = </gripper_robot/hand>
+            rel physics:body1 = </gripper_robot/left_finger>
+            point3f physics:localPos0 = (0.02, 0, -0.06)
+            point3f physics:localPos1 = (0, 0, 0)
+            quatf physics:localRot0 = (1, 0, 0, 0)
+            quatf physics:localRot1 = (1, 0, 0, 0)
+            float physics:lowerLimit = 0
+            float physics:upperLimit = 0.04
+            float drive:linear:physics:stiffness = 400
+            float drive:linear:physics:damping = 80
+            float drive:linear:physics:maxForce = 20
+            float drive:linear:physics:targetPosition = 0
+        }
+
+        # Turned 180 degrees about Z, as the Franka's is: +X opens the right finger to -X.
+        def PhysicsPrismaticJoint "finger_joint2" (
+            prepend apiSchemas = ["PhysxMimicJointAPI:rotX"]
+        )
+        {
+            uniform token physics:axis = "X"
+            rel physics:body0 = </gripper_robot/hand>
+            rel physics:body1 = </gripper_robot/right_finger>
+            point3f physics:localPos0 = (-0.02, 0, -0.06)
+            point3f physics:localPos1 = (0, 0, 0)
+            quatf physics:localRot0 = (0, 0, 0, 1)
+            quatf physics:localRot1 = (0, 0, 0, 1)
+            float physics:lowerLimit = 0
+            float physics:upperLimit = 0.04
+            float physxMimicJoint:rotX:gearing = -1
+            rel physxMimicJoint:rotX:referenceJoint = </gripper_robot/hand/finger_joint1>
+        }
+
+        def PhysicsRevoluteJoint "lead_hinge" (
+            prepend apiSchemas = ["PhysicsDriveAPI:angular"]
+        )
+        {
+            uniform token physics:axis = "Y"
+            rel physics:body0 = </gripper_robot/hand>
+            rel physics:body1 = </gripper_robot/lead_paddle>
+            point3f physics:localPos0 = (0.1, 0, 0)
+            point3f physics:localPos1 = (0, 0, 0)
+            quatf physics:localRot0 = (1, 0, 0, 0)
+            quatf physics:localRot1 = (1, 0, 0, 0)
+            float physics:lowerLimit = -90
+            float physics:upperLimit = 90
+            float drive:angular:physics:stiffness = 5
+            float drive:angular:physics:damping = 0.5
+            float drive:angular:physics:targetPosition = 0
+        }
+
+        def PhysicsRevoluteJoint "follower_hinge" (
+            prepend apiSchemas = ["PhysxMimicJointAPI:rotY"]
+        )
+        {
+            uniform token physics:axis = "Y"
+            rel physics:body0 = </gripper_robot/hand>
+            rel physics:body1 = </gripper_robot/follower_paddle>
+            point3f physics:localPos0 = (-0.1, 0, 0)
+            point3f physics:localPos1 = (0, 0, 0)
+            quatf physics:localRot0 = (1, 0, 0, 0)
+            quatf physics:localRot1 = (1, 0, 0, 0)
+            float physics:lowerLimit = -120
+            float physics:upperLimit = 120
+            float physxMimicJoint:rotY:gearing = -2
+            float physxMimicJoint:rotY:offset = 0.1745329
+            rel physxMimicJoint:rotY:referenceJoint = </gripper_robot/hand/lead_hinge>
+        }
+    }
+
+    def Xform "left_finger" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+    )
+    {
+        float physics:mass = 0.02
+        float3 physics:diagonalInertia = (0.00001, 0.00001, 0.00001)
+        double3 xformOp:translate = (0.02, 0, 0.44)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+        def Cube "collision" (
+            prepend apiSchemas = ["PhysicsCollisionAPI"]
+        )
+        {
+            double size = 1
+            double3 xformOp:scale = (0.01, 0.02, 0.06)
+            uniform token[] xformOpOrder = ["xformOp:scale"]
+        }
+    }
+
+    def Xform "right_finger" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+    )
+    {
+        float physics:mass = 0.02
+        float3 physics:diagonalInertia = (0.00001, 0.00001, 0.00001)
+        double3 xformOp:translate = (-0.02, 0, 0.44)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+        def Cube "collision" (
+            prepend apiSchemas = ["PhysicsCollisionAPI"]
+        )
+        {
+            double size = 1
+            double3 xformOp:scale = (0.01, 0.02, 0.06)
+            uniform token[] xformOpOrder = ["xformOp:scale"]
+        }
+    }
+
+    def Xform "lead_paddle" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+    )
+    {
+        float physics:mass = 0.05
+        float3 physics:diagonalInertia = (0.00005, 0.00005, 0.00005)
+        double3 xformOp:translate = (0.1, 0, 0.5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Xform "follower_paddle" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+    )
+    {
+        float physics:mass = 0.05
+        float3 physics:diagonalInertia = (0.00005, 0.00005, 0.00005)
+        double3 xformOp:translate = (-0.1, 0, 0.5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+}

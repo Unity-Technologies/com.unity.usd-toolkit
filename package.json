@@ -1,7 +1,7 @@
 {
   "name": "com.unity.usd-toolkit",
   "displayName": "Unity USD Toolkit",
-  "version": "0.8.0-exp.1",
+  "version": "0.8.1-exp.1",
   "unity": "6000.4",
   "description": "Runtime USD toolkit for Unity applications using a custom native OpenUSD wrapper. A C# integration layer for connecting Unity to NVIDIA's Omniverse/OpenUSD ecosystem. Wraps Pixar's OpenUSD 26.05 native binaries via P/Invoke so Unity can read, write, and round-trip USD stages.",
   "license": "SEE LICENSE.md",
@@ -27,6 +27,11 @@
       "path": "Samples~/Runtime Examples"
     },
     {
+      "displayName": "Reference Look",
+      "description": "A URP render setup (Deferred, Surface Cache GI, screen-space reflections, Isaac Sim's tone curve as a LUT) that brings an imported stage close to Isaac Sim 6.2's RTX Real-Time renderer, with a menu that imports a USD file into the sample scene and saves the result.",
+      "path": "Samples~/ReferenceLook"
+    },
+    {
       "displayName": "Live Sync Example",
       "description": "Streams transforms in both directions between a running Unity scene and Isaac Sim 6.1.0 or a Python client over loopback TCP.",
       "path": "Samples~/Live Sync Example"
@@ -40,6 +45,11 @@
       "displayName": "AGV Fleet LiveSync Demo",
       "description": "An AGV fleet in a factory hall that runs locally in Unity or is simulated by Isaac Sim 6.1.0 over a shared USD stage. Requires URP and the Input System.",
       "path": "Samples~/AGVFleet_LiveSync Demo"
+    },
+    {
+      "displayName": "Isaac Robot Physics",
+      "description": "Imports an Isaac Sim robot with its UsdPhysics (ArticulationBody joints, limits, drives, colliders) and compares every joint and body with what Isaac Sim shows; drives the joints and runs a limit test in Play Mode. Ships a small arm and downloads NVIDIA's Franka Panda (Isaac Sim 6.0) on request.",
+      "path": "Samples~/Isaac Robot Physics"
     }
   ]
 }

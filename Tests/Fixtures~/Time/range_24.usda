@@ -1,0 +1,21 @@
+#usda 1.0
+(
+    defaultPrim = "Root"
+    doc = "Time-metadata fixture range_24, written by make_time.py."
+    endTimeCode = 48
+    framesPerSecond = 24
+    metersPerUnit = 1
+    startTimeCode = 0
+    timeCodesPerSecond = 24
+    upAxis = "Y"
+)
+
+def Xform "Root"
+{
+    double3 xformOp:translate.timeSamples = {
+        0: (0, 0, 0),
+        48: (1, 0, 0),
+    }
+    uniform token[] xformOpOrder = ["xformOp:translate"]
+}
+

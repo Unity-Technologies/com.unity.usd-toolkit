@@ -21,6 +21,11 @@ DevSamples~/
 !Runtime/Plugins/**/*.usda
 !Native~/Tests~/*.usda
 !Native~/Tests~/**/*.usda
+# Damaged binary layers file_format_test replays (a few KB each).
+!Native~/Tests~/fuzz_regressions/*.usdc
+!Tests/Fixtures~/**/*.usda
+# Binary twins of the time-metadata fixtures, so the stage API is read from a crate too (~1 KB each).
+!Tests/Fixtures~/Time/*.usdc
 # The Runtime Demo sample ships its own USD files (tracked with Git LFS, see .gitattributes).
 !Samples~/Runtime Demo/USDSamples/*.usda
 !Samples~/Runtime Demo/USDSamples/*.usdc

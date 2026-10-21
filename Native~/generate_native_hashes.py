@@ -10,7 +10,7 @@ binary with a new digest, and a stale manifest makes the package refuse its own 
 
 Descriptors are covered, not just libraries: OpenUSD decides which library to load from
 plugInfo.json, so hashing only the binaries leaves an attacker free to add a library and
-repoint a descriptor at it (SECURITY-282834, CWE-345).
+repoint a descriptor at it (CWE-345).
 
 Entries are keyed by "<platform>/<path relative to that platform's payload root>", because
 descriptor file names repeat across platforms -- every platform ships its own
@@ -24,7 +24,7 @@ payload, whereas replacing these values means patching a compiled assembly.
     python3 Native~/generate_native_hashes.py --release
 
 is what the pack job runs: it also refuses a payload whose OpenUSD install was not built from
-scanned source, which Native~/CMakeLists.txt marks with .unscanned-build (SECURITY-282834,
+scanned source, which Native~/CMakeLists.txt marks with .unscanned-build (security review,
 CWE-1104). Without --release such a payload is hashed with a warning, so local builds and the
 integrity job keep working while a scan is outstanding; it cannot be packed.
 
@@ -71,7 +71,7 @@ LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec/"
 # Left in a platform's payload root by Native~/CMakeLists.txt when the wrapper was built with the
 # source-provenance gate skipped, and removed again by the next build that passes it. Hashing such
 # a payload would record digests the loader then trusts, so the one step that makes a payload
-# loadable -- and the CI jobs that run it -- refuses instead (SECURITY-282834, CWE-345).
+# loadable -- and the CI jobs that run it -- refuses instead (CWE-345).
 UNVERIFIED_MARKER = ".unverified-build"
 
 # Left by Native~/CMakeLists.txt when the OpenUSD install was not built with build_openusd.py

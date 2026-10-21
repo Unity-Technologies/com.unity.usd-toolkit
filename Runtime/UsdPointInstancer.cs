@@ -5,7 +5,10 @@ namespace Unity.USDToolkit
 {
     /// <summary>
     /// Draws one prototype mesh of a <c>UsdGeomPointInstancer</c> at every place the stage
-    /// scatters it.
+    /// scatters it. A skinned prototype (UsdSkel inside the prototype) is drawn in the pose its
+    /// skeleton has now: <see cref="SkinnedSource"/> is baked once a frame and that one posed mesh
+    /// drawn at every placement, so every instance plays the prototype's animation together, as
+    /// USD renders them.
     /// </summary>
     /// <remarks>
     /// A point instancer is "one prototype, many placements", and USD stores it that way: a
@@ -46,6 +49,7 @@ namespace Unity.USDToolkit
 
         [SerializeField] private Mesh mesh;
         [SerializeField] private Material[] materials;
+        [SerializeField] private Renderer skinnedSource;
 
         /// <summary>
         /// Distance at which the prototype's least detailed level is used. Zero to always draw at
@@ -78,6 +82,8 @@ namespace Unity.USDToolkit
         private Bounds[] cellBounds;
         private Matrix4x4 builtFrom;
         private Matrix4x4[] builtFor;
+        private Bounds builtMeshBounds;
+        private Mesh posed;
 
         /// The prototype mesh being scattered.
         public Mesh Mesh
@@ -86,6 +92,21 @@ namespace Unity.USDToolkit
             set
             {
                 mesh = value;
+                Invalidate();
+            }
+        }
+
+        /// <summary>
+        /// The skinned prototype the instances follow: a SkinnedMeshRenderer, or a MeshRenderer
+        /// posed by a <see cref="UsdDualQuaternionSkin"/>. Its pose is baked each frame and drawn
+        /// instead of <see cref="Mesh"/>, which is then its bind pose. Null for a static prototype.
+        /// </summary>
+        public Renderer SkinnedSource
+        {
+            get => skinnedSource;
+            set
+            {
+                skinnedSource = value;
                 Invalidate();
             }
         }
@@ -129,6 +150,23 @@ namespace Unity.USDToolkit
             Invalidate();
         }
 
+        private void OnDestroy()
+        {
+            if (posed == null)
+            {
+                return;
+            }
+
+            if (Application.isPlaying)
+            {
+                Destroy(posed);
+            }
+            else
+            {
+                DestroyImmediate(posed);
+            }
+        }
+
         private void Invalidate()
         {
             world = null;
@@ -139,7 +177,44 @@ namespace Unity.USDToolkit
 
         private void Update()
         {
-            Draw();
+            if (skinnedSource == null)
+            {
+                Draw();
+            }
+        }
+
+        // A skinned prototype is drawn after animation has posed its skeleton for the frame.
+        private void LateUpdate()
+        {
+            if (skinnedSource != null)
+            {
+                Draw();
+            }
+        }
+
+        // The skinned source as it stands now, baked in its own space -- the space the placements
+        // put the prototype mesh in.
+        private Mesh Pose()
+        {
+            if (posed == null)
+            {
+                posed = new Mesh { name = (mesh != null ? mesh.name : "Prototype") + " (posed)", hideFlags = HideFlags.DontSave };
+            }
+
+            if (skinnedSource is SkinnedMeshRenderer skinned)
+            {
+                skinned.BakeMesh(posed, true);
+            }
+            else if (skinnedSource.TryGetComponent(out UsdDualQuaternionSkin dualQuaternion))
+            {
+                dualQuaternion.BakeMesh(posed);
+            }
+            else
+            {
+                return mesh;
+            }
+
+            return posed;
         }
 
         /// <summary>
@@ -159,22 +234,37 @@ namespace Unity.USDToolkit
                 return;
             }
 
+            Mesh drawn = skinnedSource != null ? Pose() : mesh;
+            if (drawn == null || drawn.vertexCount == 0)
+            {
+                return;
+            }
+
             // The matrices are stored relative to this transform, the way a child GameObject
             // would be, so that moving the instancer moves its instances; instanced drawing takes
             // world space, so the transform is applied here. The result is kept until something
             // it depends on changes -- on a stage with a quarter of a million placements, redoing
             // it every frame is a cost with nothing to show for it.
             Matrix4x4 toWorld = transform.localToWorldMatrix;
-            if (world == null || builtFor != instances || builtFrom != toWorld)
+            Bounds meshBounds = drawn.bounds;
+            bool outgrown = skinnedSource != null &&
+                            !(builtMeshBounds.Contains(meshBounds.min) && builtMeshBounds.Contains(meshBounds.max));
+            if (world == null || builtFor != instances || builtFrom != toWorld || outgrown)
             {
-                Build(toWorld);
+                // A posed mesh moves about: the cells are sized for every pose seen so far.
+                if (skinnedSource != null && world != null)
+                {
+                    meshBounds.Encapsulate(builtMeshBounds);
+                }
+
+                Build(toWorld, meshBounds);
             }
 
             // Mesh LOD selection needs somewhere to measure distance from. There is no single
             // camera at this point in the frame, so the main one stands in: a scene with several
             // cameras gets the level the player's view earns, which is wrong for the others but
             // only in how much detail they receive, never in what is drawn.
-            int levels = Mathf.Max(mesh.lodCount, 1);
+            int levels = Mathf.Max(drawn.lodCount, 1);
             Camera viewer = levels > 1 && lodDistance > 0f ? Camera.main : null;
             Vector3 eye = viewer != null ? viewer.transform.position : Vector3.zero;
 
@@ -191,7 +281,7 @@ namespace Unity.USDToolkit
                     lod = Mathf.Clamp(Mathf.FloorToInt(levels * distance / lodDistance), 0, levels - 1);
                 }
 
-                for (int submesh = 0; submesh < mesh.subMeshCount; submesh++)
+                for (int submesh = 0; submesh < drawn.subMeshCount; submesh++)
                 {
                     Material material = materials[Mathf.Min(submesh, materials.Length - 1)];
                     if (material == null)
@@ -222,7 +312,7 @@ namespace Unity.USDToolkit
                         int take = Mathf.Min(BatchSize, count - offset);
                         // The array overload takes a range, so the placements are read where they
                         // already are rather than copied into a list every frame.
-                        Graphics.RenderMeshInstanced(parameters, mesh, submesh, world, take, start + offset);
+                        Graphics.RenderMeshInstanced(parameters, drawn, submesh, world, take, start + offset);
                     }
                 }
             }
@@ -231,13 +321,14 @@ namespace Unity.USDToolkit
         /// <summary>
         /// Sorts the placements into a grid of cells and records each cell's volume.
         /// </summary>
-        private void Build(Matrix4x4 toWorld)
+        private void Build(Matrix4x4 toWorld, Bounds meshBounds)
         {
             int count = instances.Length;
             var positions = new Vector3[count];
             Bounds whole = default;
-            Vector3 meshCentre = mesh.bounds.center;
-            Vector3 meshExtents = mesh.bounds.extents;
+            Vector3 meshCentre = meshBounds.center;
+            Vector3 meshExtents = meshBounds.extents;
+            builtMeshBounds = meshBounds;
 
             var worldMatrices = new Matrix4x4[count];
             for (int i = 0; i < count; i++)

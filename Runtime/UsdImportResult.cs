@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Text;
 using System.Threading.Tasks;
@@ -57,12 +58,32 @@ namespace Unity.USDToolkit
         public UsdStageSource Source { get; internal set; }
 
         /// <summary>
+        /// The player for the stage's animation, on the root object. Null when the stage has no
+        /// animated transforms, visibility, skeletons or blend-shape weights, when
+        /// UsdImportOptions.ImportAnimation is off, or on a native plugin older than 0.8.1.
+        /// </summary>
+        public UsdAnimationPlayer Animation { get; internal set; }
+
+        /// <summary>
+        /// The files on disk the import read, as full paths: the stage's root layer, the sublayers,
+        /// references and payloads it composed (the 0.8.1 native plugin; just the input before that), and
+        /// every texture file. Textures inside a .usdz are covered by the .usdz.
+        /// </summary>
+        public IReadOnlyList<string> SourceFiles { get; internal set; } = Array.Empty<string>();
+
+        /// <summary>
         /// Completes once every texture is attached to its material. Already complete unless
         /// UsdImportOptions.StreamTextures let <c>ImportAsync</c> return before the textures had
         /// finished decoding. Never faults: a texture that fails to load is logged and its
         /// material keeps its authored constants, as in a non-streamed import.
         /// </summary>
         public Task TexturesReady { get; internal set; } = Task.CompletedTask;
+
+        /// <summary>
+        /// With UsdImportOptions.ImportPhysics: what the stage's physics holds that Unity could not
+        /// build as authored, one sentence each. Empty when everything mapped or physics was not imported.
+        /// </summary>
+        public IReadOnlyList<string> PhysicsNotes { get; internal set; } = Array.Empty<string>();
 
         public IReadOnlyList<UsdImportedMeshInfo> Meshes => meshes;
 

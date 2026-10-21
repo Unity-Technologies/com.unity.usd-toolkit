@@ -1,6 +1,12 @@
-# Rebuilding the native plugin for Windows and Linux — package 0.7.2 / native API 12
+# Rebuilding the native plugin for Windows and Linux — native API 14
 
 Written for ABI 5; the notes below add what each later API changed in the gates.
+
+> **To rebuild Windows or Linux to API 14 (the current source), follow
+> [`RUNBOOK_API14_WINDOWS_LINUX.md`](RUNBOOK_API14_WINDOWS_LINUX.md):** the same steps in order,
+> from the OpenUSD build to the Unity tests, with `Native~/Tests~/run_native_tests.py` and
+> `Native~/Tests~/run_unity_tests.py` running every test the macOS rebuild was verified with.
+> This document explains each gate behind those steps.
 
 **Task:** build `UnityUSDToolkitNative` from the source in this repository for **Windows x64** and
 **Linux x64**, and replace the payloads under `Runtime/Plugins/x86_64/`.
@@ -60,6 +66,88 @@ target distros. Nothing here is cross-compiled.
 > re-record its dependency digests, because `verify_dependency_digests.py` now covers
 > `libMaterialX*.so*` (`--record-dependency-digests`, then review the diff). **macOS is API 12**
 > with these fixes and MaterialX; the Gate 6 tests pass on it.
+
+> **Native API 13 (unreleased, branch `feature/UsdSkel`).** Time, animation and UsdSkel, import
+> and export, all additive: the stage's time range and read time, animated transforms and
+> visibility, skeletons, joint weights and blend shapes, point caches and the layer list on
+> import; the time range, transform, visibility and point samples, SkelRoot, Skeleton, skinned
+> bindings, skinning method, blend shapes and SkelAnimation on export. `kApiVersion` is **13**
+> (Gate 1) and Gate 4 expects **88** `RUsd_*` symbols, among them `RUsd_GetImportSkeleton`,
+> `RUsd_GetImportMeshPointCache`, `RUsd_SetSkeletonAnimation`, `RUsd_SetSkinningMethod`,
+> `RUsd_OpenStageWithLimits` and `RUsd_AddRelocate`. No
+> OpenUSD rebuild: UsdSkel is already in the monolithic libraries every payload ships. Add two
+> tests to Gate 6, built like `import_uv_test`: `skel_import_test ../../Tests/Fixtures~/Skel` must
+> print `PASS (159 checks)` and `skel_export_test <an empty work directory>` `PASS (27 checks)`.
+> Until a platform is rebuilt, the managed side imports its skinned meshes static and no
+> animation, and refuses to record, with a once-per-session note. **macOS is API 13**; every
+> native suite passes on it.
+>
+> **Native API 14 (unreleased, branch `feature/UsdSkel`).** The stage API, wrapper only and
+> additive: a stage kept open to read and edit (`RUsd_CreateStage`, `RUsd_SaveStage`,
+> `RUsd_ExportStage`, `RUsd_ReloadStage`, `RUsd_GetStageInfo`, `RUsd_SetStageMetadata`,
+> `RUsd_SetEditTarget`, `RUsd_GetPrimInfo`, `RUsd_QueryText`, `RUsd_EditPrim`,
+> `RUsd_GetAttributeInfo`, `RUsd_GetAttributeValue`, `RUsd_SetAttributeValue`,
+> `RUsd_GetAttributeTimeSamples`, `RUsd_GetPrimTransform`, `RUsd_SetPrimTransform`), the
+> `RUSD_OPEN_NO_READ` open flag, and rereading part of a stage for live switching
+> (`RUsd_ReadSubtrees`, `RUsd_ReleaseImportData`). `kApiVersion` is **14** (Gate 1) and Gate 4
+> expects **106** `RUsd_*` symbols. No OpenUSD rebuild. Add `stage_api_test <an empty work
+> directory>` to Gate 6, built like `import_uv_test`: it must print `429 checks, 0 failures` (with
+> no `Failed copying metadata` warning: that would mean a value built in the plugin is failing
+> OpenUSD's type checks on this platform). Until a platform is rebuilt, `UsdStage` throws
+> `NotSupportedException` naming API 14, and `UsdStageSource` switches import the whole stage
+> again, saying so in `UsdSwitchResult.ReimportReason`. **macOS, Windows and Linux are API 14**
+> (Windows and Linux rebuilt 2026-10-18; see `RUNBOOK_API14_WINDOWS_LINUX.md`, *Status*).
+> The Linux rebuild found two more defects; Windows and macOS were rebuilt with the fixes (see
+> *Status* there). **`openusd-26.05-crate-hardening.patch` (2026-10-18)** bounds every count the
+> binary layer reader allocates for; Windows, macOS and Linux carry it (API 15; Linux rebuilt
+> with it 2026-10-18, same *Status*).
+>
+> **The Alembic and Draco file format plugins (2026-10-17) need a new OpenUSD install, not only a
+> wrapper rebuild.** `Native~/generate_sbom.py` now builds OpenUSD `--alembic` everywhere and
+> `--draco` on Linux (and on Windows since 2026-10-18, through `openusd-26.05-windows-draco.patch`:
+> build_usd.py refuses Draco in a monolithic Windows build), with Alembic,
+> Imath, OpenEXR and Draco static so they link into the monolithic library and add no file to the
+> payload. Rebuild OpenUSD with `Native~/build_openusd.py` into a new install, then the wrapper with
+> `--record-dependency-digests`, and review the digest diff (the new `plugin/usd/usdAbc` and
+> `plugin/usd/usdDraco` plugInfo files, the changed monolithic library). Four things differ from
+> earlier rebuilds:
+>
+> - **CMake 3.x.** Alembic 1.8.5 sets policy CMP0042 to OLD, which CMake 4 refuses at configure
+>   time; `build_openusd.py` stops before building if the `cmake` on PATH is 4.x. Use CMake 3.31
+>   (the Linux toolchain already is 3.x; Windows was 4.3.3).
+> - **New pinned archives** in `Native~/dependency-sources/<platform>.tsv`: OpenEXR 3.1.13,
+>   Alembic 1.8.5, Draco 1.5.6 (every platform since 2026-10-18), zlib 1.2.13 (Windows, for OpenEXR), and Imath 3.1.9 as a
+>   `fetchcontent-archive`, which `build_openusd.py` downloads, checks, extracts and hands to
+>   OpenEXR's build (`FETCHCONTENT_SOURCE_DIR_IMATH`) with downloads disconnected. Pass them with
+>   `--archive` if the build machine cannot download.
+> - **Windows: no zlib in the payload.** `build_windows.ps1` no longer copies `zlib*.dll`; check
+>   with `dumpbin /dependents usd_rt.dll` that the monolithic library imports no zlib (nothing in
+>   the build links it but OpenEXR, which does not ship). zlib also installs `share\pkgconfig` and
+>   `share\man`; the script now leaves `share`'s build-only folders (cmake, pkgconfig, man, doc)
+>   out of the digests and the payload, so the payload should still have no `share` folder. These
+>   `build_windows.ps1` changes have not been run yet.
+> - **New checks after the build:** the plugins are in `plugin/usd/usdAbc/resources/plugInfo.json`
+>   (and `usdDraco` on Linux); the monolithic library exports `UsdAbc`/`UsdDraco` symbols and
+>   depends on no Alembic, Imath or Draco shared library; `Tests/Editor/UsdFileFormatTests.cs`
+>   imports an `.abc` (and, on Linux, a stage referencing a `.drc`) through the payload. Add
+>   `file_format_test ../../Tests/Fixtures~/FileFormats <an empty work directory> --require` to
+>   Gate 6, run from `Native~/Tests~` (it reads `fuzz_regressions/` there): it must print
+>   `62 checks, 0 failures` on every platform (48 before the Draco export checks, API 15; Windows
+>   skipped the Draco checks until it had usdDraco, 2026-10-18, and printed 39). (37 and 28 before
+>   2026-10-18, when `abc_xform_unknown_op.abc` and the captured `.usdc` replay were added; 40 and
+>   31 before the `crate_*.usdc` memory checks; 44 and 35 before the table-of-contents and
+>   time-sample regressions.)
+> - **Two more pinned patches, applied by `build_openusd.py` (2026-10-17).** Fuzzing the macOS
+>   payload crashed usdDraco, usdAbc and Alembic's reader on damaged files (heap writes among
+>   them). `openusd-26.05-file-format-hardening.patch` (a `patch` row, applied after the LZ4 patch)
+>   and `alembic-1.8.5-hardening.patch` (an `archive-patch` row: the Alembic archive is extracted
+>   where `build_usd.py` extracts it and patched there) are in all three records, so the OpenUSD
+>   rebuild above picks them up with nothing to do; it needs `git` on PATH, as the LZ4 patch already
+>   did. Check after the
+>   build that `<install>/src/alembic-1.8.5/lib/Alembic/AbcCoreOgawa/ReadUtil.cpp` and
+>   `<install>/openusd-src/pxr/usd/plugin/usdDraco/importTranslator.cpp` contain "Unity USD
+>   Toolkit". The wrapper changed with it (face-vertex indices outside the points are refused, and
+>   array attributes are read by their value's type): `security_test` now prints 2 more checks.
 
 ---
 
@@ -156,17 +244,17 @@ Linux:
 ## 4. Get the repository
 
 ```bash
-git clone https://github.cds.internal.unity3d.com/unity/com.unity.usd-toolkit.git
+git clone https://github.com/Unity-Technologies/com.unity.usd-toolkit.git
 cd com.unity.usd-toolkit
 git lfs install
-git checkout security/lz4-1.10.0          # or the branch/tag carrying the SECURITY-282834 fixes
+git checkout security/lz4-1.10.0          # or the branch/tag carrying the security review fixes
 git lfs pull
 ```
 
 **Gate 1 — you have the right source.** All eleven must be true:
 
 ```bash
-grep -c 'kApiVersion = 12'           Native~/src/UsdExporter.cpp   # 1
+grep -c 'kApiVersion = 13'           Native~/src/UsdExporter.cpp   # 1
 grep -c '#define RUSD_MAX_UV_SETS 3' Native~/include/unity_usd_toolkit_native.h  # 1
 grep -c 'RUsd_GetImportMaterialOpacity' Native~/include/unity_usd_toolkit_native.h  # >= 1
 grep -c 'RUsd_CreateUsdzPackage'     Native~/include/unity_usd_toolkit_native.h  # >= 1
@@ -176,13 +264,13 @@ grep -c 'VtValueHoldsType'           Native~/src/UsdExporter.cpp   # >= 3
 # two comments mention the pattern -- a bare grep for 'IsHolding<' returns 4 on good source.
 grep -cE 'IsHolding<(Sdf|Gf|Vt|Tf|Usd)'  Native~/src/UsdExporter.cpp   # must be 0
 
-# SECURITY-282834 — the fixes are internal, so nothing in the ABI version reveals
+# security review — the fixes are internal, so nothing in the ABI version reveals
 # their absence. A payload built without these is vulnerable and passes every other gate.
 grep -c 'int64_t cursor'                   Native~/src/UsdExporter.cpp   # 1  (topology overflow)
 grep -c 'IsResolvedAssetInsideStageRoot'   Native~/src/UsdExporter.cpp   # >= 2 (asset confinement)
 grep -c 'MinimumApiVersion = 6'            Runtime/Native/UsdNative.cs   # 1  (ABI gate: API 6 or newer)
 
-# SECURITY-282834 — the OpenUSD patch (LZ4 1.10.0 + TfFastCompression bounds). It changes OpenUSD,
+# security review — the OpenUSD patch (LZ4 1.10.0 + TfFastCompression bounds). It changes OpenUSD,
 # not this source, so check it is pinned for your platform; Gate 10's lz4_bounds_test then proves
 # it reached the binary.
 grep -c '^OpenUSD-patch'                  Native~/dependency-sources/<platform>.tsv   # 1
@@ -191,28 +279,28 @@ grep -c 'LZ4_VERSION_MINOR   10'           Native~/patches/openusd-26.05-lz4-1.1
 
 If the `IsHolding<(Sdf|Gf|Vt|Tf|Usd)` count is non-zero, **stop**: you are on the wrong revision
 (see §2). If any of the
-SECURITY-282834 lines is 0, **stop** — you would ship a payload missing the security
+`UNITY - modification` lines is 0, **stop** — you would ship a payload missing the security
 fixes, and Gate 9's `security_test` is the only thing that would catch it, after the build.
 
 ## 5. Build OpenUSD (once per machine)
 
 Monolithic, no Python, no imaging. **All three platforms use the public `v26.05` tag** (commit
 `2095faf`) as of 2026-09-23 — macOS was realigned onto it from a non-public 26.08 drop so that
-every payload is reproducible from a published commit (SECURITY-282834). Do not substitute a
+every payload is reproducible from a published commit (security review). Do not substitute a
 different tag: matching versions across platforms is what makes the provenance claim checkable.
 
 **Build it with `Native~/build_openusd.py`, not with `build_usd.py` directly.**
 `Native~/dependency-sources/<platform>.tsv` pins the OpenUSD commit, the TBB archive and the Unity
 patch to OpenUSD each payload is built from. `build_usd.py` passes `expectedSHA256` for Boost and for nothing else, so run
 on its own it downloads TBB and compiles it before anything has looked at the archive — a check
-afterwards only reports what has already run (SECURITY-282834, CWE-494). `build_openusd.py` puts
+afterwards only reports what has already run (CWE-494). `build_openusd.py` puts
 the check first:
 
 1. the clone is verified: the pinned commit, from the recorded remote, unmodified — and the Unity
    patch `Native~/patches/openusd-26.05-lz4-1.10.0.patch` against its recorded SHA-256. The
    patch is applied to a worktree of the pinned commit inside the install (`openusd-src`), never
    to the clone. It replaces the LZ4 1.9.2 OpenUSD vendors with 1.10.0 and bounds-checks the
-   sizes OpenUSD passes to it (SECURITY-282834, CVE-2021-3520);
+   sizes OpenUSD passes to it (CVE-2021-3520);
 2. every pinned archive is downloaded into the directory `build_usd.py` downloads into and checked
    against its recorded SHA-256 — a mismatch stops here, before anything is built;
 3. `build_usd.py` runs with the recorded flags and finds the archive already there. Its downloads
@@ -453,7 +541,7 @@ PXR_PLUGINPATH_NAME="$PLUGINS/lib/usd:$PLUGINS/plugin/usd" ./import_uv_test impo
 Expected:
 
 ```
-API 12, fixture import_uv_fixture.usda
+API 13, fixture import_uv_fixture.usda
 PASS
 ```
 
@@ -572,7 +660,7 @@ Only your platform's payload may appear. Specifically:
 ## 9a. Gate 9 — record the dependency digests you are shipping
 
 The build scripts copy the OpenUSD/TBB tree off this machine straight into `Runtime/Plugins`, so
-a tampered local dependency tree would ride into the package unnoticed (SECURITY-282834,
+a tampered local dependency tree would ride into the package unnoticed (security review,
 CWE-347). Each script now verifies what it is about to copy against
 `Native~/dependency-digests/<platform>.sha256` and **refuses to build** when that record is
 missing or no longer matches.
@@ -632,7 +720,7 @@ release instead.
 ## 9b. Gate 10 — regenerate the native digest manifest
 
 The managed loader compares every shipped native binary against the SHA-256 digest recorded in
-`Runtime/Native/NativeRuntimeHashes.g.cs` before the first P/Invoke (SECURITY-282834, CWE-494).
+`Runtime/Native/NativeRuntimeHashes.g.cs` before the first P/Invoke (CWE-494).
 A rebuild produces a new binary with a new digest, so a stale manifest makes the package refuse
 its own payload:
 
@@ -743,9 +831,9 @@ container matching the oldest glibc you support (§3).
 
 ## Appendix B — what this rebuild must not change
 
-- The managed C# layer. It ships as source and is already correct for API 12; the version check
+- The managed C# layer. It ships as source and is already correct for API 13; the version check
   is a minimum (`MinimumApiVersion = 6`), so do not "fix" it to an exact match.
-- `kApiVersion`. It is 12 in this source; changing it invalidates the compatibility story.
+- `kApiVersion`. It is 13 in this source; changing it invalidates the compatibility story.
 - The other platforms' payloads, and any `.meta` file.
 - `Native~/Tests~/import_uv_fixture.usda`. Its two fake texture paths
   (`fixture_cutout.png`, `fixture_blend.png`) are intentional — the importer only reports the

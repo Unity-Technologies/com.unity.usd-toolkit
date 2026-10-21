@@ -15,7 +15,7 @@ CMAKE_BIN="cmake"
 DEPLOYMENT_TARGET="12.0"
 # Deliberately NOT defaulted to the ad-hoc "-" identity. An ad-hoc signature carries no
 # publisher identity, so it cannot establish trust, and defaulting to it made every build
-# silently produce an unattributable binary (SECURITY-282834, CWE-347). Pass --codesign-id for a
+# silently produce an unattributable binary (CWE-347). Pass --codesign-id for a
 # real Developer ID, or --adhoc-codesign to accept an unattributable build on purpose.
 CODESIGN_ID=""
 ADHOC_CODESIGN=0
@@ -196,7 +196,7 @@ if [[ ${SKIP_CODESIGN} -eq 0 ]]; then
     fi
 fi
 
-# --- Source provenance gate (SECURITY-282834, trust chain) ---------------------------------
+# --- Source provenance gate (trust chain) ---------------------------------
 # The digest gate below establishes that the tree being copied is the tree that was reviewed. It
 # cannot establish where that tree came from -- by this point OpenUSD has already been fetched and
 # compiled. That earlier link is what the stamp carries: verify_upstream_sources.py writes it into
@@ -213,7 +213,7 @@ elif ! python3 "${SCRIPT_DIR}/verify_upstream_sources.py" --platform macos \
     exit 1
 fi
 
-# --- Dependency digest gate (SECURITY-282834, CWE-347) -------------------------------------
+# --- Dependency digest gate (CWE-347) -------------------------------------
 # Everything below is copied verbatim off this machine into the shipped package, so a tampered
 # local OpenUSD/TBB tree would ride in unnoticed. Check what is about to be copied against the
 # checked-in record first; --record-dependency-digests updates that record deliberately.
@@ -224,10 +224,13 @@ collect_dependency_files() {
         find "${dir}" -maxdepth 1 -type f -name "*.dylib*" ! -name "*.meta" ! -name "*debug*" -print0
     done
 
+    # share's build-only folders are removed from the payload below, so they are not recorded.
     for dir in "${OPENUSD_ROOT}/lib/usd" "${OPENUSD_ROOT}/plugin" "${OPENUSD_ROOT}/share" \
         "${OPENUSD_ROOT}/resources"; do
         [[ -d "${dir}" ]] || continue
-        find "${dir}" -type f ! -name "*.meta" -print0
+        find "${dir}" -type f ! -name "*.meta" ! -path "${OPENUSD_ROOT}/share/cmake/*" \
+            ! -path "${OPENUSD_ROOT}/share/pkgconfig/*" ! -path "${OPENUSD_ROOT}/share/man/*" \
+            ! -path "${OPENUSD_ROOT}/share/doc/*" -print0
     done
 }
 
@@ -351,6 +354,15 @@ copy_runtime_directory "${OPENUSD_ROOT}/lib/usd" "lib/usd"
 copy_runtime_directory "${OPENUSD_ROOT}/plugin" "plugin"
 copy_runtime_directory "${OPENUSD_ROOT}/share" "share"
 copy_runtime_directory "${OPENUSD_ROOT}/resources" "resources"
+# CMake and pkg-config packages (Draco installs its own under share/cmake) and manuals are for
+# building against the install, not for running it, and carry the build machine's paths; none of
+# them ships.
+for build_only in cmake pkgconfig man doc; do
+    rm -rf "${INSTALL_DIR}/share/${build_only}" "${INSTALL_DIR}/share/${build_only}.meta"
+done
+if [[ -d "${INSTALL_DIR}/share" ]] && [[ -z "$(find "${INSTALL_DIR}/share" -type f ! -name '*.meta')" ]]; then
+    rm -rf "${INSTALL_DIR}/share" "${INSTALL_DIR}/share.meta"
+fi
 
 USD_CODEGEN_TEMPLATES="${INSTALL_DIR}/lib/usd/usd/resources/codegenTemplates"
 rm -rf "${USD_CODEGEN_TEMPLATES}" "${USD_CODEGEN_TEMPLATES}.meta"

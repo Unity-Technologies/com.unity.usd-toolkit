@@ -1,0 +1,101 @@
+#usda 1.0
+(
+    doc = """Dual-quaternion skinning fixture for the UsdSkel import.
+
+    A square tube along Y, five rings of four points, skinned to a two-joint chain with
+    primvars:skel:skinningMethod = "dualQuaternion". The middle ring is weighted half to each
+    joint, so when the tip twists most of a half turn linear blending nearly collapses it onto the
+    axis (the "candy wrapper") while dual quaternions keep its width. The twist stops short of 180
+    degrees on purpose: at exactly half a turn the two joints' rotations are on the boundary between
+    hemispheres, and which way the blend goes is decided by rounding. dqs_twist.expected.json
+    holds what OpenUSD computes (make_expected.py). What it covers:
+      Bar         SkelRoot with its own translate, so the skeleton's world transform matters.
+      Bar/Skel    Base bends 30 degrees about Z by the end; Tip twists about Y (0, 90, 160
+                  degrees) and scales non-uniformly at the end, which UsdSkel blends linearly
+                  before the dual quaternions.
+      Bar/Tube    The dual-quaternion mesh, with a blend shape (Pinch) on the middle ring that the
+                  animation turns on, applied before skinning."""
+    defaultPrim = "Root"
+    endTimeCode = 10
+    framesPerSecond = 24
+    metersPerUnit = 1
+    startTimeCode = 0
+    timeCodesPerSecond = 24
+    upAxis = "Y"
+)
+
+def Xform "Root"
+{
+    def SkelRoot "Bar" (
+        prepend apiSchemas = ["SkelBindingAPI"]
+    )
+    {
+        rel skel:skeleton = </Root/Bar/Skel>
+        double3 xformOp:translate = (0.5, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+        def Skeleton "Skel" (
+            prepend apiSchemas = ["SkelBindingAPI"]
+        )
+        {
+            uniform matrix4d[] bindTransforms = [
+                ((1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1)),
+                ((1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 2, 0, 1))
+            ]
+            uniform token[] joints = ["Base", "Base/Tip"]
+            uniform matrix4d[] restTransforms = [
+                ((1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1)),
+                ((1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 2, 0, 1))
+            ]
+            rel skel:animationSource = </Root/Bar/Skel/Anim>
+
+            def SkelAnimation "Anim"
+            {
+                uniform token[] blendShapes = ["Pinch"]
+                float[] blendShapeWeights.timeSamples = {
+                    0: [0],
+                    10: [1],
+                }
+                uniform token[] joints = ["Base", "Base/Tip"]
+                quatf[] rotations.timeSamples = {
+                    0: [(1, 0, 0, 0), (1, 0, 0, 0)],
+                    5: [(1, 0, 0, 0), (0.70710677, 0, 0.70710677, 0)],
+                    10: [(0.9659258, 0, 0, 0.25881904), (0.17364818, 0, 0.98480775, 0)],
+                }
+                half3[] scales.timeSamples = {
+                    0: [(1, 1, 1), (1, 1, 1)],
+                    5: [(1, 1, 1), (1, 1, 1)],
+                    10: [(1, 1, 1), (1.25, 1, 1.25)],
+                }
+                float3[] translations = [(0, 0, 0), (0, 2, 0)]
+            }
+        }
+
+        def Mesh "Tube" (
+            prepend apiSchemas = ["SkelBindingAPI"]
+        )
+        {
+            int[] faceVertexCounts = [4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4]
+            int[] faceVertexIndices = [0, 4, 5, 1, 1, 5, 6, 2, 2, 6, 7, 3, 3, 7, 4, 0, 4, 8, 9, 5, 5, 9, 10, 6, 6, 10, 11, 7, 7, 11, 8, 4, 8, 12, 13, 9, 9, 13, 14, 10, 10, 14, 15, 11, 11, 15, 12, 8, 12, 16, 17, 13, 13, 17, 18, 14, 14, 18, 19, 15, 15, 19, 16, 12]
+            point3f[] points = [(-0.25, 0, -0.25), (0.25, 0, -0.25), (0.25, 0, 0.25), (-0.25, 0, 0.25), (-0.25, 1, -0.25), (0.25, 1, -0.25), (0.25, 1, 0.25), (-0.25, 1, 0.25), (-0.25, 2, -0.25), (0.25, 2, -0.25), (0.25, 2, 0.25), (-0.25, 2, 0.25), (-0.25, 3, -0.25), (0.25, 3, -0.25), (0.25, 3, 0.25), (-0.25, 3, 0.25), (-0.25, 4, -0.25), (0.25, 4, -0.25), (0.25, 4, 0.25), (-0.25, 4, 0.25)]
+            int[] primvars:skel:jointIndices = [0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1] (
+                elementSize = 2
+                interpolation = "vertex"
+            )
+            float[] primvars:skel:jointWeights = [1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1] (
+                elementSize = 2
+                interpolation = "vertex"
+            )
+            uniform token[] skel:blendShapes = ["Pinch"]
+            rel skel:blendShapeTargets = </Root/Bar/Tube/Pinch>
+            uniform token primvars:skel:skinningMethod = "dualQuaternion"
+            uniform token subdivisionScheme = "none"
+
+            def BlendShape "Pinch"
+            {
+                uniform vector3f[] offsets = [(0.1, 0, 0.1), (-0.1, 0, 0.1), (-0.1, 0, -0.1), (0.1, 0, -0.1)]
+                uniform int[] pointIndices = [8, 9, 10, 11]
+            }
+        }
+    }
+}

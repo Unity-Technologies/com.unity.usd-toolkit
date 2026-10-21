@@ -1,0 +1,30 @@
+{
+  "name": "Unity.USDToolkit.Timeline",
+  "rootNamespace": "Unity.USDToolkit.Timeline",
+  "references": [
+    "Unity.USDToolkit",
+    "Unity.Timeline"
+  ],
+  "includePlatforms": [
+    "Editor",
+    "LinuxStandalone64",
+    "macOSStandalone",
+    "WindowsStandalone64"
+  ],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": false,
+  "precompiledReferences": [],
+  "autoReferenced": true,
+  "defineConstraints": [
+    "USD_TOOLKIT_TIMELINE"
+  ],
+  "versionDefines": [
+    {
+      "name": "com.unity.timeline",
+      "expression": "1.7.0",
+      "define": "USD_TOOLKIT_TIMELINE"
+    }
+  ],
+  "noEngineReferences": false
+}

@@ -1,0 +1,28 @@
+{
+  "name": "Unity.USDToolkit.Recorder.Editor",
+  "rootNamespace": "Unity.USDToolkit.Editor",
+  "references": [
+    "Unity.USDToolkit",
+    "Unity.Recorder.Editor",
+    "Unity.Recorder"
+  ],
+  "includePlatforms": [
+    "Editor"
+  ],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": false,
+  "precompiledReferences": [],
+  "autoReferenced": true,
+  "defineConstraints": [
+    "USD_TOOLKIT_RECORDER"
+  ],
+  "versionDefines": [
+    {
+      "name": "com.unity.recorder",
+      "expression": "5.0.0",
+      "define": "USD_TOOLKIT_RECORDER"
+    }
+  ],
+  "noEngineReferences": false
+}

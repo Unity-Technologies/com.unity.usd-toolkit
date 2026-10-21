@@ -1,0 +1,79 @@
+#usda 1.0
+(
+    doc = """A skeleton laid out as Omniverse writes Isaac Sim's characters: the Skeleton prim is
+    called Root, its first joint is Root too, and below the Skeleton prim the joint hierarchy is
+    written a second time as SkelJoint prims (a type OpenUSD does not define) with the joints'
+    names. Imported as they are, the SkelJoint prims and the joints would be siblings with the
+    same names, and an AnimationClip, which finds its objects by name, would animate the prims.
+      Biped/Root          Skeleton with joints Root, Root/Hip; animated from Walk.
+      Biped/Root/Root     SkelJoint mirror of the joints (Root/Hip below it).
+      Biped/Body          Two quads, one rigidly on each joint."""
+    defaultPrim = "Biped"
+    endTimeCode = 10
+    framesPerSecond = 24
+    metersPerUnit = 1
+    startTimeCode = 0
+    timeCodesPerSecond = 24
+    upAxis = "Y"
+)
+
+def SkelRoot "Biped" (
+    prepend apiSchemas = ["SkelBindingAPI"]
+)
+{
+    rel skel:skeleton = </Biped/Root>
+
+    def Skeleton "Root" (
+        prepend apiSchemas = ["SkelBindingAPI"]
+    )
+    {
+        uniform matrix4d[] bindTransforms = [
+            ((1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1)),
+            ((1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 1, 0, 1))
+        ]
+        uniform token[] joints = ["Root", "Root/Hip"]
+        uniform matrix4d[] restTransforms = [
+            ((1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1)),
+            ((1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 1, 0, 1))
+        ]
+        rel skel:animationSource = </Biped/Walk>
+
+        def SkelJoint "Root"
+        {
+            def SkelJoint "Hip"
+            {
+            }
+        }
+    }
+
+    def SkelAnimation "Walk"
+    {
+        uniform token[] joints = ["Root", "Root/Hip"]
+        quatf[] rotations.timeSamples = {
+            0: [(1, 0, 0, 0), (1, 0, 0, 0)],
+            10: [(0.70710677, 0, 0.70710677, 0), (0.70710677, 0.70710677, 0, 0)],
+        }
+        half3[] scales = [(1, 1, 1), (1, 1, 1)]
+        float3[] translations.timeSamples = {
+            0: [(0, 0, 0), (0, 1, 0)],
+            10: [(0, 0, 2), (0, 1, 0)],
+        }
+    }
+
+    def Mesh "Body" (
+        prepend apiSchemas = ["SkelBindingAPI"]
+    )
+    {
+        int[] faceVertexCounts = [4, 4]
+        int[] faceVertexIndices = [0, 1, 2, 3, 4, 5, 6, 7]
+        point3f[] points = [(-0.5, 0, 0), (0.5, 0, 0), (0.5, 0.9, 0), (-0.5, 0.9, 0), (-0.5, 1, 0), (0.5, 1, 0), (0.5, 2, 0), (-0.5, 2, 0)]
+        int[] primvars:skel:jointIndices = [0, 0, 0, 0, 1, 1, 1, 1] (
+            elementSize = 1
+            interpolation = "vertex"
+        )
+        float[] primvars:skel:jointWeights = [1, 1, 1, 1, 1, 1, 1, 1] (
+            elementSize = 1
+            interpolation = "vertex"
+        )
+    }
+}

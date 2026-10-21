@@ -1,0 +1,19 @@
+{
+    "name": "Unity.USDToolkit.Samples.RobotPhysics.Editor",
+    "rootNamespace": "Unity.USDToolkit.RobotPhysics.Editor",
+    "references": [
+        "Unity.USDToolkit",
+        "Unity.USDToolkit.Samples.RobotPhysics"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

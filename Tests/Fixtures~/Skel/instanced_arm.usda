@@ -1,0 +1,93 @@
+#usda 1.0
+(
+    doc = """Point-instancer fixture with a skinned prototype, for the UsdSkel import.
+
+    Crowd scatters two prototypes: Arm, a SkelRoot whose two-joint skeleton bends its strip over
+    time, and Box, a static cube. Every instance of Arm plays the same animation, as USD renders
+    instances; instanced_arm.expected.json holds each instance's points as OpenUSD places them
+    (make_instanced.py). The prototypes are children of the instancer, so they are drawn only
+    through their instances, never where they stand."""
+    defaultPrim = "Root"
+    endTimeCode = 10
+    framesPerSecond = 24
+    metersPerUnit = 1
+    startTimeCode = 0
+    timeCodesPerSecond = 24
+    upAxis = "Y"
+)
+
+def Xform "Root"
+{
+    def PointInstancer "Crowd"
+    {
+        double3 xformOp:translate = (0, 0, -1)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        rel prototypes = [</Root/Crowd/Prototypes/Arm>, </Root/Crowd/Prototypes/Box>]
+        int[] protoIndices = [0, 0, 1, 0]
+        point3f[] positions = [(-3, 0, 0), (0, 0, 0), (0, 3, 0), (3, 0, 1)]
+        quath[] orientations = [(1, 0, 0, 0), (0.7071, 0, 0.7071, 0), (1, 0, 0, 0), (1, 0, 0, 0)]
+        float3[] scales = [(1, 1, 1), (1, 1, 1), (1, 1, 1), (2, 2, 2)]
+
+        def Scope "Prototypes"
+        {
+            def SkelRoot "Arm" (
+                prepend apiSchemas = ["SkelBindingAPI"]
+            )
+            {
+                rel skel:skeleton = </Root/Crowd/Prototypes/Arm/Skel>
+                double3 xformOp:translate = (0, 0.5, 0)
+                uniform token[] xformOpOrder = ["xformOp:translate"]
+
+                def Skeleton "Skel" (
+                    prepend apiSchemas = ["SkelBindingAPI"]
+                )
+                {
+                    uniform matrix4d[] bindTransforms = [
+                        ((1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1)),
+                        ((1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 1, 0, 1))
+                    ]
+                    uniform token[] joints = ["Upper", "Upper/Lower"]
+                    uniform matrix4d[] restTransforms = [
+                        ((1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1)),
+                        ((1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 1, 0, 1))
+                    ]
+                    rel skel:animationSource = </Root/Crowd/Prototypes/Arm/Skel/Anim>
+
+                    def SkelAnimation "Anim"
+                    {
+                        uniform token[] joints = ["Upper", "Upper/Lower"]
+                        quatf[] rotations.timeSamples = {
+                            0: [(1, 0, 0, 0), (1, 0, 0, 0)],
+                            10: [(1, 0, 0, 0), (0.70710677, 0, 0, 0.70710677)],
+                        }
+                        half3[] scales = [(1, 1, 1), (1, 1, 1)]
+                        float3[] translations = [(0, 0, 0), (0, 1, 0)]
+                    }
+                }
+
+                def Mesh "Strip" (
+                    prepend apiSchemas = ["SkelBindingAPI"]
+                )
+                {
+                    int[] faceVertexCounts = [4, 4]
+                    int[] faceVertexIndices = [0, 1, 3, 2, 2, 3, 5, 4]
+                    point3f[] points = [(-0.2, 0, 0), (0.2, 0, 0), (-0.2, 1, 0), (0.2, 1, 0), (-0.2, 2, 0), (0.2, 2, 0)]
+                    int[] primvars:skel:jointIndices = [0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1] (
+                        elementSize = 2
+                        interpolation = "vertex"
+                    )
+                    float[] primvars:skel:jointWeights = [1, 0, 1, 0, 0.5, 0.5, 0.5, 0.5, 0, 1, 0, 1] (
+                        elementSize = 2
+                        interpolation = "vertex"
+                    )
+                    uniform token subdivisionScheme = "none"
+                }
+            }
+
+            def Cube "Box"
+            {
+                double size = 0.5
+            }
+        }
+    }
+}

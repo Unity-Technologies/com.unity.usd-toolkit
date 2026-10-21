@@ -14,7 +14,7 @@ if(NOT DEFINED OPENUSD_ROOT)
     message(FATAL_ERROR "Set OPENUSD_ROOT to the Pixar OpenUSD install directory.")
 endif()
 
-# --- Source provenance gate (SECURITY-282834, trust chain) ---------------------------------
+# --- Source provenance gate (trust chain) ---------------------------------
 # The payload is this wrapper plus the OpenUSD install it links against, copied verbatim. What
 # ties that install to a published OpenUSD revision is the stamp Native~/build_openusd.py writes
 # into it after checking the clone and every downloaded archive against
@@ -154,6 +154,8 @@ add_library(UnityUSDToolkitNative SHARED
     include/unity_usd_toolkit_native.h
     src/UsdExporter.cpp
     src/UsdImageCodecs.cpp
+    src/UsdPhysicsImport.cpp
+    src/UsdPhysicsImport.h
     src/UsdDeflate.c
 )
 
@@ -265,6 +267,10 @@ if(NOT _RUSD_LINKED_OPENUSD_TARGET)
         usdGeom
         pxr::usdShade
         usdShade
+        pxr::usdSkel
+        usdSkel
+        pxr::usdPhysics
+        usdPhysics
         pxr::usdUtils
         usdUtils
         pxr::ar
@@ -302,6 +308,8 @@ if(NOT _RUSD_LINKED_OPENUSD_TARGET)
                 usd
                 usdGeom
                 usdShade
+                usdSkel
+                usdPhysics
                 usdUtils
                 ar
                 sdf
@@ -335,7 +343,7 @@ endif()
 
 # Likewise for the source scan: a payload whose OpenUSD install was not built from scanned source
 # is fine to commit and test, and Native~/generate_native_hashes.py --release -- the pack job --
-# refuses it (SECURITY-282834, CWE-1104).
+# refuses it (CWE-1104).
 if(_RUSD_SCANNED)
     install(CODE "file(REMOVE \"\${CMAKE_INSTALL_PREFIX}/${_RUSD_UNSCANNED_MARKER}\")")
 else()

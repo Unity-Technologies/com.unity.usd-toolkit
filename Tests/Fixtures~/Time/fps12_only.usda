@@ -1,0 +1,20 @@
+#usda 1.0
+(
+    defaultPrim = "Root"
+    doc = "Time-metadata fixture fps12_only, written by make_time.py."
+    endTimeCode = 30
+    framesPerSecond = 12
+    metersPerUnit = 1
+    startTimeCode = -6
+    upAxis = "Y"
+)
+
+def Xform "Root"
+{
+    double3 xformOp:translate.timeSamples = {
+        -6: (0, 0, 0),
+        30: (1, 0, 0),
+    }
+    uniform token[] xformOpOrder = ["xformOp:translate"]
+}
+

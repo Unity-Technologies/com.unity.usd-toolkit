@@ -42,7 +42,11 @@ namespace Unity.USDToolkit.Editor
             }
 
             // Only Windows uses the flat layout, so its sibling files need tidying up. Linux
-            // and macOS ship a self-contained tree that is copied across as-is.
+            // and macOS ship a self-contained tree that is copied across as-is. On Linux this copy
+            // is the only one: the .so files' importers have Linux64 off, because UnityPlayer.so
+            // dlopens every .so under Plugins/ at startup, and Unity's own flat copies in
+            // Plugins/x86_64/ beside this tree loaded a second OpenUSD into the player
+            // ("Multiple definitions of TfEnvSetting variable").
             if (!isMacOS && !isLinux)
             {
                 string windowsPluginParent = Path.GetDirectoryName(destinationRoot);

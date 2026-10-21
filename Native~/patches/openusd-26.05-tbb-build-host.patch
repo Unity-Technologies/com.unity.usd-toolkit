@@ -1,0 +1,56 @@
+Unity USD Toolkit patch to OpenUSD v26.05 (commit 2095fafafd033fa23386d7ec6d58c7cc33974518), applied
+after openusd-26.05-windows-draco.patch: no build machine name in the TBB libraries the payload
+ships.
+
+Applied by Native~/build_openusd.py to a worktree of the pinned commit, never to the clone itself;
+its SHA-256 is pinned in Native~/dependency-sources/macos.tsv and linux.tsv. Every change is marked
+"Unity USD Toolkit" in the source.
+
+1. build_usd.py builds TBB 2020 from source on macOS and Linux, and TBB's version banner, compiled
+   into libtbb and libtbbmalloc, records the building machine's `hostname -s` as BUILD_HOST. The
+   payload ships those libraries, so the name of whoever built it shipped too (a default macOS
+   host name carries the owner's full name). build_usd.py now replaces `hostname -s` in
+   build/version_info_{macos,linux}.sh with "unknown" before building TBB, the way it already
+   patches TBB's Makefile and macos.clang.inc, and fails if the script no longer contains it.
+   Windows takes Intel's prebuilt TBB, whose banner names Intel's build machine; this patch does
+   not touch it, so the Windows record does not pin it.
+
+diff --git a/build_scripts/build_usd.py b/build_scripts/build_usd.py
+index 6d3cb55..425d5ef 100644
+--- a/build_scripts/build_usd.py
++++ b/build_scripts/build_usd.py
+@@ -1060,6 +1060,16 @@ def InstallTBB(context, force, buildArgs):
+     else:
+         InstallTBB_Linux(context, force, buildArgs)
+ 
++# Unity USD Toolkit: TBB 2020's version banner, compiled into every TBB library,
++# names the machine that built it (BUILD_HOST, from `hostname -s`), and the
++# payload ships those libraries. Write a neutral name instead. Fails rather than
++# shipping the host name if the script no longer reads it that way.
++def NeutralizeTBBBuildHost(script):
++    if "`hostname -s`" not in open(script, 'r').read():
++        raise RuntimeError("{} no longer runs `hostname -s`; the TBB "
++                           "build host can't be hidden".format(script))
++    PatchFile(script, [("`hostname -s`", "unknown")])
++
+ def InstallTBB_Windows(context, force, buildArgs):
+     with CurrentWorkingDirectory(DownloadURL(TBB_URL, context, force, 
+         TBB_ROOT_DIR_NAME)):
+@@ -1077,6 +1087,8 @@ def InstallTBB_Windows(context, force, buildArgs):
+ 
+ def InstallTBB_MacOS(context, force, buildArgs):
+     with CurrentWorkingDirectory(DownloadURL(TBB_URL, context, force)):
++        NeutralizeTBBBuildHost("build/version_info_macos.sh")
++
+         # Ensure that the tbb build system picks the proper architecture.
+         PatchFile("build/macos.clang.inc",
+                 [("-m64",
+@@ -1191,6 +1203,8 @@ def InstallTBB_MacOS(context, force, buildArgs):
+ 
+ def InstallTBB_Linux(context, force, buildArgs):
+     with CurrentWorkingDirectory(DownloadURL(TBB_URL, context, force)):
++        NeutralizeTBBBuildHost("build/version_info_linux.sh")
++
+         # Append extra argument controlling libstdc++ ABI if specified.
+         AppendCXX11ABIArg("CXXFLAGS", context, buildArgs)
+ 

@@ -2,17 +2,18 @@ using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Text;
+using UnityEngine;
 
 namespace Unity.USDToolkit.Native
 {
-    internal static class UsdNative
+    internal static partial class UsdNative
     {
         private const string DllName = "UnityUSDToolkitNative";
         private const int ErrorBufferSize = 4096;
         // Exact match with the source, deliberately. This used to accept anything >= 2 so that
         // payloads lagging the source (uv0 only, no usdz) kept working while Windows and Linux
         // were rebuilt. All three desktop payloads are API 5 as of 2026-09-22, and the tolerance
-        // had become a hole: fixes that are not gated on the ABI version — the SECURITY-282834
+        // had become a hole: fixes that are not gated on the ABI version — the security review
         // topology and asset-path fixes among them — are simply absent from an older binary, and
         // nothing in the version number says so. An older plugin is now refused outright.
         // API 6 added composition (layers, references, overrides, variant/payload control). A 5
@@ -21,8 +22,12 @@ namespace Unity.USDToolkit.Native
         // below switch on by the version the plugin reports. LatestApiVersion is the version the
         // source is written against (kApiVersion in UsdExporter.cpp) and is only quoted in the
         // mismatch message.
+        //
+        // The number goes up once per package release that changes the native interface, not once
+        // per change: 0.8.0 shipped 12 and 0.8.1 ships 13. Messages name the release, not the
+        // number (PluginRelease); the table of both is in BUILD_NOTES.md.
         internal const int MinimumApiVersion = 6;
-        internal const int LatestApiVersion = 12;
+        internal const int LatestApiVersion = 13;
         // usdz packaging and resolver-backed asset reads (textures inside a .usdz).
         internal const int UsdzApiVersion = 5;
         // Sublayers, references, payloads, instancing, variant selections and sparse overrides
@@ -47,6 +52,41 @@ namespace Unity.USDToolkit.Native
 
         // RUsd_ImageBuild / RUsd_UdimAtlasBuild: a whole texture, or a whole UDIM atlas, in one call.
         internal const int ImageBuildApiVersion = 12;
+        // RUsd_GetImportMaterialAlbedoMask: an albedo blended with a colour by a mask texture.
+        internal const int AlbedoMaskApiVersion = 13;
+        // RUsd_GetImportMaterialUnrealBlend: per-channel mask colours and a roughness range.
+        internal const int UnrealBlendApiVersion = 13;
+        // RUsd_GetImportTextureColorSpace: the colour space a texture's file input authors.
+        internal const int TextureColorSpaceApiVersion = 13;
+        // RUsd_SetMeshUvSet / RUsd_SetMeshVertexColors / RUsd_SetExportMaterialFlavors /
+        // RUsd_AddLight / RUsd_AddCamera: uv1-uv2, vertex colours, OmniPBR and MaterialX, lights
+        // and cameras on export. Additive: an older plugin exports without them.
+        internal const int ExportExtrasApiVersion = 13;
+
+        // RUsd_SetExportMaterialFlavors flags.
+        internal const int MaterialFlavorOmniPbr = 1;
+        internal const int MaterialFlavorMaterialX = 2;
+
+        // RUsdExportLight.Type / RUsdExportCamera.Projection.
+        internal const int LightDistant = 1;
+        internal const int LightSphere = 2;
+        internal const int LightRect = 3;
+        internal const int LightDisk = 4;
+        internal const int CameraPerspective = 0;
+        internal const int CameraOrthographic = 1;
+
+        // Static values read at the stage's start time, animated node tracks, skeletons, joint
+        // weights and blend shapes (RUsd_GetImportTimeInfo and the skeleton/skin entry points).
+        internal const int AnimationApiVersion = 13;
+
+        // The stage API: a stage kept open to read and edit (RUsd_CreateStage, RUsd_QueryText,
+        // RUsd_Get/SetAttributeValue, ...), the change record, and rereading part of a stage
+        // (RUsd_ReadSubtrees) that live variant and payload switching is built on.
+        internal const int StageApiVersion = 13;
+
+        // A Draco (.drc) output path: RUsd_EndExport encodes the stage's meshes through usdDraco's
+        // writer, which the OpenUSD library exports from openusd-26.05-windows-draco.patch on.
+        internal const int DracoExportApiVersion = 13;
 
         // Mirrors kMaxImportInstancePlacements in UsdExporter.cpp.
         internal const int MaxImportInstancePlacements = 4000000;
@@ -67,6 +107,8 @@ namespace Unity.USDToolkit.Native
         // RUsd_OpenStageEx flags.
         internal const int OpenCaptureDiagnostics = 1;
         internal const int OpenLoadNoPayloads = 2;
+        internal const int OpenDefaultTime = 4; // API 13: read static values at UsdTimeCode::Default()
+        internal const int OpenNoRead = 8;      // API 13: open without walking the stage
         internal const int MaxUvSets = 3;
         internal const string NativeDllName = DllName;
 
@@ -83,12 +125,42 @@ namespace Unity.USDToolkit.Native
                 if (cached == 0)
                 {
                     cached = GetApiVersion();
+                    // 14-17 were development numbers before the 0.8.1 interface was renumbered 13
+                    // (2026-10-20). A plugin reporting one predates parts of that interface, so it
+                    // is taken for what it surely has, the 0.8.0 interface, until it is rebuilt.
+                    if (cached > LatestApiVersion && cached <= LegacyDevelopmentApiVersion)
+                    {
+                        cached = ImageBuildApiVersion;
+                    }
+
                     loadedApiVersion = cached;
                 }
 
                 return cached;
             }
         }
+
+        // The highest number handed out before the renumbering; see LoadedApiVersion.
+        private const int LegacyDevelopmentApiVersion = 17;
+
+        // The package release whose native plugin first had a given interface version, for messages:
+        // people read "the 0.8.1 native plugin", not an interface number.
+        internal static string PluginRelease(int apiVersion)
+        {
+            if (apiVersion >= 13) return "0.8.1";
+            if (apiVersion >= 6) return "0.8.0";
+            if (apiVersion >= 4) return "0.7.1";
+            if (apiVersion == 3) return "0.7.0";
+            if (apiVersion == 2) return "0.6.0";
+            return "0.3.0";
+        }
+
+        // "the 0.8.1 native plugin", for "needs ..." messages.
+        internal static string NeedsPlugin(int apiVersion) => "the " + PluginRelease(apiVersion) + " native plugin or newer";
+
+        // What the loaded plugin is, for the same messages.
+        internal static string LoadedPluginDescription =>
+            "the loaded " + NativeDllName + " is from " + PluginRelease(LoadedApiVersion);
 
 #if ((UNITY_STANDALONE_WIN || UNITY_EDITOR_WIN) && UNITY_64) || UNITY_STANDALONE_OSX || UNITY_EDITOR_OSX || ((UNITY_STANDALONE_LINUX || UNITY_EDITOR_LINUX) && UNITY_64)
         internal static bool IsSupportedPlatform => true;
@@ -161,6 +233,40 @@ namespace Unity.USDToolkit.Native
 
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
         private static extern int RUsd_EndExport(IntPtr context);
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int RUsd_SetMeshUvSet(
+            IntPtr context,
+            [MarshalAs(UnmanagedType.LPStr)] string primPath,
+            int uvSet,
+            [In] RUsdVec2[] uv,
+            int count);
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int RUsd_SetMeshVertexColors(
+            IntPtr context,
+            [MarshalAs(UnmanagedType.LPStr)] string primPath,
+            [In] RUsdVec4[] colors,
+            int count);
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int RUsd_SetExportMaterialFlavors(IntPtr context, int flags);
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int RUsd_AddLight(
+            IntPtr context,
+            [MarshalAs(UnmanagedType.LPStr)] string primPath,
+            ref RUsdMatrix4x4 matrix,
+            ref RUsdExportLight light,
+            int visible);
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int RUsd_AddCamera(
+            IntPtr context,
+            [MarshalAs(UnmanagedType.LPStr)] string primPath,
+            ref RUsdMatrix4x4 matrix,
+            ref RUsdExportCamera camera,
+            int visible);
 
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
         private static extern void RUsd_Destroy(IntPtr context);
@@ -336,6 +442,12 @@ namespace Unity.USDToolkit.Native
             int active);
 
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int RUsd_AddRelocate(
+            IntPtr context,
+            [MarshalAs(UnmanagedType.LPStr)] string sourcePath,
+            [MarshalAs(UnmanagedType.LPStr)] string targetPath);
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
         private static extern int RUsd_SetVariantSelection(
             IntPtr context,
             [MarshalAs(UnmanagedType.LPStr)] string primPath,
@@ -366,6 +478,15 @@ namespace Unity.USDToolkit.Native
             int flags,
             [MarshalAs(UnmanagedType.LPStr)] string variantSelections,
             [MarshalAs(UnmanagedType.LPStr)] string loadPaths,
+            out IntPtr context);
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int RUsd_OpenStageWithLimits(
+            [MarshalAs(UnmanagedType.LPStr)] string inputPath,
+            int flags,
+            [MarshalAs(UnmanagedType.LPStr)] string variantSelections,
+            [MarshalAs(UnmanagedType.LPStr)] string loadPaths,
+            ref RUsdImportLimits limits,
             out IntPtr context);
 
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
@@ -489,6 +610,34 @@ namespace Unity.USDToolkit.Native
             {
                 throw new UsdExportException(GetLastError(context), GetDiagnostics(context));
             }
+        }
+
+        internal static bool SupportsExportExtras =>
+            IsSupportedPlatform && LoadedApiVersion >= ExportExtrasApiVersion;
+
+        internal static void SetMeshUvSet(IntPtr context, string primPath, int uvSet, RUsdVec2[] uv)
+        {
+            Check(context, RUsd_SetMeshUvSet(context, primPath, uvSet, uv, uv?.Length ?? 0));
+        }
+
+        internal static void SetMeshVertexColors(IntPtr context, string primPath, RUsdVec4[] colors)
+        {
+            Check(context, RUsd_SetMeshVertexColors(context, primPath, colors, colors?.Length ?? 0));
+        }
+
+        internal static void SetExportMaterialFlavors(IntPtr context, int flags)
+        {
+            Check(context, RUsd_SetExportMaterialFlavors(context, flags));
+        }
+
+        internal static void AddLight(IntPtr context, string primPath, RUsdMatrix4x4 matrix, RUsdExportLight light, bool visible)
+        {
+            Check(context, RUsd_AddLight(context, primPath, ref matrix, ref light, visible ? 1 : 0));
+        }
+
+        internal static void AddCamera(IntPtr context, string primPath, RUsdMatrix4x4 matrix, RUsdExportCamera camera, bool visible)
+        {
+            Check(context, RUsd_AddCamera(context, primPath, ref matrix, ref camera, visible ? 1 : 0));
         }
 
         internal static void EndExport(IntPtr context)
@@ -899,6 +1048,388 @@ namespace Unity.USDToolkit.Native
         internal static bool SupportsImageBuild =>
             IsSupportedPlatform && LoadedApiVersion >= ImageBuildApiVersion;
 
+        // ---- Time, animation and skinning (API v13) ----
+
+        // Mirror the native animation budgets in UsdExporter.cpp. A record past them is not one this
+        // source built, so it is refused before anything is sized from it.
+        internal const int MaxImportTrackSamples = 1000000;
+        internal const int MaxImportJoints = 65536;
+        internal const int MaxImportInfluences = 255;
+
+        internal static bool SupportsAnimation =>
+            IsSupportedPlatform && LoadedApiVersion >= AnimationApiVersion;
+
+        internal static bool SupportsDracoExport =>
+            IsSupportedPlatform && LoadedApiVersion >= DracoExportApiVersion;
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int RUsd_GetImportTimeInfo(IntPtr context, out RUsdImportTimeInfo info);
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int RUsd_GetImportNodeTrackCount(IntPtr context, out int count);
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int RUsd_GetImportNodeTrack(IntPtr context, int index, out RUsdImportNodeTrack track);
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int RUsd_CopyImportNodeTrack(
+            IntPtr context, int index, double[] times, int timeCapacity, float[] values, int valueCapacity);
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int RUsd_GetImportSkeletonCount(IntPtr context, out int count);
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int RUsd_GetImportSkeleton(IntPtr context, int index, out RUsdImportSkeleton skeleton);
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int RUsd_CopyImportSkeletonJoints(
+            IntPtr context, int index, byte[] jointNames, int jointNamesCapacity, int[] parents,
+            float[] bindTransforms, float[] restTransforms, float[] poseTransforms, int jointCapacity);
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int RUsd_CopyImportSkeletonAnimation(
+            IntPtr context, int index, double[] times, int timeCapacity, float[] transforms, int transformCapacity);
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int RUsd_GetImportMeshSkin(IntPtr context, int meshIndex, out RUsdImportMeshSkin skin);
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int RUsd_CopyImportMeshSkinWeights(
+            IntPtr context, int meshIndex, int[] jointIndices, float[] jointWeights, int capacity);
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int RUsd_GetImportBlendShape(
+            IntPtr context, int meshIndex, int shapeIndex, byte[] nameBuffer, int nameBufferCapacity,
+            out int frameCount, out int hasNormals);
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int RUsd_CopyImportBlendShapeFrame(
+            IntPtr context, int meshIndex, int shapeIndex, int frame, out float weight,
+            [Out] RUsdVec3[] deltaVertices, [Out] RUsdVec3[] deltaNormals, int vertexCapacity);
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int RUsd_CopyImportMeshBlendShapeWeights(
+            IntPtr context, int meshIndex, float[] weights, int weightCapacity, double[] times, int timeCapacity,
+            float[] samples, int sampleCapacity);
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int RUsd_GetImportMeshPointCache(IntPtr context, int meshIndex, out RUsdImportPointCache pointCache);
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int RUsd_CopyImportMeshPointCache(
+            IntPtr context, int meshIndex, double[] times, int timeCapacity, [Out] RUsdVec3[] points,
+            [Out] RUsdVec3[] normals, int valueCapacity);
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int RUsd_GetImportLayers(
+            IntPtr context, [Out] byte[] buffer, int bufferCapacity, out int requiredLength);
+
+        // The layer files the stage composed from (RUsd_GetImportLayers), UTF-8.
+        internal static string[] GetImportLayers(IntPtr context)
+        {
+            Check(context, RUsd_GetImportLayers(context, null, 0, out int required));
+            if (required <= 1)
+            {
+                return Array.Empty<string>();
+            }
+
+            var buffer = new byte[required];
+            Check(context, RUsd_GetImportLayers(context, buffer, buffer.Length, out required));
+            string text = Encoding.UTF8.GetString(buffer, 0, Math.Max(0, Math.Min(required, buffer.Length) - 1));
+            return text.Split(new[] { '\n' }, StringSplitOptions.RemoveEmptyEntries);
+        }
+
+        // ---- Animation and skinning on export (API v13) ----
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int RUsd_SetExportTimeRange(
+            IntPtr context, double startTimeCode, double endTimeCode, double timeCodesPerSecond, double framesPerSecond);
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int RUsd_SetXformSamples(
+            IntPtr context, [MarshalAs(UnmanagedType.LPStr)] string primPath, double[] times, float[] matrices, int sampleCount);
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int RUsd_SetVisibilitySamples(
+            IntPtr context, [MarshalAs(UnmanagedType.LPStr)] string primPath, double[] times, int[] visible, int sampleCount);
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int RUsd_SetPointsSamples(
+            IntPtr context, [MarshalAs(UnmanagedType.LPStr)] string meshPath, double[] times, RUsdVec3[] points,
+            RUsdVec3[] normals, int pointCount, int sampleCount);
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int RUsd_SetSkinningMethod(
+            IntPtr context, [MarshalAs(UnmanagedType.LPStr)] string meshPath, int dualQuaternion);
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int RUsd_DefineSkelRoot(IntPtr context, [MarshalAs(UnmanagedType.LPStr)] string primPath);
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int RUsd_AddSkeleton(
+            IntPtr context, [MarshalAs(UnmanagedType.LPStr)] string skeletonPath, byte[] jointPaths, int jointCount,
+            float[] bindTransforms, float[] restTransforms);
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int RUsd_BindSkinnedMesh(
+            IntPtr context, [MarshalAs(UnmanagedType.LPStr)] string meshPath, [MarshalAs(UnmanagedType.LPStr)] string skeletonPath,
+            int[] jointIndices, float[] jointWeights, int pointCount, int influences, ref RUsdMatrix4x4 geomBindTransform);
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int RUsd_AddBlendShapeFrame(
+            IntPtr context, [MarshalAs(UnmanagedType.LPStr)] string meshPath, byte[] shapeName, float weight,
+            int[] pointIndices, int pointCount, RUsdVec3[] offsets, RUsdVec3[] normalOffsets);
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int RUsd_SetSkeletonAnimation(
+            IntPtr context, [MarshalAs(UnmanagedType.LPStr)] string skeletonPath, byte[] blendShapeNames, int shapeCount,
+            double[] times, int sampleCount, float[] jointTransforms, float[] blendShapeWeights);
+
+        private static byte[] Utf8(string text) => Encoding.UTF8.GetBytes((text ?? string.Empty) + "\0");
+
+        internal static void SetExportTimeRange(IntPtr context, double start, double end, double timeCodesPerSecond, double framesPerSecond) =>
+            Check(context, RUsd_SetExportTimeRange(context, start, end, timeCodesPerSecond, framesPerSecond));
+
+        internal static void SetXformSamples(IntPtr context, string primPath, double[] times, float[] matrices) =>
+            Check(context, RUsd_SetXformSamples(context, primPath, times, matrices, times.Length));
+
+        internal static void SetVisibilitySamples(IntPtr context, string primPath, double[] times, int[] visible) =>
+            Check(context, RUsd_SetVisibilitySamples(context, primPath, times, visible, times.Length));
+
+        // `points` (and `normals`, which may be null) are times.Length x pointCount, USD basis.
+        internal static void SetPointsSamples(IntPtr context, string meshPath, double[] times, RUsdVec3[] points,
+                                              RUsdVec3[] normals, int pointCount) =>
+            Check(context, RUsd_SetPointsSamples(context, meshPath, times, points, normals, pointCount, times.Length));
+
+        internal static void SetSkinningMethod(IntPtr context, string meshPath, bool dualQuaternion) =>
+            Check(context, RUsd_SetSkinningMethod(context, meshPath, dualQuaternion ? 1 : 0));
+
+        internal static void DefineSkelRoot(IntPtr context, string primPath) =>
+            Check(context, RUsd_DefineSkelRoot(context, primPath));
+
+        internal static void AddSkeleton(IntPtr context, string skeletonPath, string[] jointPaths, float[] bind, float[] rest) =>
+            Check(context, RUsd_AddSkeleton(context, skeletonPath, Utf8(string.Join("\n", jointPaths)), jointPaths.Length, bind, rest));
+
+        internal static void BindSkinnedMesh(IntPtr context, string meshPath, string skeletonPath, int[] jointIndices,
+                                             float[] jointWeights, int pointCount, int influences, RUsdMatrix4x4 geomBind) =>
+            Check(context, RUsd_BindSkinnedMesh(context, meshPath, skeletonPath, jointIndices, jointWeights, pointCount,
+                                                influences, ref geomBind));
+
+        internal static void AddBlendShapeFrame(IntPtr context, string meshPath, string shapeName, float weight,
+                                                int[] pointIndices, RUsdVec3[] offsets, RUsdVec3[] normalOffsets) =>
+            Check(context, RUsd_AddBlendShapeFrame(context, meshPath, Utf8(shapeName), weight,
+                                                   pointIndices.Length > 0 ? pointIndices : new int[1], pointIndices.Length,
+                                                   offsets.Length > 0 ? offsets : new RUsdVec3[1], normalOffsets));
+
+        // `times` null writes one sample at Default time.
+        internal static void SetSkeletonAnimation(IntPtr context, string skeletonPath, string[] blendShapeNames,
+                                                  double[] times, float[] jointTransforms, float[] blendShapeWeights) =>
+            Check(context, RUsd_SetSkeletonAnimation(context, skeletonPath, Utf8(string.Join("\n", blendShapeNames)),
+                                                     blendShapeNames.Length, times, times?.Length ?? 1, jointTransforms,
+                                                     blendShapeNames.Length > 0 ? blendShapeWeights : null));
+
+        internal static RUsdImportTimeInfo GetImportTimeInfo(IntPtr context)
+        {
+            Check(context, RUsd_GetImportTimeInfo(context, out RUsdImportTimeInfo info));
+            return info;
+        }
+
+        // A count from the plugin, refused when it is not one this source could have produced, so
+        // nothing is allocated from a corrupted or foreign payload.
+        private static int CheckedCount(long value, long limit, string what)
+        {
+            if (value < 0 || value > limit || value > int.MaxValue)
+            {
+                throw new InvalidOperationException($"USD import: {what} is {value}, outside 0-{Math.Min(limit, int.MaxValue)}.");
+            }
+
+            return (int)value;
+        }
+
+        // Native out-buffers are never null: a zero-length array still gets an element, and the
+        // capacity passed beside it says how many the plugin may write.
+        private static T[] Buffer<T>(int length) => new T[Math.Max(1, length)];
+
+        private static T[] Trim<T>(T[] buffer, int length) =>
+            buffer.Length == length ? buffer : length == 0 ? Array.Empty<T>() : buffer;
+
+        internal static List<UsdNativeNodeTrack> GetImportNodeTracks(IntPtr context)
+        {
+            var tracks = new List<UsdNativeNodeTrack>();
+            Check(context, RUsd_GetImportNodeTrackCount(context, out int count));
+            for (int i = 0; i < count; i++)
+            {
+                Check(context, RUsd_GetImportNodeTrack(context, i, out RUsdImportNodeTrack info));
+                int samples = CheckedCount(info.SampleCount, MaxImportTrackSamples, $"node track {i}'s sample count");
+                int width = info.Kind == 1 ? 16 : 1;
+                double[] times = Buffer<double>(samples);
+                float[] values = Buffer<float>(samples * width);
+                Check(context, RUsd_CopyImportNodeTrack(context, i, times, samples, values, samples * width));
+                tracks.Add(new UsdNativeNodeTrack
+                {
+                    Info = info,
+                    Times = Trim(times, samples),
+                    Values = Trim(values, samples * width)
+                });
+            }
+
+            return tracks;
+        }
+
+        internal static List<UsdNativeSkeleton> GetImportSkeletons(IntPtr context)
+        {
+            var skeletons = new List<UsdNativeSkeleton>();
+            Check(context, RUsd_GetImportSkeletonCount(context, out int count));
+            for (int i = 0; i < count; i++)
+            {
+                Check(context, RUsd_GetImportSkeleton(context, i, out RUsdImportSkeleton info));
+                int joints = CheckedCount(info.JointCount, MaxImportJoints, $"skeleton {i}'s joint count");
+                int samples = CheckedCount(info.SampleCount, MaxImportTrackSamples, $"skeleton {i}'s sample count");
+                long sampleValues = (long)samples * joints * 16;
+                CheckedCount(sampleValues, int.MaxValue, $"skeleton {i}'s animation size");
+                int namesLength = CheckedCount(info.JointNamesLength, (long)joints * 4096 + 1, $"skeleton {i}'s joint names length");
+
+                byte[] names = Buffer<byte>(namesLength);
+                int[] parents = Buffer<int>(joints);
+                float[] bind = Buffer<float>(joints * 16);
+                float[] rest = Buffer<float>(joints * 16);
+                float[] pose = Buffer<float>(joints * 16);
+                Check(context, RUsd_CopyImportSkeletonJoints(
+                    context, i, names, namesLength, parents, bind, rest, pose, joints));
+
+                double[] times = Buffer<double>(samples);
+                float[] transforms = Buffer<float>((int)sampleValues);
+                Check(context, RUsd_CopyImportSkeletonAnimation(context, i, times, samples, transforms, (int)sampleValues));
+
+                string joined = Encoding.UTF8.GetString(names, 0, Math.Max(0, namesLength - 1));
+                string[] jointPaths = joints == 0 ? Array.Empty<string>() : joined.Split('\n');
+                if (jointPaths.Length != joints)
+                {
+                    throw new InvalidOperationException(
+                        $"USD import: skeleton {i} names {jointPaths.Length} joints but reports {joints}.");
+                }
+
+                skeletons.Add(new UsdNativeSkeleton
+                {
+                    NodeIndex = info.NodeIndex,
+                    JointPaths = jointPaths,
+                    Parents = Trim(parents, joints),
+                    BindTransforms = Trim(bind, joints * 16),
+                    RestTransforms = Trim(rest, joints * 16),
+                    PoseTransforms = Trim(pose, joints * 16),
+                    Times = Trim(times, samples),
+                    Samples = Trim(transforms, (int)sampleValues)
+                });
+            }
+
+            return skeletons;
+        }
+
+        // The animated points of one imported mesh, or null when its points hold still.
+        internal static UsdNativePointCache GetImportMeshPointCache(IntPtr context, int meshIndex, int vertexCount)
+        {
+            Check(context, RUsd_GetImportMeshPointCache(context, meshIndex, out RUsdImportPointCache info));
+            if (info.SampleCount <= 0)
+            {
+                return null;
+            }
+
+            int samples = CheckedCount(info.SampleCount, MaxImportTrackSamples, $"mesh {meshIndex}'s point-cache sample count");
+            if (info.VertexCount != vertexCount)
+            {
+                throw new InvalidOperationException($"Mesh {meshIndex}'s point cache has {info.VertexCount} vertices; the mesh has {vertexCount}.");
+            }
+
+            int values = CheckedCount((long)samples * vertexCount, int.MaxValue, $"mesh {meshIndex}'s point-cache size");
+            double[] times = Buffer<double>(samples);
+            RUsdVec3[] points = Buffer<RUsdVec3>(values);
+            RUsdVec3[] normals = info.HasNormals != 0 ? Buffer<RUsdVec3>(values) : null;
+            Check(context, RUsd_CopyImportMeshPointCache(context, meshIndex, times, samples, points, normals, values));
+            return new UsdNativePointCache
+            {
+                Times = Trim(times, samples),
+                Points = Trim(points, values),
+                Normals = normals != null ? Trim(normals, values) : null
+            };
+        }
+
+        // The skin of one imported mesh, or null when it is not skinned. `vertexCount` is the
+        // imported vertex count (after the split), which every per-vertex array here matches.
+        internal static UsdNativeSkin GetImportMeshSkin(IntPtr context, int meshIndex, int vertexCount)
+        {
+            Check(context, RUsd_GetImportMeshSkin(context, meshIndex, out RUsdImportMeshSkin info));
+            if (info.SkeletonIndex < 0)
+            {
+                return null;
+            }
+
+            int influences = CheckedCount(info.InfluencesPerVertex, MaxImportInfluences, $"mesh {meshIndex}'s influences per vertex");
+            int pairs = CheckedCount((long)vertexCount * influences, int.MaxValue, $"mesh {meshIndex}'s joint weight count");
+            int shapes = CheckedCount(info.BlendShapeCount, MaxImportJoints, $"mesh {meshIndex}'s blend shape count");
+            int samples = CheckedCount(info.BlendShapeSampleCount, MaxImportTrackSamples, $"mesh {meshIndex}'s blend-shape sample count");
+            int weightValues = CheckedCount((long)samples * shapes, int.MaxValue, $"mesh {meshIndex}'s blend-shape weight count");
+
+            int[] joints = Buffer<int>(pairs);
+            float[] weights = Buffer<float>(pairs);
+            if (pairs > 0)
+            {
+                Check(context, RUsd_CopyImportMeshSkinWeights(context, meshIndex, joints, weights, pairs));
+            }
+
+            var blendShapes = new UsdNativeBlendShape[shapes];
+            var name = new byte[1024];
+            for (int s = 0; s < shapes; s++)
+            {
+                Array.Clear(name, 0, name.Length);
+                Check(context, RUsd_GetImportBlendShape(context, meshIndex, s, name, name.Length,
+                                                        out int frameCount, out int hasNormals));
+                int frames = CheckedCount(frameCount, 1024, $"blend shape {s}'s frame count");
+                var shape = new UsdNativeBlendShape
+                {
+                    Name = Encoding.UTF8.GetString(name, 0, Math.Max(0, Array.IndexOf(name, (byte)0))),
+                    Weights = new float[frames],
+                    DeltaVertices = new RUsdVec3[frames][],
+                    DeltaNormals = hasNormals != 0 ? new RUsdVec3[frames][] : null
+                };
+
+                for (int f = 0; f < frames; f++)
+                {
+                    RUsdVec3[] deltas = Buffer<RUsdVec3>(vertexCount);
+                    RUsdVec3[] normals = hasNormals != 0 ? Buffer<RUsdVec3>(vertexCount) : null;
+                    Check(context, RUsd_CopyImportBlendShapeFrame(
+                        context, meshIndex, s, f, out float weight, deltas, normals, vertexCount));
+                    shape.Weights[f] = weight;
+                    shape.DeltaVertices[f] = Trim(deltas, vertexCount);
+                    if (shape.DeltaNormals != null)
+                    {
+                        shape.DeltaNormals[f] = Trim(normals, vertexCount);
+                    }
+                }
+
+                blendShapes[s] = shape;
+            }
+
+            float[] staticWeights = Buffer<float>(shapes);
+            double[] times = Buffer<double>(samples);
+            float[] weightSamples = Buffer<float>(weightValues);
+            Check(context, RUsd_CopyImportMeshBlendShapeWeights(
+                context, meshIndex, staticWeights, shapes, times, samples, weightSamples, weightValues));
+
+            return new UsdNativeSkin
+            {
+                SkeletonIndex = info.SkeletonIndex,
+                Influences = influences,
+                JointIndices = Trim(joints, pairs),
+                JointWeights = Trim(weights, pairs),
+                GeomBindTransform = info.GeomBindTransform,
+                DualQuaternion = info.DualQuaternion != 0,
+                BlendShapes = blendShapes,
+                BlendShapeWeights = Trim(staticWeights, shapes),
+                BlendShapeWeightTimes = Trim(times, samples),
+                BlendShapeWeightSamples = Trim(weightSamples, weightValues)
+            };
+        }
+
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
         private static extern IntPtr RUsd_ImageBuild(byte[] data, int length, int srgb, int mode, int ormRepack,
                                                      StringBuilder reasonBuffer, int reasonCapacity);
@@ -1084,6 +1615,168 @@ namespace Unity.USDToolkit.Native
             return true;
         }
 
+        internal static bool SupportsRemoteMaterials =>
+            IsSupportedPlatform && LoadedApiVersion >= TextureColorSpaceApiVersion;
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+        private static extern int RUsd_SetRemoteAssetCache(string folder);
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int RUsd_GetImportRemoteRequestCount(IntPtr context, out int count);
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+        private static extern int RUsd_GetImportRemoteRequest(IntPtr context, int index, StringBuilder buffer, int bufferCapacity);
+
+        /// <summary>
+        /// The folder later imports read remote MDL modules from (null turns it off). API 13+.
+        /// </summary>
+        internal static void SetRemoteAssetCache(string folder)
+        {
+            if (SupportsRemoteMaterials)
+            {
+                RUsd_SetRemoteAssetCache(folder ?? string.Empty);
+            }
+        }
+
+        /// <summary>
+        /// Remote MDL modules the import met and did not find in the cache, by URL.
+        /// </summary>
+        internal static List<string> GetImportRemoteRequests(IntPtr context)
+        {
+            var urls = new List<string>();
+            if (!SupportsRemoteMaterials || context == IntPtr.Zero)
+            {
+                return urls;
+            }
+
+            Check(context, RUsd_GetImportRemoteRequestCount(context, out int count));
+            var buffer = new StringBuilder(2048);
+            for (int i = 0; i < count; i++)
+            {
+                buffer.Clear();
+                Check(context, RUsd_GetImportRemoteRequest(context, i, buffer, buffer.Capacity));
+                if (buffer.Length > 0)
+                {
+                    urls.Add(buffer.ToString());
+                }
+            }
+
+            return urls;
+        }
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int RUsd_GetImportMaterialNormalFlip(IntPtr context, int materialIndex, out int flipU, out int flipV);
+
+        /// <summary>
+        /// Whether a material's normal map flips its tangent frame along U / V (OmniPBR's
+        /// flip_tangent_u / flip_tangent_v). API 13+; false otherwise.
+        /// </summary>
+        internal static bool GetImportMaterialNormalFlip(IntPtr context, int materialIndex, out bool flipU, out bool flipV)
+        {
+            flipU = false;
+            flipV = false;
+            if (!SupportsTextureColorSpace)
+            {
+                return false;
+            }
+
+            Check(context, RUsd_GetImportMaterialNormalFlip(context, materialIndex, out int u, out int v));
+            flipU = u != 0;
+            flipV = v != 0;
+            return true;
+        }
+
+        internal static bool SupportsTextureColorSpace =>
+            IsSupportedPlatform && LoadedApiVersion >= TextureColorSpaceApiVersion;
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+        private static extern int RUsd_GetImportTextureColorSpace(
+            IntPtr context,
+            string texturePath,
+            StringBuilder buffer,
+            int bufferCapacity);
+
+        /// <summary>
+        /// The colour space the stage authors for a texture path the import reported ("sRGB",
+        /// "raw", ...), or null when none is authored ("auto") or the plugin predates API 13.
+        /// </summary>
+        internal static string GetImportTextureColorSpace(IntPtr context, string texturePath)
+        {
+            if (!SupportsTextureColorSpace || string.IsNullOrEmpty(texturePath))
+            {
+                return null;
+            }
+
+            var buffer = new StringBuilder(64);
+            Check(context, RUsd_GetImportTextureColorSpace(context, texturePath, buffer, buffer.Capacity));
+            return buffer.Length > 0 ? buffer.ToString() : null;
+        }
+
+        internal static bool SupportsAlbedoMask =>
+            IsSupportedPlatform && LoadedApiVersion >= AlbedoMaskApiVersion;
+
+        internal static bool SupportsUnrealBlend =>
+            IsSupportedPlatform && LoadedApiVersion >= UnrealBlendApiVersion;
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int RUsd_GetImportMaterialUnrealBlend(IntPtr context, int materialIndex, [Out] float[] values);
+
+        /// <summary>
+        /// How an albedo mask is used (API 13): mode -1 none, 0 a single colour where the mask is 0,
+        /// 1 three colours painted by the mask's red, green and blue with the albedo in its alpha;
+        /// and the roughness range lerp(min, max, ORM.g) when <paramref name="hasRoughnessRange"/>.
+        /// </summary>
+        internal static bool GetImportMaterialUnrealBlend(IntPtr context, int materialIndex, out int mode,
+            out Vector3[] channelColours, out bool hasRoughnessRange, out Vector2 roughnessRange)
+        {
+            mode = -1;
+            channelColours = null;
+            hasRoughnessRange = false;
+            roughnessRange = new Vector2(0f, 1f);
+            if (!SupportsUnrealBlend)
+            {
+                return false;
+            }
+
+            var v = new float[13];
+            Check(context, RUsd_GetImportMaterialUnrealBlend(context, materialIndex, v));
+            mode = Mathf.RoundToInt(v[0]);
+            channelColours = new[] { new Vector3(v[1], v[2], v[3]), new Vector3(v[4], v[5], v[6]), new Vector3(v[7], v[8], v[9]) };
+            hasRoughnessRange = v[10] != 0f;
+            roughnessRange = new Vector2(v[11], v[12]);
+            return true;
+        }
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+        private static extern int RUsd_GetImportMaterialAlbedoMask(
+            IntPtr context,
+            int materialIndex,
+            StringBuilder maskTexturePathBuffer,
+            int maskTexturePathBufferCapacity,
+            [Out] float[] maskColorRgb);
+
+        /// <summary>
+        /// The mask texture and constant colour an albedo is blended with (API 13): the base colour
+        /// is lerp(colour, albedo, mask), linear. Null when the material has no such blend.
+        /// </summary>
+        internal static bool GetImportMaterialAlbedoMask(
+            IntPtr context, int materialIndex, out string maskPath, out Vector3 maskColor)
+        {
+            maskPath = null;
+            maskColor = Vector3.zero;
+            if (!SupportsAlbedoMask)
+            {
+                return false;
+            }
+
+            var buffer = new StringBuilder(ErrorBufferSize);
+            var rgb = new float[3];
+            Check(context, RUsd_GetImportMaterialAlbedoMask(context, materialIndex, buffer, buffer.Capacity, rgb));
+            maskPath = buffer.Length > 0 ? buffer.ToString() : null;
+            maskColor = new Vector3(rgb[0], rgb[1], rgb[2]);
+            return maskPath != null;
+        }
+
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
         private static extern int RUsd_GetImportInstancedMeshCount(IntPtr context, out int count);
 
@@ -1255,6 +1948,12 @@ namespace Unity.USDToolkit.Native
             Check(context, RUsd_SetActive(context, primPath, active ? 1 : 0));
         }
 
+        // API v13; the caller checks SupportsAnimation.
+        internal static void AddRelocate(IntPtr context, string sourcePath, string targetPath)
+        {
+            Check(context, RUsd_AddRelocate(context, sourcePath, targetPath));
+        }
+
         internal static void SetVariantSelection(IntPtr context, string primPath, string variantSet, string variant)
         {
             Check(context, RUsd_SetVariantSelection(context, primPath, variantSet, variant ?? string.Empty));
@@ -1276,22 +1975,47 @@ namespace Unity.USDToolkit.Native
             return exists != 0;
         }
 
+        // `limits` other than the defaults go through RUsd_OpenStageWithLimits (API v13); the
+        // caller checks SupportsAnimation first.
         internal static IntPtr OpenStageEx(
             string inputPath,
             bool captureDiagnostics,
             bool loadNoPayloads,
             string variantSelections,
-            string loadPaths)
+            string loadPaths,
+            bool readAtDefaultTime = false,
+            UsdImportLimits limits = null,
+            bool noRead = false)
         {
             ThrowIfUnsupported();
             UsdExporter.EnsureRuntimeConfigured();
-            int flags = (captureDiagnostics ? OpenCaptureDiagnostics : 0) | (loadNoPayloads ? OpenLoadNoPayloads : 0);
-            int result = RUsd_OpenStageEx(
-                inputPath,
-                flags,
-                variantSelections ?? string.Empty,
-                loadPaths ?? string.Empty,
-                out IntPtr context);
+            int flags = (captureDiagnostics ? OpenCaptureDiagnostics : 0) | (loadNoPayloads ? OpenLoadNoPayloads : 0) |
+                        (readAtDefaultTime ? OpenDefaultTime : 0) | (noRead ? OpenNoRead : 0);
+            IntPtr context;
+            int result;
+            if ((limits == null || limits.IsDefault) && !noRead)
+            {
+                result = RUsd_OpenStageEx(inputPath, flags, variantSelections ?? string.Empty, loadPaths ?? string.Empty,
+                                          out context);
+            }
+            else
+            {
+                limits = limits ?? new UsdImportLimits();
+                var native = new RUsdImportLimits
+                {
+                    StructSize = Marshal.SizeOf<RUsdImportLimits>(),
+                    SkipWhenExceeded = limits.WhenExceeded == UsdImportLimitBehavior.SkipWithWarning ? 1 : 0,
+                    MaxNodes = limits.MaxNodes,
+                    MaxMeshes = limits.MaxMeshes,
+                    MaxInstancePlacements = limits.MaxInstancePlacements,
+                    MaxGeometryElements = limits.MaxGeometryElements,
+                    MaxTrackSamples = limits.MaxTrackSamples,
+                    MaxAnimationValues = limits.MaxAnimationValues,
+                    MaxJoints = limits.MaxJoints,
+                };
+                result = RUsd_OpenStageWithLimits(inputPath, flags, variantSelections ?? string.Empty,
+                                                  loadPaths ?? string.Empty, ref native, out context);
+            }
 
             if (result != 0)
             {

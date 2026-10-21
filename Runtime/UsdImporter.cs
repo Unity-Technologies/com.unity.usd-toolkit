@@ -5,12 +5,13 @@ using System.IO;
 using System.IO.Compression;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
+using Unity.Collections;
 using Unity.USDToolkit.Native;
 using UnityEngine;
 
 namespace Unity.USDToolkit
 {
-    public static class UsdImporter
+    public static partial class UsdImporter
     {
         public static UsdImportPreviewInfo GetPreviewInfo(string inputPath, UsdImportOptions options = null)
         {
@@ -19,7 +20,11 @@ namespace Unity.USDToolkit
             try
             {
                 ConfigureNativeRuntime(options);
-                context = UsdNative.OpenStage(GetValidatedInputPath(inputPath), options.CaptureNativeDiagnostics);
+                // Under the import's own limits, so the stage kept below is the one it would open.
+                context = RequiresLimitsApi(options)
+                    ? UsdNative.OpenStageEx(GetValidatedInputPath(inputPath), options.CaptureNativeDiagnostics, false,
+                                            string.Empty, string.Empty, false, options.Limits)
+                    : UsdNative.OpenStage(GetValidatedInputPath(inputPath), options.CaptureNativeDiagnostics);
                 RUsdImportInfo info = UsdNative.GetImportInfo(context);
 
                 // Totals come from the mesh table the stage read already built, so this is a
@@ -49,7 +54,8 @@ namespace Unity.USDToolkit
                 // The stage this walked is the stage the import that usually follows would
                 // walk again -- the same open, the same mesh tables, 3 to 5 seconds on the
                 // survey stages. It is kept for that import instead of being destroyed here.
-                KeepPreviewStage(ref context, preview.Path, options.CaptureNativeDiagnostics);
+                KeepPreviewStage(ref context, preview.Path, options.CaptureNativeDiagnostics,
+                                 UsdImportLimits.KeyOf(options.Limits));
                 return preview;
             }
             catch (Exception exception) when (!(exception is UsdImportException))
@@ -68,9 +74,10 @@ namespace Unity.USDToolkit
         private static IntPtr previewStage = IntPtr.Zero;
         private static string previewStagePath;
         private static bool previewStageDiagnostics;
+        private static string previewStageLimits;
         private static DateTime previewStageWriteTime;
 
-        private static void KeepPreviewStage(ref IntPtr context, string fullPath, bool diagnostics)
+        private static void KeepPreviewStage(ref IntPtr context, string fullPath, bool diagnostics, string limits)
         {
             lock (PreviewStageGate)
             {
@@ -82,8 +89,20 @@ namespace Unity.USDToolkit
                 previewStage = context;
                 previewStagePath = fullPath;
                 previewStageDiagnostics = diagnostics;
+                previewStageLimits = limits;
                 previewStageWriteTime = SafeWriteTime(fullPath);
                 context = IntPtr.Zero; // the finally above must not destroy it
+            }
+        }
+
+        // Frees the kept preview stage: the Editor is about to reload scripts, which would lose the
+        // pointer and leak the stage.
+        internal static void ReleasePreviewStage()
+        {
+            lock (PreviewStageGate)
+            {
+                UsdNative.Destroy(previewStage);
+                previewStage = IntPtr.Zero;
             }
         }
 
@@ -104,6 +123,7 @@ namespace Unity.USDToolkit
                 bool matches = !wantsComposition &&
                                string.Equals(previewStagePath, fullPath, StringComparison.Ordinal) &&
                                previewStageDiagnostics == options.CaptureNativeDiagnostics &&
+                               string.Equals(previewStageLimits, UsdImportLimits.KeyOf(options.Limits), StringComparison.Ordinal) &&
                                previewStageWriteTime == SafeWriteTime(fullPath);
                 if (!matches)
                 {
@@ -160,6 +180,7 @@ namespace Unity.USDToolkit
                 finally
                 {
                     ReleaseNativeImages(data);
+                    ReleaseKeptStage(data);
                 }
             }
 
@@ -188,6 +209,7 @@ namespace Unity.USDToolkit
             }
             catch
             {
+                ReleaseKeptStage(data);
                 // Nothing will attach the textures; free what the decode builds once it ends.
                 _ = decode.ContinueWith(_ => ReleaseNativeImages(data), TaskScheduler.Default);
                 throw;
@@ -221,6 +243,7 @@ namespace Unity.USDToolkit
                     return;
                 }
 
+                RunDeferredPacking(data);
                 float budget = Mathf.Max(1f, options.MaxMillisecondsPerFrame);
                 var clock = System.Diagnostics.Stopwatch.StartNew();
                 var decodeCache = new Dictionary<string, Texture2D>();
@@ -271,6 +294,14 @@ namespace Unity.USDToolkit
         // have no finalizer, so one never uploaded -- the import failed, or was thrown away
         // before its textures arrived -- is lost unless released here. Call only once nothing
         // decodes into data any more. Release is idempotent; an image under two keys is fine.
+        // A stage kept open (UsdImportOptions.KeepStageOpen) that no UsdStageSource adopted: the
+        // import failed, or recorded no source.
+        private static void ReleaseKeptStage(StageData data)
+        {
+            UsdNative.Destroy(data.KeptStage);
+            data.KeptStage = IntPtr.Zero;
+        }
+
         private static void ReleaseNativeImages(StageData data)
         {
             foreach (DecodedImage image in data.DecodedTextures.Values)
@@ -340,6 +371,7 @@ namespace Unity.USDToolkit
                 finally
                 {
                     ReleaseNativeImages(data);
+                    ReleaseKeptStage(data);
                 }
             }
             catch (Exception exception) when (!(exception is UsdImportException))
@@ -350,7 +382,7 @@ namespace Unity.USDToolkit
 
         // Loads a PNG or JPEG from disk within UsdImageLimits, or returns null. For images that
         // arrive beside a USD file rather than inside it -- a library browser's thumbnails -- which
-        // would otherwise go to Texture2D.LoadImage unchecked (SECURITY-282834, CWE-400): the file
+        // would otherwise go to Texture2D.LoadImage unchecked (CWE-400): the file
         // size is refused before reading and the header's dimensions before decoding. Main thread
         // only, as it creates a Texture2D.
         public static Texture2D LoadImageFile(string path)
@@ -392,119 +424,34 @@ namespace Unity.USDToolkit
             try
             {
                 context = OpenStageForImport(fullInputPath, options);
-                RUsdImportInfo info = UsdNative.GetImportInfo(context);
+                StageData data = ReadStageTables(context, fullInputPath, options, deferTextures);
 
-                var data = new StageData
+                // Remote MDL modules the stage names by URL and the cache does not hold yet:
+                // fetched, then the stage is read again so its materials take them.
+                if (options.DownloadRemoteMaterials && UsdNative.SupportsRemoteMaterials)
                 {
-                    InputPath = fullInputPath,
-                    BaseDirectory = Path.GetDirectoryName(fullInputPath),
-                    AllowExternalAssetPaths = options.AllowExternalAssetPaths,
-                    DefaultPrimPath = info.DefaultPrimPath,
-                    MetersPerUnit = info.MetersPerUnit,
-                    UpAxis = info.UpAxis
-                };
-
-                for (int i = 0; i < info.MaterialCount; i++)
-                {
-                    // Authored opacity needs API 4; older plugins simply report no transparency.
-                    RUsdImportOpacity opacity = UsdNative.LoadedApiVersion >= 4
-                        ? UsdNative.GetImportMaterialOpacity(context, i)
-                        : default;
-                    MaterialData material = ReadMaterialData(
-                        context, data, UsdNative.GetImportMaterial(context, i), opacity, options);
-
-                    // How the metallic map is packed, and any separate occlusion map (API 9+).
-                    if (options.ImportTextures &&
-                        UsdNative.GetImportMaterialMetallicLayout(context, i, out bool ormPacked,
-                                                                  out string occlusion))
+                    List<string> requests = UsdNative.GetImportRemoteRequests(context);
+                    if (requests.Count > 0 && UsdRemoteMaterials.Fetch(requests, s_remoteMaterialCache) > 0)
                     {
-                        material.MetallicIsOrm = ormPacked;
-                        material.OcclusionPath = ResolveTexturePath(context, data, occlusion);
-                    }
-
-                    // A plain metallic map and a roughness map of its own (API 10+); they are
-                    // packed into one texture once decoded. See PackMetallicRoughness.
-                    if (options.ImportTextures &&
-                        UsdNative.GetImportMaterialTextureLayout(context, i, out bool metallicIsPlain,
-                                                                 out string roughness))
-                    {
-                        material.MetallicIsPlain = metallicIsPlain;
-                        material.RoughnessPath = ResolveTexturePath(context, data, roughness);
-                    }
-
-                    data.Materials.Add(material);
-                }
-
-                // Read + decode each referenced texture file once (deduplicated across materials).
-                // For ImportAsync this whole method runs on a worker thread, so the heavy PNG
-                // decode happens off the main thread.
-                if (deferTextures)
-                {
-                    CachePackagedTextureBytes(context, data);
-                }
-                else
-                {
-                    ReadUniqueTextureBytes(context, data);
-                    DecodeUniqueTextures(data, options);
-                }
-
-                bool composition = UsdNative.SupportsComposition;
-                int nodeCount = UsdNative.GetImportNodeCount(context);
-                for (int i = 0; i < nodeCount; i++)
-                {
-                    RUsdImportNode node = UsdNative.GetImportNodeInfo(context, i);
-                    data.Nodes.Add(new NodeData
-                    {
-                        Path = node.Path,
-                        LocalMatrix = node.LocalMatrix,
-                        Visible = node.Visible,
-                        Flags = composition ? UsdNative.GetImportNodeFlags(context, i) : 0
-                    });
-                }
-
-                if (options.RecordSource && composition)
-                {
-                    data.CompositionReport = UsdNative.GetImportComposition(context);
-                }
-
-                // Point instancers are geometry, not a scene component, and are read whether or
-                // not lights are being imported.
-                data.InstancedMeshes.AddRange(UsdNative.GetImportInstancedMeshes(context));
-
-                if (UsdNative.SupportsSceneComponents)
-                {
-                    if (options.ImportLights || options.ApplyDomeLightToEnvironment)
-                    {
-                        // A dome texture is read from disk, so it goes through the same resolution
-                        // and stage-folder confinement as material textures.
-                        foreach (KeyValuePair<RUsdImportLight, string> light in UsdNative.GetImportLights(context))
-                        {
-                            string texture = string.IsNullOrEmpty(light.Value)
-                                ? string.Empty
-                                : ResolveTexturePath(context, data, light.Value) ?? string.Empty;
-                            data.Lights.Add(new KeyValuePair<RUsdImportLight, string>(light.Key, texture));
-                        }
-                    }
-
-                    if (options.ImportCameras)
-                    {
-                        data.Cameras.AddRange(UsdNative.GetImportCameras(context));
-                    }
-
-                    if (options.ImportSpatialAudio)
-                    {
-                        data.Audio.AddRange(UsdNative.GetImportAudio(context));
+                        ReleaseNativeImages(data);
+                        UsdNative.Destroy(context);
+                        context = IntPtr.Zero;
+                        context = OpenStageForImport(fullInputPath, options);
+                        data = ReadStageTables(context, fullInputPath, options, deferTextures);
                     }
                 }
 
-                for (int i = 0; i < info.MeshCount; i++)
+                ReadPhysicsData(context, data, options);
+
+                // UsdImportOptions.KeepStageOpen: the tables are read, so they go, and the stage
+                // stays for the UsdStageSource RecordSource puts on the root.
+                if (options.KeepStageOpen && options.RecordSource && UsdNative.SupportsStageApi)
                 {
-                    data.Meshes.Add(ReadMeshData(context, i));
+                    UsdNative.ReleaseImportData(context);
+                    data.KeptStage = context;
+                    context = IntPtr.Zero;
                 }
 
-                data.NativeDiagnostics = UsdNative.GetDiagnostics(context);
-                LogNativeImportWarnings(data.NativeDiagnostics);
-                WriteNativeDiagnosticsLog(options, data.NativeDiagnostics);
                 return data;
             }
             finally
@@ -513,23 +460,238 @@ namespace Unity.USDToolkit
             }
         }
 
+        // Reads what a walk of the stage put in the import tables -- materials and their textures,
+        // nodes, meshes, instancers, scene components, animation -- into managed data. Touches no
+        // Unity API; for ImportAsync it runs on a worker thread. A live switch reads the tables a
+        // reread of part of the stage left (RUsd_ReadSubtrees) the same way.
+        private static StageData ReadStageTables(IntPtr context, string fullInputPath, UsdImportOptions options, bool deferTextures)
+        {
+            RUsdImportInfo info = UsdNative.GetImportInfo(context);
+
+            var data = new StageData
+            {
+                InputPath = fullInputPath,
+                BaseDirectory = Path.GetDirectoryName(fullInputPath),
+                AllowExternalAssetPaths = options.AllowExternalAssetPaths,
+                DefaultPrimPath = info.DefaultPrimPath,
+                MetersPerUnit = info.MetersPerUnit,
+                UpAxis = info.UpAxis
+            };
+
+            for (int i = 0; i < info.MaterialCount; i++)
+            {
+                // Authored opacity needs API 4; older plugins simply report no transparency.
+                RUsdImportOpacity opacity = UsdNative.LoadedApiVersion >= 4
+                    ? UsdNative.GetImportMaterialOpacity(context, i)
+                    : default;
+                MaterialData material = ReadMaterialData(
+                    context, data, UsdNative.GetImportMaterial(context, i), opacity, options);
+
+                // How the metallic map is packed, and any separate occlusion map (API 9+).
+                if (options.ImportTextures &&
+                    UsdNative.GetImportMaterialMetallicLayout(context, i, out bool ormPacked,
+                                                              out string occlusion))
+                {
+                    material.MetallicIsOrm = ormPacked;
+                    material.OcclusionPath = ResolveTexturePath(context, data, occlusion);
+                }
+
+                // OmniPBR flips its normal map's tangent frame along V by default (API 13);
+                // the channel is flipped once decoded. See FlipNormalChannels.
+                if (options.ImportTextures && !string.IsNullOrEmpty(material.NormalPath) &&
+                    UsdNative.GetImportMaterialNormalFlip(context, i, out bool flipU, out bool flipV))
+                {
+                    material.NormalFlipU = flipU;
+                    material.NormalFlipV = flipV;
+                }
+
+                // A plain metallic map and a roughness map of its own (API 10+); they are
+                // packed into one texture once decoded. See PackMetallicRoughness.
+                if (options.ImportTextures &&
+                    UsdNative.GetImportMaterialTextureLayout(context, i, out bool metallicIsPlain,
+                                                             out string roughness))
+                {
+                    material.MetallicIsPlain = metallicIsPlain;
+                    material.RoughnessPath = ResolveTexturePath(context, data, roughness);
+                }
+
+                // An albedo blended with a colour by a mask (API 13); baked once decoded.
+                // See PackAlbedoMask.
+                if (options.ImportTextures && !string.IsNullOrEmpty(material.AlbedoPath) &&
+                    UsdNative.GetImportMaterialAlbedoMask(context, i, out string mask, out Vector3 maskColor))
+                {
+                    material.MaskPath = ResolveTexturePath(context, data, mask);
+                    material.MaskColor = maskColor;
+                    material.MaskMode = 0;
+                }
+
+                // Per-channel mask colours and the roughness range (API 13). See PackAlbedoMask
+                // and PackRoughnessRange.
+                if (options.ImportTextures &&
+                    UsdNative.GetImportMaterialUnrealBlend(context, i, out int maskMode, out Vector3[] channelColours,
+                                                           out bool hasRange, out Vector2 range))
+                {
+                    if (material.MaskPath != null && maskMode >= 0)
+                    {
+                        material.MaskMode = maskMode;
+                        material.ChannelColours = channelColours;
+                    }
+
+                    if (hasRange && material.MetallicIsOrm && !string.IsNullOrEmpty(material.MetallicGlossPath))
+                    {
+                        material.HasRoughnessRange = true;
+                        material.RoughnessRange = range;
+                    }
+                }
+
+                data.Materials.Add(material);
+            }
+
+            // Read + decode each referenced texture file once (deduplicated across materials).
+            // For ImportAsync this whole method runs on a worker thread, so the heavy PNG
+            // decode happens off the main thread.
+            if (deferTextures)
+            {
+                CachePackagedTextureBytes(context, data);
+            }
+            else
+            {
+                ReadUniqueTextureBytes(context, data);
+                DecodeUniqueTextures(data, options);
+            }
+
+            bool composition = UsdNative.SupportsComposition;
+            int nodeCount = UsdNative.GetImportNodeCount(context);
+            for (int i = 0; i < nodeCount; i++)
+            {
+                RUsdImportNode node = UsdNative.GetImportNodeInfo(context, i);
+                data.Nodes.Add(new NodeData
+                {
+                    Path = node.Path,
+                    LocalMatrix = node.LocalMatrix,
+                    Visible = node.Visible,
+                    Flags = composition ? UsdNative.GetImportNodeFlags(context, i) : 0
+                });
+            }
+
+            if (options.RecordSource && composition)
+            {
+                data.CompositionReport = UsdNative.GetImportComposition(context);
+            }
+
+            // Point instancers are geometry, not a scene component, and are read whether or
+            // not lights are being imported.
+            data.InstancedMeshes.AddRange(UsdNative.GetImportInstancedMeshes(context));
+
+            if (UsdNative.SupportsSceneComponents)
+            {
+                if (options.ImportLights || options.ApplyDomeLightToEnvironment)
+                {
+                    // A dome texture is read from disk, so it goes through the same resolution
+                    // and stage-folder confinement as material textures.
+                    foreach (KeyValuePair<RUsdImportLight, string> light in UsdNative.GetImportLights(context))
+                    {
+                        string texture = string.IsNullOrEmpty(light.Value)
+                            ? string.Empty
+                            : ResolveTexturePath(context, data, light.Value) ?? string.Empty;
+                        data.Lights.Add(new KeyValuePair<RUsdImportLight, string>(light.Key, texture));
+                    }
+                }
+
+                if (options.ImportCameras)
+                {
+                    data.Cameras.AddRange(UsdNative.GetImportCameras(context));
+                }
+
+                if (options.ImportSpatialAudio)
+                {
+                    data.Audio.AddRange(UsdNative.GetImportAudio(context));
+                }
+            }
+
+            for (int i = 0; i < info.MeshCount; i++)
+            {
+                MeshData mesh = ReadMeshData(context, i);
+                if (options.DoubleSidedOpenMeshes && !mesh.DoubleSided && HasOpenEdges(mesh.Points, mesh.Indices))
+                {
+                    mesh.DoubleSided = true;
+                }
+
+                data.Meshes.Add(mesh);
+            }
+
+            if (UsdNative.SupportsAnimation)
+            {
+                data.TimeInfo = UsdNative.GetImportTimeInfo(context);
+                data.HasTimeInfo = true;
+                data.LayerFiles = UsdNative.GetImportLayers(context);
+                if (options.ImportAnimation)
+                {
+                    data.NodeTracks.AddRange(UsdNative.GetImportNodeTracks(context));
+                    for (int i = 0; i < data.Meshes.Count; i++)
+                    {
+                        data.Meshes[i].PointCache = UsdNative.GetImportMeshPointCache(context, i, data.Meshes[i].Points.Length);
+                    }
+                }
+
+                if (options.ImportSkinning)
+                {
+                    data.Skeletons.AddRange(UsdNative.GetImportSkeletons(context));
+                    for (int i = 0; i < data.Meshes.Count; i++)
+                    {
+                        data.Meshes[i].Skin = UsdNative.GetImportMeshSkin(context, i, data.Meshes[i].Points.Length);
+                    }
+                }
+            }
+
+            data.NativeDiagnostics = UsdNative.GetDiagnostics(context);
+            LogNativeImportWarnings(data.NativeDiagnostics);
+            WriteNativeDiagnosticsLog(options, data.NativeDiagnostics);
+            return data;
+        }
+
+        // Said once per session: a plugin older than API 13 (a Windows or Linux payload not yet
+        // rebuilt) imports skinned meshes static, imports no animation and reads at Default time.
+        private static bool animationApiNoteShown;
+
+        private static void NoteMissingAnimationApi(UsdImportOptions options)
+        {
+            if (animationApiNoteShown || UsdNative.SupportsAnimation ||
+                !(options.ImportSkinning || options.ImportAnimation || options.ReadAtStageStartTime))
+            {
+                return;
+            }
+
+            animationApiNoteShown = true;
+            Debug.LogWarning(
+                $"USD import: {UsdNative.LoadedPluginDescription}; skinning, " +
+                $"animation and reading at the stage's start time need {UsdNative.NeedsPlugin(UsdNative.AnimationApiVersion)}, so skinned meshes " +
+                "import static, no animation is imported and time-sampled values are ignored. Rebuild the native plugin for " +
+                "this platform (see Native~/REBUILD_WINDOWS_LINUX.md).");
+        }
+
         // Variant selections and payload control need native API 6; the plain open is identical
         // to API 6's without them, so it stays the path for older plugins.
         private static IntPtr OpenStageForImport(string fullInputPath, UsdImportOptions options)
         {
+            NoteMissingAnimationApi(options);
             bool wantsComposition = !options.LoadPayloads || (options.VariantSelections?.Count ?? 0) > 0;
-            IntPtr kept = TakePreviewStage(fullInputPath, options, wantsComposition);
+            // GetPreviewInfo's kept stage was read at the start time, so a Default-time import
+            // cannot reuse it.
+            bool readAtDefaultTime = !options.ReadAtStageStartTime && UsdNative.SupportsAnimation;
+            IntPtr kept = TakePreviewStage(fullInputPath, options, wantsComposition || readAtDefaultTime);
             if (kept != IntPtr.Zero)
             {
                 return kept;
             }
 
-            if (!UsdNative.SupportsComposition)
+            bool limited = RequiresLimitsApi(options);
+            if (!UsdNative.SupportsComposition && !limited)
             {
                 if (wantsComposition)
                 {
                     throw new UsdImportException(
-                        $"Variant selections and payload control need native API {UsdNative.CompositionApiVersion}; the loaded {UsdNative.NativeDllName} reports {UsdNative.LoadedApiVersion}. Rebuild the native plugin for this platform (see Native~/REBUILD_WINDOWS_LINUX.md).");
+                        $"Variant selections and payload control need {UsdNative.NeedsPlugin(UsdNative.CompositionApiVersion)}; {UsdNative.LoadedPluginDescription}. Rebuild the native plugin for this platform (see Native~/REBUILD_WINDOWS_LINUX.md).");
                 }
 
                 return UsdNative.OpenStage(fullInputPath, options.CaptureNativeDiagnostics);
@@ -554,7 +716,30 @@ namespace Unity.USDToolkit
                 options.CaptureNativeDiagnostics,
                 !options.LoadPayloads,
                 selections.ToString(),
-                loads);
+                loads,
+                readAtDefaultTime,
+                limited ? options.Limits : null);
+        }
+
+        // Limits other than the defaults need RUsd_OpenStageWithLimits (native API 13). Refused on
+        // an older plugin rather than ignored: a caller that lowered them for a device would
+        // otherwise get the full import it was budgeting against.
+        private static bool RequiresLimitsApi(UsdImportOptions options)
+        {
+            if (options.Limits == null || options.Limits.IsDefault)
+            {
+                return false;
+            }
+
+            if (!UsdNative.SupportsAnimation)
+            {
+                throw new UsdImportException(
+                    $"UsdImportOptions.Limits other than the defaults need {UsdNative.NeedsPlugin(UsdNative.AnimationApiVersion)}; " +
+                    $"{UsdNative.LoadedPluginDescription}. Rebuild the native plugin for this platform " +
+                    "(see Native~/REBUILD_WINDOWS_LINUX.md), or import with the default limits.");
+            }
+
+            return true;
         }
 
         private static MeshData ReadMeshData(IntPtr context, int meshIndex)
@@ -603,6 +788,7 @@ namespace Unity.USDToolkit
                 Name = meshInfo.Name,
                 Visible = meshInfo.Visible,
                 MaterialIndex = meshInfo.MaterialIndex,
+                DoubleSided = ReadDoubleSided(context, meshInfo.PrimPath),
                 Points = points,
                 Indices = indices,
                 Normals = normals,
@@ -611,37 +797,198 @@ namespace Unity.USDToolkit
             };
         }
 
+        // True when the triangle mesh has an edge used by an odd number of triangles: a boundary
+        // (a sheet, a panel, an open box) or a non-manifold edge. Vertices are welded on their exact
+        // position first, since the importer splits a vertex wherever normals or UVs differ and
+        // those seams are not openings. One pass, a set of edges toggled in and out.
+        internal static bool HasOpenEdges(RUsdVec3[] points, int[] indices)
+        {
+            if (points == null || indices == null || indices.Length < 3)
+            {
+                return false;
+            }
+
+            var weld = new Dictionary<(float, float, float), int>(points.Length);
+            var ids = new int[points.Length];
+            for (int i = 0; i < points.Length; i++)
+            {
+                var key = (points[i].X, points[i].Y, points[i].Z);
+                if (!weld.TryGetValue(key, out int id))
+                {
+                    id = weld.Count;
+                    weld.Add(key, id);
+                }
+
+                ids[i] = id;
+            }
+
+            var odd = new HashSet<long>();
+            for (int t = 0; t + 2 < indices.Length; t += 3)
+            {
+                for (int e = 0; e < 3; e++)
+                {
+                    int a = ids[indices[t + e]], b = ids[indices[t + (e + 1) % 3]];
+                    if (a == b)
+                    {
+                        continue;
+                    }
+
+                    long edge = a < b ? ((long)a << 32) | (uint)b : ((long)b << 32) | (uint)a;
+                    if (!odd.Remove(edge))
+                    {
+                        odd.Add(edge);
+                    }
+                }
+            }
+
+            return odd.Count > 0;
+        }
+
+        // UsdGeomGprim.doubleSided at the default time. USD's fallback is false (one-sided); Isaac
+        // Sim and Omniverse draw both sides of a doubleSided mesh, so a mesh meant to be seen from
+        // inside (a room, a backdrop box) is open from outside unless the import honours it.
+        // Read through the Stage API on the import's own stage: no plugin rebuild, and a plugin
+        // without that API (before native API 13) reads every mesh as one-sided, as before.
+        private static bool ReadDoubleSided(IntPtr context, string primPath)
+        {
+            if (!UsdNative.SupportsStageApi || string.IsNullOrEmpty(primPath))
+            {
+                return false;
+            }
+
+            try
+            {
+                if (!UsdNative.MeasureAttributeValue(context, primPath, "doubleSided", UsdNative.TimeDefault, 0.0,
+                                                     (int)UsdValueType.Bool, out _, out long bytes) || bytes < 1)
+                {
+                    return false;
+                }
+
+                var value = new byte[bytes];
+                UsdNative.ReadAttributeValue(context, primPath, "doubleSided", UsdNative.TimeDefault, 0.0,
+                                             (int)UsdValueType.Bool, value, bytes);
+                return value[0] != 0;
+            }
+            catch (UsdStageException)
+            {
+                // A path the Stage API cannot address (a prototype under an instance proxy) or a
+                // value of another type: keep the one-sided default rather than fail the import.
+                return false;
+            }
+        }
+
+        // The Render Face Both copy of an imported material, for the doubleSided meshes whose back
+        // faces cannot be baked (BakesBackFaces), made once per material per import so one-sided
+        // meshes that share it keep culling back faces. URP Lit and the built-in
+        // Standard shader read _Cull (0 = off); HDRP Lit reads _DoubleSidedEnable and _CullMode.
+        private static Material GetDoubleSidedMaterial(Material material, StageData data)
+        {
+            if (material == null)
+            {
+                return null;
+            }
+
+            if (data.DoubleSidedMaterials.TryGetValue(material, out Material copy))
+            {
+                return copy;
+            }
+
+            bool cull = material.HasProperty("_Cull");
+            bool hdrp = material.HasProperty("_DoubleSidedEnable");
+            if (!cull && !hdrp)
+            {
+                // A shader with no render-face switch: leave it as it is.
+                data.DoubleSidedMaterials[material] = material;
+                return material;
+            }
+
+            copy = new Material(material) { name = material.name + " (Double Sided)" };
+            if (cull)
+            {
+                copy.SetFloat("_Cull", 0f);
+            }
+
+            if (hdrp)
+            {
+                copy.SetFloat("_DoubleSidedEnable", 1f);
+                copy.EnableKeyword("_DOUBLESIDED_ON");
+                if (copy.HasProperty("_CullMode"))
+                {
+                    copy.SetFloat("_CullMode", 0f);
+                }
+            }
+
+            copy.doubleSidedGI = true;
+            data.DoubleSidedMaterials[material] = copy;
+            return copy;
+        }
+
         // ---- Build: Unity object creation; must run on the main thread. ----
 
         private static UsdImportResult BuildResult(StageData data, UsdImportOptions options)
         {
             try
             {
+                RunDeferredPacking(data);
                 var decodeCache = new Dictionary<string, Texture2D>();
                 var materials = new List<Material>(data.Materials.Count);
+                var materialShare = options.ShareIdenticalMaterials ? new Dictionary<string, Material>() : null;
                 foreach (MaterialData materialData in data.Materials)
                 {
-                    materials.Add(BuildMaterial(materialData, options, data, decodeCache));
+                    string shareKey = materialShare != null ? MaterialShareKey(materialData) : null;
+                    if (shareKey != null && materialShare.TryGetValue(shareKey, out Material shared))
+                    {
+                        materials.Add(shared);
+                        continue;
+                    }
+
+                    Material built = BuildMaterial(materialData, options, data, decodeCache);
+                    if (shareKey != null)
+                    {
+                        materialShare[shareKey] = built;
+                    }
+
+                    materials.Add(built);
                 }
 
                 UsdImportResult result = CreateRootResult(data, options, materials.Count);
                 Transform root = result.RootObject.transform;
 
+                data.JointMirrorPrims = FindJointMirrorPrims(data, options);
                 foreach (NodeData node in data.Nodes)
                 {
-                    BuildNode(node, root, options);
+                    if (!data.JointMirrorPrims.Contains(node.Path))
+                    {
+                        BuildNode(node, root, options);
+                    }
                 }
 
+                List<UsdSkeleton> skeletons = BuildSkeletons(data, root, options);
                 MeshShareCache meshCache = options.ShareIdenticalMeshes ? new MeshShareCache() : null;
                 var meshObjects = new List<GameObject>(data.Meshes.Count);
                 foreach (MeshData meshData in data.Meshes)
                 {
-                    meshObjects.Add(BuildMesh(meshData, root, materials, options, result, meshCache));
+                    meshObjects.Add(BuildMesh(meshData, root, materials, options, result, meshCache, data, skeletons));
                 }
 
+                // Point instancers first: they switch their prototypes' renderers off, which the
+                // source snapshot has to see as the imported state.
+                BuildPointInstancers(data, root, meshObjects, options);
                 RecordSource(data, options, result);
                 BuildSceneComponents(data, root, options);
-                BuildPointInstancers(data, root, meshObjects, options);
+                result.Animation = BuildAnimation(data, root, skeletons, options);
+                BuildPhysics(data, root, result);
+                if (options.ImportLights && options.PhysicalLightUnits && options.EmissiveMeshLights)
+                {
+                    UsdIsaacEnvironment.BuildEmissiveLights(root.transform);
+                }
+
+                if (options.ImportLights && options.PhysicalLightUnits)
+                {
+                    UsdIsaacEnvironment.ShadowExtraSuns(root.transform);
+                }
+
+                ScheduleEnvironmentCaptures(root, options);
                 return result;
             }
             catch (Exception exception) when (!(exception is UsdImportException))
@@ -668,13 +1015,32 @@ namespace Unity.USDToolkit
                 // Materials (texture decode) — the dominant cost; report 0 → 0.85 here. Each
                 // texture is decoded on a worker thread (await), so the main thread is released
                 // during decoding and large textures no longer cause per-texture hitches.
+                if (streamedMaterials == null)
+                {
+                    RunDeferredPacking(data);
+                }
+
                 var decodeCache = new Dictionary<string, Texture2D>();
                 var materials = streamedMaterials ?? new List<Material>(data.Materials.Count);
+                var materialShare = options.ShareIdenticalMaterials ? new Dictionary<string, Material>() : null;
                 for (int i = 0; i < data.Materials.Count; i++)
                 {
-                    materials.Add(streamedMaterials != null
+                    string shareKey = materialShare != null ? MaterialShareKey(data.Materials[i]) : null;
+                    if (shareKey != null && materialShare.TryGetValue(shareKey, out Material shared))
+                    {
+                        materials.Add(shared);
+                        continue;
+                    }
+
+                    Material made = streamedMaterials != null
                         ? AssembleMaterial(data.Materials[i], options, data, null, null, null, null, null, false)
-                        : BuildMaterial(data.Materials[i], options, data, decodeCache));
+                        : BuildMaterial(data.Materials[i], options, data, decodeCache);
+                    if (shareKey != null)
+                    {
+                        materialShare[shareKey] = made;
+                    }
+
+                    materials.Add(made);
                     progress?.Invoke(data.Materials.Count > 0 ? 0.85f * (i + 1) / data.Materials.Count : 0.85f, "Materials");
                     if (clock.Elapsed.TotalMilliseconds >= budget)
                     {
@@ -687,9 +1053,14 @@ namespace Unity.USDToolkit
                 Transform root = result.RootObject.transform;
 
                 // Nodes (cheap) — 0.85 → 0.90.
+                data.JointMirrorPrims = FindJointMirrorPrims(data, options);
                 for (int i = 0; i < data.Nodes.Count; i++)
                 {
-                    BuildNode(data.Nodes[i], root, options);
+                    if (!data.JointMirrorPrims.Contains(data.Nodes[i].Path))
+                    {
+                        BuildNode(data.Nodes[i], root, options);
+                    }
+
                     if (clock.Elapsed.TotalMilliseconds >= budget)
                     {
                         progress?.Invoke(0.85f + (data.Nodes.Count > 0 ? 0.05f * (i + 1) / data.Nodes.Count : 0f), "Hierarchy");
@@ -698,12 +1069,14 @@ namespace Unity.USDToolkit
                     }
                 }
 
+                List<UsdSkeleton> skeletons = BuildSkeletons(data, root, options);
+
                 // Meshes — 0.90 → 1.0.
                 MeshShareCache meshCache = options.ShareIdenticalMeshes ? new MeshShareCache() : null;
                 var meshObjects = new List<GameObject>(data.Meshes.Count);
                 for (int i = 0; i < data.Meshes.Count; i++)
                 {
-                    meshObjects.Add(BuildMesh(data.Meshes[i], root, materials, options, result, meshCache));
+                    meshObjects.Add(BuildMesh(data.Meshes[i], root, materials, options, result, meshCache, data, skeletons));
                     progress?.Invoke(0.90f + (data.Meshes.Count > 0 ? 0.10f * (i + 1) / data.Meshes.Count : 0.10f), "Meshes");
                     if (clock.Elapsed.TotalMilliseconds >= budget)
                     {
@@ -712,9 +1085,22 @@ namespace Unity.USDToolkit
                     }
                 }
 
+                BuildPointInstancers(data, root, meshObjects, options);
                 RecordSource(data, options, result);
                 BuildSceneComponents(data, root, options);
-                BuildPointInstancers(data, root, meshObjects, options);
+                result.Animation = BuildAnimation(data, root, skeletons, options);
+                BuildPhysics(data, root, result);
+                if (options.ImportLights && options.PhysicalLightUnits && options.EmissiveMeshLights)
+                {
+                    UsdIsaacEnvironment.BuildEmissiveLights(root.transform);
+                }
+
+                if (options.ImportLights && options.PhysicalLightUnits)
+                {
+                    UsdIsaacEnvironment.ShadowExtraSuns(root.transform);
+                }
+
+                ScheduleEnvironmentCaptures(root, options);
                 progress?.Invoke(streamedMaterials != null ? StreamedBuildProgress : 1f,
                                  streamedMaterials != null ? "Streaming textures" : "Done");
                 return result;
@@ -723,6 +1109,49 @@ namespace Unity.USDToolkit
             {
                 throw CreateImportException(exception);
             }
+        }
+
+        // The files on disk the import read: the stage's layers (native API 13; the input alone
+        // before that) and every texture file, UDIM tiles included. Textures inside a package are
+        // covered by the package, which is a layer.
+        private static string[] CollectSourceFiles(StageData data)
+        {
+            var files = new SortedSet<string>(StringComparer.Ordinal);
+            foreach (string layer in data.LayerFiles)
+            {
+                files.Add(layer);
+            }
+
+            files.Add(data.InputPath);
+            void AddTexture(string path)
+            {
+                if (!string.IsNullOrEmpty(path) && !data.PackageAssets.ContainsKey(path) && File.Exists(path))
+                {
+                    files.Add(Path.GetFullPath(path));
+                }
+            }
+
+            foreach (string path in data.DecodedTextures.Keys)
+            {
+                AddTexture(path);
+            }
+
+            foreach (string path in data.TextureBytes.Keys)
+            {
+                AddTexture(path);
+            }
+
+            foreach (List<KeyValuePair<int, string>> tiles in data.UdimSets.Values)
+            {
+                foreach (KeyValuePair<int, string> tile in tiles)
+                {
+                    AddTexture(tile.Value);
+                }
+            }
+
+            var result = new string[files.Count];
+            files.CopyTo(result);
+            return result;
         }
 
         private static UsdImportResult CreateRootResult(StageData data, UsdImportOptions options, int materialCount)
@@ -736,6 +1165,7 @@ namespace Unity.USDToolkit
             var result = new UsdImportResult
             {
                 InputPath = data.InputPath,
+                SourceFiles = CollectSourceFiles(data),
                 RootObject = root,
                 DefaultPrimPath = data.DefaultPrimPath,
                 MetersPerUnit = data.MetersPerUnit,
@@ -784,12 +1214,227 @@ namespace Unity.USDToolkit
             result.StageCorrectionScale = scale;
         }
 
+        // ---- Physics (UsdImportOptions.ImportPhysics; native API 13) ----
+
+        // Reads the stage's physics into the stage data while the stage is open. Native and
+        // managed copies only, so it runs on ImportAsync's worker too. A failed read leaves the
+        // rest of the import as it is and is reported when the scene is built.
+        private static void ReadPhysicsData(IntPtr context, StageData data, UsdImportOptions options)
+        {
+            data.Physics = null;
+            data.PhysicsReadError = null;
+            if (!options.ImportPhysics)
+            {
+                return;
+            }
+
+            if (!UsdNative.SupportsPhysics)
+            {
+                data.PhysicsReadError = UsdNative.PhysicsUnavailableReason;
+                return;
+            }
+
+            try
+            {
+                data.Physics = UsdNative.ReadPhysics(context);
+                data.Physics.Mimics = ReadMimicJoints(context, data.Physics);
+            }
+            catch (Exception exception)
+            {
+                data.PhysicsReadError = exception.Message;
+            }
+        }
+
+        // PhysxMimicJointAPI:<dof> on a joint the native read reported: its referenceJoint,
+        // gearing (fallback 1) and offset (fallback 0), read through the Stage API on the import's
+        // own stage, as ReadDoubleSided does. A coupling that cannot be read stays a note.
+        private static UsdPhysicsMimicSource[] ReadMimicJoints(IntPtr context, UsdNativePhysics physics)
+        {
+            var mimics = new List<UsdPhysicsMimicSource>();
+            if (!UsdNative.SupportsStageApi)
+            {
+                return mimics.ToArray();
+            }
+
+            foreach (RUsdPhysicsUnsupported entry in physics.Unsupported)
+            {
+                string path = physics.String(entry.PathIndex);
+                string schema = physics.String(entry.DetailIndex) ?? string.Empty;
+                int colon = schema.IndexOf(':');
+                if (entry.Kind != UsdNative.PhysicsUnsupportedMimicJoint || string.IsNullOrEmpty(path) || colon < 0)
+                {
+                    continue;
+                }
+
+                string prefix = "physxMimicJoint:" + schema.Substring(colon + 1) + ":";
+                try
+                {
+                    string[] targets = UsdNative.QueryText(context, UsdNative.QueryTargets, path, prefix + "referenceJoint")
+                        .Split(new[] { '\n' }, StringSplitOptions.RemoveEmptyEntries);
+                    if (targets.Length == 0)
+                    {
+                        continue;
+                    }
+
+                    mimics.Add(new UsdPhysicsMimicSource
+                    {
+                        JointPath = path,
+                        ReferenceJointPath = targets[0],
+                        Gearing = ReadFloat(context, path, prefix + "gearing", 1f),
+                        Offset = ReadFloat(context, path, prefix + "offset", 0f),
+                    });
+                }
+                catch (UsdStageException)
+                {
+                    // A path the Stage API cannot address: the joint stays unsupported.
+                }
+            }
+
+            return mimics.ToArray();
+        }
+
+        // A float attribute's default-time value, or `fallback` when it has none (an attribute the
+        // prim does not author is an error to the Stage API, not an empty value).
+        private static float ReadFloat(IntPtr context, string primPath, string name, float fallback)
+        {
+            try
+            {
+                if (!UsdNative.MeasureAttributeValue(context, primPath, name, UsdNative.TimeDefault, 0.0,
+                                                     (int)UsdValueType.Float, out _, out long bytes) || bytes < sizeof(float))
+                {
+                    return fallback;
+                }
+
+                var value = new float[1];
+                UsdNative.ReadAttributeValue(context, primPath, name, UsdNative.TimeDefault, 0.0, (int)UsdValueType.Float, value, sizeof(float));
+                return value[0];
+            }
+            catch (UsdStageException)
+            {
+                return fallback;
+            }
+        }
+
+        // Runs after RecordSource: the builder may move articulation links under their parent
+        // link, and each object's UsdPrimSource has its prim path by then.
+        private static void BuildPhysics(StageData data, Transform root, UsdImportResult result)
+        {
+            if (data.PhysicsReadError != null)
+            {
+                Debug.LogWarning($"USD import: physics not imported: {data.PhysicsReadError}");
+                result.PhysicsNotes = new[] { "Physics not imported: " + data.PhysicsReadError };
+                return;
+            }
+
+            if (data.Physics == null)
+            {
+                return;
+            }
+
+            var known = new HashSet<string>(StringComparer.Ordinal);
+            foreach (NodeData node in data.Nodes)
+            {
+                known.Add(node.Path);
+            }
+
+            List<string> notes = UsdPhysicsBuilder.Build(data.Physics, root, (path, create) =>
+                create || known.Contains(path) ? CreatePrimPathObject(root, path) : null);
+            result.PhysicsNotes = notes;
+            if (notes.Count > 0)
+            {
+                Debug.LogWarning($"USD import: {notes.Count} physics note(s) for {data.InputPath}:\n  " + string.Join("\n  ", notes));
+            }
+        }
+
         // ---- Scene components (lights, cameras, spatial audio; native API 7) ----
 
         // USD lights emit and cameras look along local -Z with +Y up; Unity's along +Z. The node
         // keeps its USD transform (it is a prim), so the component goes on a child turned 180
         // degrees about Y, marked so exporters do not write it as a prim. The native X flip on
         // node matrices leaves Z alone, so -Z here is the authored direction.
+        internal static GameObject CreateLightHelper(Transform node, string name) => CreateComponentHelper(node, name);
+
+        /// <summary>
+        /// Re-captures the scene's environment reflection from inside an imported stage (see
+        /// <see cref="UsdImportOptions.InteriorReflection"/>). The capture is a snapshot of the
+        /// lighting at that moment: call this after turning lights on or off.
+        /// </summary>
+        public static bool RefreshReflection(GameObject root) =>
+            root != null && UsdIsaacEnvironment.CaptureInteriorReflection(root.transform);
+
+        // The dome's reflection cubemap and the interior reflection both render the scene, which
+        // must not happen in the frame that created the import's renderers (see
+        // UsdDeferredRender). They run once the scene has drawn a frame; until then a dome-lit
+        // scene reflects the skybox through RenderSettings and nothing else is missing.
+        private static void ScheduleEnvironmentCaptures(Transform root, UsdImportOptions options)
+        {
+            bool dome = options.ApplyDomeLightToEnvironment && options.PhysicalLightUnits &&
+                RenderSettings.skybox != null && RenderSettings.skybox.name == "UsdDomeLight";
+            // Only a stage with something overhead is an interior; an open stage (a turntable, a
+            // bench under a dome) keeps the sky's reflection, as Isaac Sim's metals show the sky
+            // there. A probe in the middle of an open stage sees mostly nothing, or the inside of
+            // an object, and turned every mirror black (the bench's chrome under a uniform dome).
+            bool interior = options.PhysicalLightUnits && options.InteriorReflection &&
+                UsdIsaacEnvironment.LooksEnclosed(root);
+            if (!dome && !interior)
+            {
+                return;
+            }
+
+            UsdDeferredRender.AfterNextFrame(() =>
+            {
+                if (root == null)
+                {
+                    return;
+                }
+
+                if (dome && !UsdIsaacEnvironment.TryRefreshSkyReflection())
+                {
+                    UsdDeferredRender.AfterNextFrame(() => CaptureAfterSky(root, dome, interior, 10));
+                    return;
+                }
+
+                UsdDeferredRender.AfterNextFrame(() => CaptureAfterSky(root, false, interior, 0));
+            });
+        }
+
+        // The sky capture in the first frames after an import can come back black (all six faces
+        // zero on the bench's uniform dome: every chrome and gold sphere reflected black) although
+        // the same call later fills it; it is retried a frame at a time (up to ten) before the
+        // interior passes, which reflect it.
+        private static void CaptureAfterSky(Transform root, bool dome, bool interior, int retries)
+        {
+            if (root == null)
+            {
+                return;
+            }
+
+            if (dome && !UsdIsaacEnvironment.TryRefreshSkyReflection() && retries > 0)
+            {
+                UsdDeferredRender.AfterNextFrame(() => CaptureAfterSky(root, dome, interior, retries - 1));
+                return;
+            }
+
+            if (!interior)
+            {
+                return;
+            }
+
+            // Three passes a frame apart: the first reflects the sky, the later ones the previous
+            // capture, which is what converges to the hall's own specular bounce (see
+            // CaptureInteriorReflection).
+            UsdIsaacEnvironment.CaptureInteriorReflection(root);
+            UsdDeferredRender.AfterNextFrame(() =>
+            {
+                if (root == null) return;
+                UsdIsaacEnvironment.CaptureInteriorReflection(root);
+                UsdDeferredRender.AfterNextFrame(() =>
+                {
+                    if (root != null) UsdIsaacEnvironment.CaptureInteriorReflection(root);
+                });
+            });
+        }
+
         private static GameObject CreateComponentHelper(Transform node, string name)
         {
             var helper = new GameObject(name);
@@ -854,7 +1499,9 @@ namespace Unity.USDToolkit
 
         private static void BuildSceneComponents(StageData data, Transform root, UsdImportOptions options)
         {
-            float lightReference = ReferenceLightIntensity(data);
+            // A live switch rereads part of the stage; its lights keep the reference the whole
+            // stage's set when it was imported, so they match the ones left in place.
+            float lightReference = data.LightReference > 0f ? data.LightReference : ReferenceLightIntensity(data);
             foreach (KeyValuePair<RUsdImportLight, string> entry in data.Lights)
             {
                 RUsdImportLight usd = entry.Key;
@@ -865,6 +1512,9 @@ namespace Unity.USDToolkit
 
                 Transform node = CreatePrimPathObject(root, data.Nodes[usd.NodeIndex].Path).transform;
                 var color = new Color(usd.ColorR, usd.ColorG, usd.ColorB, 1f);
+                // A Light's colour is converted from sRGB to linear for rendering, as a material
+                // colour is; see UsdLightColor.
+                Color lightColor = UsdLightColor(color);
 
                 if (usd.Type == 6)  // RUSD_LIGHT_DOME
                 {
@@ -874,7 +1524,14 @@ namespace Unity.USDToolkit
                     dome.TexturePath = entry.Value ?? string.Empty;
                     if (options.ApplyDomeLightToEnvironment)
                     {
-                        ApplyDomeLight(dome);
+                        if (options.PhysicalLightUnits)
+                        {
+                            UsdIsaacEnvironment.ApplyDome(dome, node);
+                        }
+                        else
+                        {
+                            ApplyDomeLight(dome);
+                        }
                     }
 
                     continue;
@@ -885,9 +1542,52 @@ namespace Unity.USDToolkit
                     continue;
                 }
 
+                if (options.PhysicalLightUnits)
+                {
+                    float worldScale = Mathf.Abs(node.lossyScale.x) > 0f ? Mathf.Abs(node.lossyScale.x) : 1f;
+                    int before = node.childCount;
+                    if (usd.Type == 3)  // rect: a grid of spots
+                    {
+                        UsdIsaacEnvironment.BuildRectGrid(node, usd, lightColor, worldScale);
+                    }
+                    else
+                    {
+                        GameObject physicalHelper = CreateComponentHelper(node, "UsdLight");
+                        Light physical = physicalHelper.AddComponent<Light>();
+                        physical.color = lightColor;
+                        UsdIsaacEnvironment.ConfigurePhysical(physical, usd, worldScale);
+                    }
+
+                    // An invisible light lights the scene only through bounces in Isaac Sim; see
+                    // UsdLightUnits.InvisibleLight.
+                    if (!data.Nodes[usd.NodeIndex].Visible)
+                    {
+                        for (int c = before; c < node.childCount; c++)
+                        {
+                            foreach (Light made in node.GetChild(c).GetComponentsInChildren<Light>(true))
+                            {
+                                // Direct light down to Isaac Sim's share, bounce kept whole. A
+                                // bounce-only light (a rect's GI stand-in) is left as it is.
+                                if (made.gameObject.name == "UsdLightGI")
+                                {
+                                    continue;
+                                }
+
+                                made.intensity *= UsdLightUnits.InvisibleLight;
+                                made.bounceIntensity /= UsdLightUnits.InvisibleLight;
+                                // 1.5 % of the direct light casts no shadow anyone sees, and each
+                                // shadowed point light renders the stage six more times.
+                                made.shadows = LightShadows.None;
+                            }
+                        }
+                    }
+
+                    continue;
+                }
+
                 GameObject helper = CreateComponentHelper(node, "UsdLight");
                 Light light = helper.AddComponent<Light>();
-                light.color = color;
+                light.color = lightColor;
                 light.intensity = MapLightIntensity(usd.Intensity, lightReference, usd.Type == 1);
                 switch (usd.Type)
                 {
@@ -912,6 +1612,11 @@ namespace Unity.USDToolkit
 
                         break;
                 }
+            }
+
+            if (options.PhysicalLightUnits && options.ImportLights)
+            {
+                UsdIsaacEnvironment.ApplyShadowBudget(root);
             }
 
             foreach (RUsdImportCamera usd in data.Cameras)
@@ -1010,7 +1715,7 @@ namespace Unity.USDToolkit
 
             // Through the importer's image limits like every other texture: read straight into
             // LoadImage, a few-KB PNG whose header claims 65535x65535 allocated gigabytes on the
-            // main thread (SECURITY-282834, CWE-400).
+            // main thread (CWE-400).
             Texture2D texture = LoadImageFile(path);
             if (texture == null)
             {
@@ -1034,8 +1739,10 @@ namespace Unity.USDToolkit
         }
 
         // Attaches a drawer for every point instancer the stage declares. The prototype's own
-        // GameObject stays in the hierarchy but hidden, so what is being scattered can still be
-        // inspected; the scattering itself is an array on the instancer node, not prims.
+        // GameObject stays in the hierarchy with its renderer off, so what is being scattered can
+        // still be inspected but is drawn only at its placements; the scattering itself is an
+        // array on the instancer node, not prims. A skinned prototype keeps its skeleton there, which
+        // the stage's animation poses, and the drawer bakes that pose for every instance.
         private static void BuildPointInstancers(
             StageData data, Transform root, List<GameObject> meshObjects, UsdImportOptions options)
         {
@@ -1054,17 +1761,25 @@ namespace Unity.USDToolkit
                 }
 
                 GameObject prototype = meshObjects[record.MeshIndex];
+                Renderer source = prototype != null ? prototype.GetComponent<Renderer>() : null;
+                var skinned = source as SkinnedMeshRenderer;
                 MeshFilter filter = prototype != null ? prototype.GetComponent<MeshFilter>() : null;
-                MeshRenderer source = prototype != null ? prototype.GetComponent<MeshRenderer>() : null;
-                if (filter == null || filter.sharedMesh == null || source == null)
+                Mesh prototypeMesh = skinned != null ? skinned.sharedMesh : filter != null ? filter.sharedMesh : null;
+                if (prototypeMesh == null || source == null)
                 {
                     continue;
                 }
 
                 Transform node = CreatePrimPathObject(root, data.Nodes[record.InstancerNodeIndex].Path).transform;
                 var drawer = node.gameObject.AddComponent<UsdPointInstancer>();
-                drawer.Mesh = filter.sharedMesh;
+                drawer.Mesh = prototypeMesh;
                 drawer.Materials = source.sharedMaterials;
+                if (skinned != null || prototype.GetComponent<UsdDualQuaternionSkin>() != null)
+                {
+                    drawer.SkinnedSource = source;
+                }
+
+                source.enabled = false;
 
                 var placements = new Matrix4x4[entry.Value.Length / 16];
                 for (int i = 0; i < placements.Length; i++)
@@ -1102,11 +1817,30 @@ namespace Unity.USDToolkit
             List<Material> materials,
             UsdImportOptions options,
             UsdImportResult result,
-            MeshShareCache meshCache)
+            MeshShareCache meshCache,
+            StageData data,
+            List<UsdSkeleton> skeletons)
         {
             if (!options.IncludeInvisible && !meshData.Visible)
             {
                 return null;
+            }
+
+            // A skinned mesh keeps its own Mesh: the bind poses and weights belong to its binding,
+            // not to its geometry, so it is never shared.
+            UsdNativeSkin skin = options.ImportSkinning ? meshData.Skin : null;
+            UsdSkeleton skeleton = null;
+            UsdNativeSkeleton skeletonData = null;
+            if (skin != null)
+            {
+                bool known = skin.SkeletonIndex >= 0 && skin.SkeletonIndex < skeletons.Count;
+                skeleton = known ? skeletons[skin.SkeletonIndex] : null;
+                skeletonData = known ? data.Skeletons[skin.SkeletonIndex] : null;
+                if (skeleton == null && skin.Influences > 0)
+                {
+                    Debug.LogWarning($"USD import: mesh '{meshData.PrimPath}' is bound to a skeleton the import did not build; it imports unskinned.");
+                    skin = null;
+                }
             }
 
             RUsdVec3[] points = meshData.Points;
@@ -1118,28 +1852,90 @@ namespace Unity.USDToolkit
             // identical buffers. Reusing the Unity Mesh built for the first of them keeps memory
             // and build time flat in the instance count. Materials live on the renderer, so
             // entries that differ only in their material bindings still share one Mesh.
-            Mesh mesh = meshCache != null ? meshCache.Find(meshData) : null;
+            Mesh mesh = skin == null && meshCache != null ? meshCache.Find(meshData) : null;
+            int[] blendShapeIndices = null;
             if (mesh == null)
             {
                 mesh = CreateUnityMesh(meshData, options);
-                meshCache?.Add(meshData, mesh);
+                if (skin != null)
+                {
+                    blendShapeIndices = ApplySkin(mesh, skin, skeletonData);
+                    meshData.UnityBlendShapeIndices = blendShapeIndices;
+                }
+                else
+                {
+                    meshCache?.Add(meshData, mesh);
+                }
+
                 result.UniqueMeshCount++;
             }
 
             GameObject meshObject = CreatePrimPathObject(root, meshData.PrimPath);
             meshObject.SetActive(meshData.Visible);
-            MeshFilter filter = meshObject.GetComponent<MeshFilter>();
-            if (filter == null)
+            Renderer renderer;
+            bool dualQuaternion = skin != null && skin.DualQuaternion && skeleton != null && skin.Influences > 0;
+            if (dualQuaternion && !options.DualQuaternionSkinning)
             {
-                filter = meshObject.AddComponent<MeshFilter>();
+                Debug.LogWarning($"USD import: mesh '{meshData.PrimPath}' asks for dual-quaternion skinning; with UsdImportOptions.DualQuaternionSkinning off it is skinned linearly.");
+                dualQuaternion = false;
             }
 
-            filter.sharedMesh = mesh;
-
-            MeshRenderer renderer = meshObject.GetComponent<MeshRenderer>();
-            if (renderer == null)
+            if (dualQuaternion)
             {
+                // Dual quaternions are not something a SkinnedMeshRenderer does: the mesh keeps a
+                // MeshFilter and MeshRenderer, and UsdDualQuaternionSkin poses it from the joints.
+                meshObject.AddComponent<MeshFilter>().sharedMesh = mesh;
                 renderer = meshObject.AddComponent<MeshRenderer>();
+                var weights = new float[mesh.blendShapeCount];
+                for (int s = 0; s < blendShapeIndices.Length && s < skin.BlendShapeWeights.Length; s++)
+                {
+                    if (blendShapeIndices[s] >= 0)
+                    {
+                        weights[blendShapeIndices[s]] = skin.BlendShapeWeights[s] * 100f;
+                    }
+                }
+
+                meshObject.AddComponent<UsdDualQuaternionSkin>().Initialize(
+                    skeleton.JointArray, skeleton.transform, UsdLocalToUnity(skin.GeomBindTransform), weights);
+            }
+            else if (skin != null)
+            {
+                SkinnedMeshRenderer skinned = meshObject.AddComponent<SkinnedMeshRenderer>();
+                skinned.sharedMesh = mesh;
+                if (skeleton != null && skin.Influences > 0)
+                {
+                    skinned.bones = skeleton.JointArray;
+                    skinned.rootBone = skeleton.transform;
+                    skinned.localBounds = SkinnedBounds(mesh, skin);
+                }
+
+                for (int s = 0; s < blendShapeIndices.Length && s < skin.BlendShapeWeights.Length; s++)
+                {
+                    if (blendShapeIndices[s] >= 0)
+                    {
+                        skinned.SetBlendShapeWeight(blendShapeIndices[s], skin.BlendShapeWeights[s] * 100f);
+                    }
+                }
+
+                renderer = skinned;
+            }
+            else
+            {
+                MeshFilter filter = meshObject.GetComponent<MeshFilter>();
+                if (filter == null)
+                {
+                    filter = meshObject.AddComponent<MeshFilter>();
+                }
+
+                filter.sharedMesh = mesh;
+
+                MeshRenderer meshRenderer = meshObject.GetComponent<MeshRenderer>();
+                if (meshRenderer == null)
+                {
+                    meshRenderer = meshObject.AddComponent<MeshRenderer>();
+                }
+
+                renderer = meshRenderer;
             }
 
             if (options.ImportMaterials)
@@ -1153,6 +1949,10 @@ namespace Unity.USDToolkit
                         submeshMaterials[s] = mi >= 0 && mi < materials.Count
                             ? materials[mi]
                             : mi < 0 ? GetDefaultMaterial(options, result) : null;
+                        if (meshData.DoubleSided && !BakesBackFaces(meshData))
+                        {
+                            submeshMaterials[s] = GetDoubleSidedMaterial(submeshMaterials[s], data);
+                        }
                     }
 
                     renderer.sharedMaterials = submeshMaterials;
@@ -1160,22 +1960,18 @@ namespace Unity.USDToolkit
                 else
                 {
                     int mi = submeshCount == 1 ? submeshes[0].MaterialIndex : meshData.MaterialIndex;
-                    if (mi >= 0 && mi < materials.Count)
+                    Material single = mi >= 0 && mi < materials.Count
+                        ? materials[mi]
+                        : mi < 0 ? GetDefaultMaterial(options, result) : null;
+                    if (single != null)
                     {
-                        renderer.sharedMaterial = materials[mi];
-                    }
-                    else if (mi < 0)
-                    {
-                        Material fallback = GetDefaultMaterial(options, result);
-                        if (fallback != null)
-                        {
-                            renderer.sharedMaterial = fallback;
-                        }
+                        renderer.sharedMaterial = meshData.DoubleSided && !BakesBackFaces(meshData) ? GetDoubleSidedMaterial(single, data) : single;
                     }
                 }
             }
 
-            if (options.GenerateColliders)
+            // A MeshCollider would hold the bind pose while the skin moves, so skinned meshes get none.
+            if (options.GenerateColliders && skin == null)
             {
                 MeshCollider collider = meshObject.GetComponent<MeshCollider>();
                 if (collider == null)
@@ -1237,7 +2033,15 @@ namespace Unity.USDToolkit
                 mesh.SetTriangles(indices, 0, false);
             }
 
-            if (normals.Length == points.Length)
+            if (options.SmoothNormalsLikeIsaac)
+            {
+                // Isaac Sim shades with its own smooth normals whatever the stage authors; see
+                // UsdMeshNormals. The authored ones (already split per corner by the native
+                // layer) are replaced, not merged, so a hard break an exporter wrote disappears
+                // the way it does in Isaac Sim.
+                mesh.SetNormals(UsdMeshNormals.ComputeCreaseSmoothed(ToUnityVectors(points), indices));
+            }
+            else if (normals.Length == points.Length)
             {
                 mesh.SetNormals(ToUnityVectors(normals));
             }
@@ -1255,8 +2059,117 @@ namespace Unity.USDToolkit
                 }
             }
 
+            if (BakesBackFaces(meshData))
+            {
+                AddBackFaces(mesh);
+            }
+
+            // Normal maps need tangents, and USD carries none: without them URP Lit builds its
+            // tangent frame from zero vectors and the normal map turns the surface into blotches.
+            // Computed after the back faces so the mirrored copies get their own.
+            if (mesh.vertexCount > 0 && mesh.HasVertexAttribute(UnityEngine.Rendering.VertexAttribute.Normal) &&
+                mesh.HasVertexAttribute(UnityEngine.Rendering.VertexAttribute.TexCoord0))
+            {
+                mesh.RecalculateTangents();
+            }
+
             mesh.RecalculateBounds();
             return mesh;
+        }
+
+        // A doubleSided mesh gets its back faces as geometry: Unity's lit shaders keep the front
+        // normal on a back face even with Render Face Both, so a wall seen from behind shades as
+        // if it faced away from the light (black), where Isaac Sim and Omniverse flip it. Skinned
+        // and point-cached meshes keep their vertex count (weights and animated points index it)
+        // and fall back to a Render Face Both material instead (GetDoubleSidedMaterial).
+        private static bool BakesBackFaces(MeshData meshData) =>
+            meshData.DoubleSided && meshData.Skin == null && meshData.PointCache == null;
+
+        // Appends a mirrored copy of every vertex with its normal negated, and to every submesh
+        // the same triangles wound the other way over the copies, so each side has its own,
+        // correctly facing, normals. The materials stay one-sided.
+        private static void AddBackFaces(Mesh mesh)
+        {
+            int count = mesh.vertexCount;
+            if (count == 0)
+            {
+                return;
+            }
+
+            var vertices = new List<Vector3>(count * 2);
+            mesh.GetVertices(vertices);
+            var normals = new List<Vector3>(count * 2);
+            mesh.GetNormals(normals);
+            if (normals.Count != count)
+            {
+                mesh.RecalculateNormals();
+                normals.Clear();
+                mesh.GetNormals(normals);
+            }
+
+            var uvSets = new List<Vector2>[8];
+            for (int channel = 0; channel < uvSets.Length; channel++)
+            {
+                var uv = new List<Vector2>(count * 2);
+                mesh.GetUVs(channel, uv);
+                uvSets[channel] = uv.Count == count ? uv : null;
+            }
+
+            int submeshCount = mesh.subMeshCount;
+            var triangles = new int[submeshCount][];
+            for (int s = 0; s < submeshCount; s++)
+            {
+                triangles[s] = mesh.GetTriangles(s);
+            }
+
+            for (int i = 0; i < count; i++)
+            {
+                vertices.Add(vertices[i]);
+                normals.Add(-normals[i]);
+            }
+
+            foreach (List<Vector2> uv in uvSets)
+            {
+                if (uv != null)
+                {
+                    for (int i = 0; i < count; i++)
+                    {
+                        uv.Add(uv[i]);
+                    }
+                }
+            }
+
+            string name = mesh.name;
+            mesh.Clear();
+            mesh.name = name;
+            mesh.indexFormat = count * 2 > 65535
+                ? UnityEngine.Rendering.IndexFormat.UInt32
+                : UnityEngine.Rendering.IndexFormat.UInt16;
+            mesh.SetVertices(vertices);
+            mesh.SetNormals(normals);
+            for (int channel = 0; channel < uvSets.Length; channel++)
+            {
+                if (uvSets[channel] != null)
+                {
+                    mesh.SetUVs(channel, uvSets[channel]);
+                }
+            }
+
+            mesh.subMeshCount = submeshCount;
+            for (int s = 0; s < submeshCount; s++)
+            {
+                int[] front = triangles[s];
+                var both = new int[front.Length * 2];
+                Array.Copy(front, both, front.Length);
+                for (int i = 0; i + 2 < front.Length; i += 3)
+                {
+                    both[front.Length + i] = front[i] + count;
+                    both[front.Length + i + 1] = front[i + 2] + count;
+                    both[front.Length + i + 2] = front[i + 1] + count;
+                }
+
+                mesh.SetTriangles(both, s, false);
+            }
         }
 
         // Adds UsdStageSource to the root and UsdPrimSource to every object below it, each with a
@@ -1274,6 +2187,12 @@ namespace Unity.USDToolkit
             UsdStageSource stage = root.AddComponent<UsdStageSource>();
             stage.Initialize(data.InputPath, data.DefaultPrimPath, data.MetersPerUnit, data.UpAxis, options);
             stage.SetStageCorrection(result.StageCorrectionRotation, result.StageCorrectionScale);
+            stage.SetLiveState(data.LayerFiles, ReferenceLightIntensity(data));
+            if (data.KeptStage != IntPtr.Zero)
+            {
+                stage.AdoptStage(UsdStage.Adopt(data.KeptStage, data.InputPath));
+                data.KeptStage = IntPtr.Zero;
+            }
 
             var sets = new List<UsdVariantSetInfo>();
             var payloads = new List<UsdPayloadInfo>();
@@ -1292,6 +2211,11 @@ namespace Unity.USDToolkit
             for (int i = root.transform.childCount - 1; i >= 0; i--)
             {
                 Transform child = root.transform.GetChild(i);
+                if (child.GetComponent<UsdImportHelperObject>() != null)
+                {
+                    continue;
+                }
+
                 pending.Push(new KeyValuePair<Transform, string>(child, "/" + child.name));
             }
 
@@ -1310,6 +2234,11 @@ namespace Unity.USDToolkit
                 for (int i = current.childCount - 1; i >= 0; i--)
                 {
                     Transform child = current.GetChild(i);
+                    if (child.GetComponent<UsdImportHelperObject>() != null)
+                    {
+                        continue;
+                    }
+
                     pending.Push(new KeyValuePair<Transform, string>(child, primPath + "/" + child.name));
                 }
             }
@@ -1336,10 +2265,15 @@ namespace Unity.USDToolkit
 
         private static void ApplyLocalTransform(Transform target, RUsdMatrix4x4 localMatrix)
         {
-            Matrix4x4 unity = UsdLocalToUnity(localMatrix);
-            target.localPosition = new Vector3(unity.m03, unity.m13, unity.m23);
-            target.localRotation = unity.rotation;
-            target.localScale = unity.lossyScale;
+            ApplyLocalTransform(target, UsdLocalToUnity(localMatrix));
+        }
+
+        private static void ApplyLocalTransform(Transform target, Matrix4x4 unity)
+        {
+            Decompose(unity, out Vector3 position, out Quaternion rotation, out Vector3 scale);
+            target.localPosition = position;
+            target.localRotation = rotation;
+            target.localScale = scale;
         }
 
         // Converts a USD local transform (row-vector convention, MrXcY = matrix[row r][col c])
@@ -1368,6 +2302,498 @@ namespace Unity.USDToolkit
             }
 
             return unity;
+        }
+
+        // ---- Animation (native API 13) ----
+
+        // The stage's animation as a UsdAnimationData on a UsdAnimationPlayer at the root. Samples
+        // are converted to Unity's basis and decomposed here, once, so the player only
+        // interpolates; consecutive rotations are kept on the same hemisphere so interpolating
+        // between them takes the short way, as USD's does. The player is evaluated at the read
+        // time, so everything starts where the static values put it (unless they were read at
+        // Default, which no sample corresponds to).
+        private static UsdAnimationPlayer BuildAnimation(
+            StageData data, Transform root, List<UsdSkeleton> skeletons, UsdImportOptions options)
+        {
+            if (!options.ImportAnimation || !data.HasTimeInfo)
+            {
+                return null;
+            }
+
+            var animation = ScriptableObject.CreateInstance<UsdAnimationData>();
+            animation.name = root.name + " Animation";
+            double first = double.MaxValue;
+            double last = double.MinValue;
+            void Span(double[] times)
+            {
+                if (times.Length > 0)
+                {
+                    first = Math.Min(first, times[0]);
+                    last = Math.Max(last, times[times.Length - 1]);
+                }
+            }
+
+            foreach (UsdNativeNodeTrack track in data.NodeTracks)
+            {
+                if (track.Info.NodeIndex < 0 || track.Info.NodeIndex >= data.Nodes.Count || track.Times.Length == 0 ||
+                    data.JointMirrorPrims.Contains(data.Nodes[track.Info.NodeIndex].Path))
+                {
+                    continue;
+                }
+
+                Transform target = CreatePrimPathObject(root, data.Nodes[track.Info.NodeIndex].Path).transform;
+                string path = RelativePath(root, target);
+                int samples = track.Times.Length;
+                if (track.Info.Kind == 1 && track.Values.Length == samples * 16)
+                {
+                    var transformTrack = new UsdAnimationData.TransformTrack
+                    {
+                        Path = path,
+                        Times = track.Times,
+                        Positions = new Vector3[samples],
+                        Rotations = new Quaternion[samples],
+                        Scales = new Vector3[samples]
+                    };
+
+                    for (int i = 0; i < samples; i++)
+                    {
+                        Decompose(ToUnityMatrix(track.Values, i * 16), out transformTrack.Positions[i],
+                                  out transformTrack.Rotations[i], out transformTrack.Scales[i]);
+                        if (i > 0)
+                        {
+                            transformTrack.Rotations[i] = SameHemisphere(transformTrack.Rotations[i - 1], transformTrack.Rotations[i]);
+                        }
+                    }
+
+                    animation.Add(transformTrack);
+                    Span(track.Times);
+                }
+                else if (track.Info.Kind == 2 && track.Values.Length == samples)
+                {
+                    var visibilityTrack = new UsdAnimationData.VisibilityTrack
+                    {
+                        Path = path,
+                        Times = track.Times,
+                        Visible = new bool[samples]
+                    };
+
+                    for (int i = 0; i < samples; i++)
+                    {
+                        visibilityTrack.Visible[i] = track.Values[i] != 0f;
+                    }
+
+                    animation.Add(visibilityTrack);
+                    Span(track.Times);
+                }
+            }
+
+            for (int s = 0; s < data.Skeletons.Count && s < skeletons.Count; s++)
+            {
+                UsdNativeSkeleton skeleton = data.Skeletons[s];
+                int samples = skeleton.Times.Length;
+                int joints = skeleton.JointPaths.Length;
+                if (skeletons[s] == null || samples == 0 || skeleton.Samples.Length != samples * joints * 16)
+                {
+                    continue;
+                }
+
+                var skeletonTrack = new UsdAnimationData.SkeletonTrack
+                {
+                    Path = RelativePath(root, skeletons[s].transform),
+                    JointCount = joints,
+                    Times = skeleton.Times,
+                    Positions = new Vector3[samples * joints],
+                    Rotations = new Quaternion[samples * joints],
+                    Scales = new Vector3[samples * joints]
+                };
+
+                for (int i = 0; i < samples * joints; i++)
+                {
+                    Decompose(ToUnityMatrix(skeleton.Samples, i * 16), out skeletonTrack.Positions[i],
+                              out skeletonTrack.Rotations[i], out skeletonTrack.Scales[i]);
+                    if (i >= joints)
+                    {
+                        skeletonTrack.Rotations[i] = SameHemisphere(skeletonTrack.Rotations[i - joints], skeletonTrack.Rotations[i]);
+                    }
+                }
+
+                animation.Add(skeletonTrack);
+                Span(skeleton.Times);
+            }
+
+            foreach (MeshData mesh in data.Meshes)
+            {
+                UsdNativeSkin skin = mesh.Skin;
+                if (skin == null || mesh.UnityBlendShapeIndices == null || skin.BlendShapeWeightTimes.Length == 0)
+                {
+                    continue;
+                }
+
+                Transform target = CreatePrimPathObject(root, mesh.PrimPath).transform;
+                if (target.GetComponent<SkinnedMeshRenderer>() == null && target.GetComponent<UsdDualQuaternionSkin>() == null)
+                {
+                    continue;
+                }
+
+                var weights = new float[skin.BlendShapeWeightSamples.Length];
+                for (int i = 0; i < weights.Length; i++)
+                {
+                    weights[i] = skin.BlendShapeWeightSamples[i] * 100f;
+                }
+
+                animation.Add(new UsdAnimationData.BlendShapeTrack
+                {
+                    Path = RelativePath(root, target),
+                    ShapeIndices = mesh.UnityBlendShapeIndices,
+                    Times = skin.BlendShapeWeightTimes,
+                    Weights = weights
+                });
+                Span(skin.BlendShapeWeightTimes);
+            }
+
+            foreach (MeshData mesh in data.Meshes)
+            {
+                UsdNativePointCache cache = mesh.PointCache;
+                int vertices = mesh.Points.Length;
+                if (cache == null || cache.Times.Length == 0 || vertices == 0)
+                {
+                    continue;
+                }
+
+                Transform target = CreatePrimPathObject(root, mesh.PrimPath).transform;
+                if (target.GetComponent<MeshRenderer>() == null || target.GetComponent<UsdDualQuaternionSkin>() != null)
+                {
+                    continue;
+                }
+
+                var positions = new Vector3[cache.Points.Length];
+                var bounds = new Bounds(new Vector3(cache.Points[0].X, cache.Points[0].Y, cache.Points[0].Z), Vector3.zero);
+                for (int i = 0; i < positions.Length; i++)
+                {
+                    positions[i] = new Vector3(cache.Points[i].X, cache.Points[i].Y, cache.Points[i].Z);
+                    bounds.Encapsulate(positions[i]);
+                }
+
+                Vector3[] normals = Array.Empty<Vector3>();
+                if (cache.Normals != null)
+                {
+                    normals = new Vector3[cache.Normals.Length];
+                    for (int i = 0; i < normals.Length; i++)
+                    {
+                        normals[i] = new Vector3(cache.Normals[i].X, cache.Normals[i].Y, cache.Normals[i].Z);
+                    }
+                }
+
+                animation.Add(new UsdAnimationData.PointCacheTrack
+                {
+                    Path = RelativePath(root, target),
+                    VertexCount = vertices,
+                    Times = cache.Times,
+                    Positions = positions,
+                    Normals = normals,
+                    Bounds = bounds
+                });
+                Span(cache.Times);
+            }
+
+            if (animation.IsEmpty)
+            {
+                DestroyCreated(animation);
+                return null;
+            }
+
+            RUsdImportTimeInfo time = data.TimeInfo;
+            bool range = time.HasTimeRange != 0;
+            animation.SetTimeRange(range ? time.StartTimeCode : first, range ? time.EndTimeCode : last, time.TimeCodesPerSecond);
+
+            UsdAnimationPlayer player = root.gameObject.AddComponent<UsdAnimationPlayer>();
+            player.Data = animation;
+            if (time.ReadTimeKind != 0)
+            {
+                player.Evaluate(0.0);
+                // The imported meshes already are the read-time frame; a point cache only needs its
+                // vertex stream once playback moves it on.
+                player.RestoreMeshes();
+            }
+
+            return player;
+        }
+
+        // Position, rotation and scale of a local matrix. Matrix4x4.rotation reads the rotation
+        // straight from the 3x3 part, which is only right while the scale is uniform: a box scaled
+        // (1, 2, 0.5) and turned (10, 30, 0) came back turned (10.9, 19.6, 357.2), 0.12 m off at its
+        // corners. The axes are normalized first; a mirroring matrix puts its sign on X. A matrix
+        // with shear has no exact TRS: its Z axis is kept and Y is made perpendicular to it.
+        internal static void Decompose(Matrix4x4 matrix, out Vector3 position, out Quaternion rotation, out Vector3 scale)
+        {
+            position = new Vector3(matrix.m03, matrix.m13, matrix.m23);
+            Vector3 x = matrix.GetColumn(0);
+            Vector3 y = matrix.GetColumn(1);
+            Vector3 z = matrix.GetColumn(2);
+            float sy = y.magnitude;
+            float sz = z.magnitude;
+            if (sy < 1e-12f || sz < 1e-12f)
+            {
+                // A collapsed axis has no direction to read; Unity's own answer is as good as any.
+                rotation = matrix.rotation;
+                scale = matrix.lossyScale;
+                return;
+            }
+
+            rotation = Quaternion.LookRotation(z / sz, y / sy);
+            float sx = x.magnitude;
+            scale = new Vector3(Vector3.Dot(Vector3.Cross(y, z), x) < 0f ? -sx : sx, sy, sz);
+        }
+
+        // q and -q are the same rotation; interpolating towards the one nearer the previous sample
+        // goes the short way.
+        private static Quaternion SameHemisphere(Quaternion previous, Quaternion current) =>
+            Quaternion.Dot(previous, current) < 0f
+                ? new Quaternion(-current.x, -current.y, -current.z, -current.w)
+                : current;
+
+        // `target`'s path below `root`, as Transform.Find takes it.
+        private static string RelativePath(Transform root, Transform target)
+        {
+            var names = new List<string>();
+            for (Transform current = target; current != null && current != root; current = current.parent)
+            {
+                names.Add(current.name);
+            }
+
+            names.Reverse();
+            return string.Join("/", names);
+        }
+
+        private static void DestroyCreated(UnityEngine.Object created)
+        {
+            if (Application.isPlaying)
+            {
+                UnityEngine.Object.Destroy(created);
+            }
+            else
+            {
+                UnityEngine.Object.DestroyImmediate(created);
+            }
+        }
+
+        // ---- Skinning (UsdSkel; native API 13) ----
+
+        // Prims below a Skeleton prim with nothing to draw under them. Omniverse writes the joint
+        // hierarchy there a second time as SkelJoint prims (Isaac Sim's characters do), with the
+        // joints' own names, so their objects would sit beside the joints BuildSkeletons makes:
+        // two siblings called "Root", and an AnimationClip, which finds objects by name, animates
+        // whichever comes first. The joints stand for them, so they are left out.
+        private static HashSet<string> FindJointMirrorPrims(StageData data, UsdImportOptions options)
+        {
+            var skipped = new HashSet<string>(StringComparer.Ordinal);
+            if (!options.ImportSkinning || data.Skeletons.Count == 0)
+            {
+                return skipped;
+            }
+
+            var skeletons = new HashSet<string>(StringComparer.Ordinal);
+            foreach (UsdNativeSkeleton skeleton in data.Skeletons)
+            {
+                if (skeleton.NodeIndex >= 0 && skeleton.NodeIndex < data.Nodes.Count)
+                {
+                    skeletons.Add(data.Nodes[skeleton.NodeIndex].Path);
+                }
+            }
+
+            // A mesh below a Skeleton prim keeps its ancestors.
+            var holdsContent = new HashSet<string>(StringComparer.Ordinal);
+            foreach (MeshData mesh in data.Meshes)
+            {
+                for (string path = mesh.PrimPath; !string.IsNullOrEmpty(path) && holdsContent.Add(path);
+                     path = path.Substring(0, Math.Max(0, path.LastIndexOf('/'))))
+                {
+                }
+            }
+
+            foreach (NodeData node in data.Nodes)
+            {
+                if (holdsContent.Contains(node.Path))
+                {
+                    continue;
+                }
+
+                for (int slash = node.Path.LastIndexOf('/'); slash > 0; slash = node.Path.LastIndexOf('/', slash - 1))
+                {
+                    if (skeletons.Contains(node.Path.Substring(0, slash)))
+                    {
+                        skipped.Add(node.Path);
+                        break;
+                    }
+                }
+            }
+
+            return skipped;
+        }
+
+        // Joint hierarchies for the skeletons skinned meshes are bound to. Joints become children
+        // of the Skeleton prim's object in joint order (UsdSkel orders every parent before its
+        // children), posed as the skeleton is at the read time. They are not prims, so each root
+        // joint is marked as an import helper, which RecordSource and both exporters skip with its
+        // subtree. The list is indexed like the native skeleton table; null where nothing was built.
+        private static List<UsdSkeleton> BuildSkeletons(StageData data, Transform root, UsdImportOptions options)
+        {
+            var built = new List<UsdSkeleton>(data.Skeletons.Count);
+            foreach (UsdNativeSkeleton skeleton in data.Skeletons)
+            {
+                if (!options.ImportSkinning || skeleton.NodeIndex < 0 || skeleton.NodeIndex >= data.Nodes.Count)
+                {
+                    built.Add(null);
+                    continue;
+                }
+
+                Transform node = CreatePrimPathObject(root, data.Nodes[skeleton.NodeIndex].Path).transform;
+                var joints = new Transform[skeleton.JointPaths.Length];
+                for (int j = 0; j < joints.Length; j++)
+                {
+                    int parent = j < skeleton.Parents.Length ? skeleton.Parents[j] : -1;
+                    Transform parentTransform = parent >= 0 && parent < j ? joints[parent] : node;
+                    string path = skeleton.JointPaths[j];
+                    string name = SanitizeObjectName(path.Substring(path.LastIndexOf('/') + 1));
+                    if (parentTransform == node)
+                    {
+                        // Root joints share the Skeleton prim's object with its child prims; a
+                        // clip's paths need the names to differ (see FindJointMirrorPrims).
+                        string baseName = name;
+                        for (int suffix = 1; node.Find(name) != null; suffix++)
+                        {
+                            name = baseName + "_" + suffix;
+                        }
+                    }
+
+                    var joint = new GameObject(name);
+                    joint.transform.SetParent(parentTransform, false);
+                    ApplyLocalTransform(joint.transform, ToUnityMatrix(skeleton.PoseTransforms, j * 16));
+                    if (parentTransform == node)
+                    {
+                        joint.AddComponent<UsdImportHelperObject>();
+                    }
+
+                    joints[j] = joint.transform;
+                }
+
+                UsdSkeleton component = node.GetComponent<UsdSkeleton>();
+                if (component == null)
+                {
+                    component = node.gameObject.AddComponent<UsdSkeleton>();
+                }
+
+                var binds = new Matrix4x4[joints.Length];
+                for (int j = 0; j < binds.Length && (j + 1) * 16 <= skeleton.BindTransforms.Length; j++)
+                {
+                    binds[j] = ToUnityMatrix(skeleton.BindTransforms, j * 16);
+                }
+
+                component.Initialize(skeleton.JointPaths, joints, binds);
+                built.Add(component);
+            }
+
+            return built;
+        }
+
+        // Bone weights, bind poses and blend shapes. Unity skins a vertex with
+        // bones[i].localToWorldMatrix * bindposes[i]. The bones are the joints, posed in the
+        // Skeleton prim's space, and UsdSkel's linear blend skinning takes a mesh point through
+        // geomBindTransform into skeleton space and then out of joint i's bind transform, so
+        // bindposes[i] = inverse(bind_i) * geomBindTransform -- both converted to Unity's basis,
+        // which keeps products in order. Returns, for each USD blend shape, the Unity blend-shape
+        // index it became, or -1 when it had nothing to add.
+        private static int[] ApplySkin(Mesh mesh, UsdNativeSkin skin, UsdNativeSkeleton skeleton)
+        {
+            int vertexCount = mesh.vertexCount;
+            int influences = skin.Influences;
+            if (influences > 0 && skeleton != null && skin.JointIndices.Length == vertexCount * influences)
+            {
+                var bonesPerVertex = new NativeArray<byte>(vertexCount, Allocator.Temp);
+                var weights = new List<BoneWeight1>(vertexCount * Math.Min(influences, 4));
+                var pairs = new List<BoneWeight1>(influences);
+                for (int v = 0; v < vertexCount; v++)
+                {
+                    pairs.Clear();
+                    for (int i = 0; i < influences; i++)
+                    {
+                        float weight = skin.JointWeights[v * influences + i];
+                        if (weight > 0f)
+                        {
+                            pairs.Add(new BoneWeight1 { boneIndex = skin.JointIndices[v * influences + i], weight = weight });
+                        }
+                    }
+
+                    // Unity wants each vertex's weights heaviest first.
+                    pairs.Sort((a, b) => b.weight.CompareTo(a.weight));
+                    bonesPerVertex[v] = (byte)pairs.Count;
+                    weights.AddRange(pairs);
+                }
+
+                var weightArray = new NativeArray<BoneWeight1>(weights.ToArray(), Allocator.Temp);
+                mesh.SetBoneWeights(bonesPerVertex, weightArray);
+                weightArray.Dispose();
+                bonesPerVertex.Dispose();
+
+                Matrix4x4 geomBind = UsdLocalToUnity(skin.GeomBindTransform);
+                var bindposes = new Matrix4x4[skeleton.JointPaths.Length];
+                for (int j = 0; j < bindposes.Length; j++)
+                {
+                    bindposes[j] = ToUnityMatrix(skeleton.BindTransforms, j * 16).inverse * geomBind;
+                }
+
+                mesh.bindposes = bindposes;
+            }
+
+            var unityIndices = new int[skin.BlendShapes.Length];
+            var names = new HashSet<string>(StringComparer.Ordinal);
+            for (int s = 0; s < skin.BlendShapes.Length; s++)
+            {
+                UsdNativeBlendShape shape = skin.BlendShapes[s];
+                unityIndices[s] = -1;
+                if (shape.Weights.Length == 0)
+                {
+                    continue;
+                }
+
+                // Unity needs blend-shape names unique within a mesh; USD only within the binding.
+                string name = string.IsNullOrEmpty(shape.Name) ? "BlendShape" : shape.Name;
+                for (int suffix = 1; !names.Add(name); suffix++)
+                {
+                    name = (string.IsNullOrEmpty(shape.Name) ? "BlendShape" : shape.Name) + "_" + suffix;
+                }
+
+                for (int f = 0; f < shape.Weights.Length; f++)
+                {
+                    Vector3[] deltaNormals = shape.DeltaNormals != null ? ToUnityVectors(shape.DeltaNormals[f]).ToArray() : null;
+                    mesh.AddBlendShapeFrame(name, shape.Weights[f] * 100f, ToUnityVectors(shape.DeltaVertices[f]).ToArray(),
+                                            deltaNormals, null);
+                }
+
+                unityIndices[s] = mesh.blendShapeCount - 1;
+            }
+
+            return unityIndices;
+        }
+
+        // SkinnedMeshRenderer.localBounds is in the root bone's space, here the Skeleton prim's
+        // object; the mesh's own bounds are in mesh space, which geomBindTransform leaves.
+        private static Bounds SkinnedBounds(Mesh mesh, UsdNativeSkin skin)
+        {
+            Matrix4x4 geomBind = UsdLocalToUnity(skin.GeomBindTransform);
+            Vector3[] vertices = mesh.vertices;
+            if (vertices.Length == 0)
+            {
+                return new Bounds();
+            }
+
+            var bounds = new Bounds(geomBind.MultiplyPoint3x4(vertices[0]), Vector3.zero);
+            foreach (Vector3 vertex in vertices)
+            {
+                bounds.Encapsulate(geomBind.MultiplyPoint3x4(vertex));
+            }
+
+            return bounds;
         }
 
         private static GameObject CreatePrimPathObject(Transform root, string primPath)
@@ -1412,6 +2838,8 @@ namespace Unity.USDToolkit
                 RUsdMaterial source = nativeMaterial.Material;
                 data.AlbedoPath = ResolveTexturePath(context, stage, source.AlbedoTexturePath);
                 data.NormalPath = ResolveTexturePath(context, stage, source.NormalTexturePath);
+                data.NormalIsSrgb = options.NormalMapColorSpaceLikeIsaac &&
+                                    NormalMapReadsAsSrgb(context, source.NormalTexturePath);
                 data.MetallicGlossPath = ResolveTexturePath(context, stage, source.MetallicTexturePath);
                 data.EmissionPath = ResolveTexturePath(context, stage, source.EmissiveTexturePath);
 
@@ -1439,7 +2867,7 @@ namespace Unity.USDToolkit
             {
                 foreach (string path in new[] { material.AlbedoPath, material.NormalPath, material.MetallicGlossPath,
                                                 material.EmissionPath, material.OcclusionPath, material.RoughnessPath,
-                                                material.OpacityPath })
+                                                material.OpacityPath, material.MaskPath })
                 {
                     if (!string.IsNullOrEmpty(path) && !data.UdimSets.ContainsKey(path) &&
                         !data.PackageAssets.ContainsKey(path) && seen.Add(path))
@@ -1510,7 +2938,7 @@ namespace Unity.USDToolkit
             {
                 foreach (string path in new[] { material.AlbedoPath, material.NormalPath, material.MetallicGlossPath,
                                                 material.EmissionPath, material.OcclusionPath, material.RoughnessPath,
-                                                material.OpacityPath })
+                                                material.OpacityPath, material.MaskPath })
                 {
                     if (!string.IsNullOrEmpty(path) && data.PackageAssets.ContainsKey(path))
                     {
@@ -1627,6 +3055,72 @@ namespace Unity.USDToolkit
         }
 
         // Records how a texture is read, and notices when one image is read both ways.
+        // Negates a normal map's tangent X (red) and/or Y (green) in place, the flip OmniPBR's
+        // flip_tangent_u / flip_tangent_v apply. A component is 2c - 1 of the value the shader
+        // samples, so negating it maps c to 1 - c in that space: the byte itself for linear data,
+        // and through linear for a map that decodes as sRGB.
+        private static void FlipNormalChannels(byte[] rgba, bool flipRed, bool flipGreen, bool srgb)
+        {
+            if (rgba == null || (!flipRed && !flipGreen))
+            {
+                return;
+            }
+
+            var map = new byte[256];
+            for (int i = 0; i < 256; i++)
+            {
+                if (srgb)
+                {
+                    float linear = Mathf.GammaToLinearSpace(i / 255f);
+                    map[i] = (byte)Mathf.Clamp(Mathf.RoundToInt(Mathf.LinearToGammaSpace(1f - linear) * 255f), 0, 255);
+                }
+                else
+                {
+                    map[i] = (byte)(255 - i);
+                }
+            }
+
+            for (int at = 0; at + 3 < rgba.Length; at += 4)
+            {
+                if (flipRed)
+                {
+                    rgba[at] = map[rgba[at]];
+                }
+
+                if (flipGreen)
+                {
+                    rgba[at + 1] = map[rgba[at + 1]];
+                }
+            }
+        }
+
+        // Whether a normal map path the native layer reported reads as sRGB: an authored "sRGB",
+        // or no authored colour space ("auto") on an 8-bit image format (PNG is taken as 8-bit;
+        // a 16-bit one, which "auto" would read as linear, is rare for normal maps). EXR and HDR
+        // under "auto" are linear, as is anything authored "raw".
+        private static bool NormalMapReadsAsSrgb(IntPtr context, string reportedPath)
+        {
+            if (string.IsNullOrEmpty(reportedPath))
+            {
+                return false;
+            }
+
+            string space = UsdNative.GetImportTextureColorSpace(context, reportedPath);
+            if (space != null)
+            {
+                return string.Equals(space, "sRGB", StringComparison.OrdinalIgnoreCase);
+            }
+
+            if (!UsdNative.SupportsTextureColorSpace)
+            {
+                return false;
+            }
+
+            string extension = System.IO.Path.GetExtension(reportedPath).ToLowerInvariant();
+            return extension == ".jpg" || extension == ".jpeg" || extension == ".tga" ||
+                   extension == ".bmp" || extension == ".png";
+        }
+
         private static void NoteColourSpace(Dictionary<string, bool> srgbUse, HashSet<string> mixedUse,
                                             string path, bool srgb)
         {
@@ -1675,12 +3169,23 @@ namespace Unity.USDToolkit
             // is known would get its mip chain wrong -- and an image bound to slots of both kinds
             // has no single answer, so it is left for the uploader, which does know.
             var srgbUse = new Dictionary<string, bool>();
+            // Normal maps whose channels are flipped once decoded (OmniPBR flip_tangent_u/v), by
+            // path: (flip red, flip green, the map decodes as sRGB). They skip the native one-call
+            // build, which would compress before the flip.
+            var normalFlips = new Dictionary<string, (bool u, bool v, bool srgb)>();
+            foreach (MaterialData material in data.Materials)
+            {
+                if (!string.IsNullOrEmpty(material.NormalPath) && (material.NormalFlipU || material.NormalFlipV))
+                {
+                    normalFlips[material.NormalPath] = (material.NormalFlipU, material.NormalFlipV, material.NormalIsSrgb);
+                }
+            }
             var mixedUse = new HashSet<string>();
             foreach (MaterialData material in data.Materials)
             {
                 NoteColourSpace(srgbUse, mixedUse, material.AlbedoPath, true);
                 NoteColourSpace(srgbUse, mixedUse, material.EmissionPath, true);
-                NoteColourSpace(srgbUse, mixedUse, material.NormalPath, false);
+                NoteColourSpace(srgbUse, mixedUse, material.NormalPath, material.NormalIsSrgb);
                 NoteColourSpace(srgbUse, mixedUse, material.MetallicGlossPath, false);
                 NoteColourSpace(srgbUse, mixedUse, material.OcclusionPath, false);
                 NoteColourSpace(srgbUse, mixedUse, material.RoughnessPath, false);
@@ -1701,6 +3206,17 @@ namespace Unity.USDToolkit
                 }
 
                 if (material.MetallicIsPlain && !string.IsNullOrEmpty(material.MetallicGlossPath))
+                {
+                    packSources.Add(material.MetallicGlossPath);
+                }
+
+                if (HasMaskBlend(material))
+                {
+                    packSources.Add(material.MaskPath);
+                    packSources.Add(material.AlbedoPath);
+                }
+
+                if (material.HasRoughnessRange)
                 {
                     packSources.Add(material.MetallicGlossPath);
                 }
@@ -1728,6 +3244,14 @@ namespace Unity.USDToolkit
                     {
                         colourUse.Add(path);
                     }
+                }
+            }
+
+            foreach (MaterialData material in data.Materials)
+            {
+                if (HasMaskBlend(material) && (material.MaskMode == 1 || material.MaskMode == 2))
+                {
+                    colourUse.Add(material.MaskPath);
                 }
             }
 
@@ -1778,7 +3302,7 @@ namespace Unity.USDToolkit
 
                 // Native first (API 12): decode, ORM repack and block compression in one call,
                 // and a compressed image never becomes a managed array at all.
-                if (UsdNative.SupportsImageBuild)
+                if (UsdNative.SupportsImageBuild && !normalFlips.ContainsKey(paths[index]))
                 {
                     bool wantsBlocks = options.CompressTextures && !mixedUse.Contains(paths[index]) &&
                                        !packSources.Contains(paths[index]);
@@ -1811,12 +3335,25 @@ namespace Unity.USDToolkit
                     }
                 }
 
+                if (!decoded && !UsdExrDecoder.IsExr(bytes))
+                {
+                    // Targa: LoadImage reads PNG and JPEG only, so a .tga (Isaac Sim's pallet
+                    // props ship their albedo and normal maps that way) was refused outright.
+                    decoded = UsdTgaDecoder.TryDecode(bytes, out w, out h, out rgba);
+                }
+
                 if (decoded)
                 {
                     var image = new DecodedImage { Width = w, Height = h, Rgba = rgba };
                     if (ormUse.Contains(paths[index]))
                     {
                         RepackOrm(rgba);
+                        image.Transformed = true;
+                    }
+
+                    if (normalFlips.TryGetValue(paths[index], out var flip))
+                    {
+                        FlipNormalChannels(rgba, flip.u, flip.v, flip.srgb);
                         image.Transformed = true;
                     }
 
@@ -1860,9 +3397,119 @@ namespace Unity.USDToolkit
             }
 
             DecodeUdimSets(data, options, srgbUse, mixedUse, packSources, graySources, ormUse);
-            PackMetallicRoughness(data, options);
-            PackAlbedoOpacity(data, options);
-            ReleasePackSources(data, options, packSources, nonOrmUse, srgbUse);
+
+            // JPEG normal maps whose channels OmniPBR flips (flip_tangent_v): like a packing source,
+            // they have no pixels here to flip, and used to be uploaded unflipped.
+            var deferredFlips = new List<string>();
+            foreach (KeyValuePair<string, (bool u, bool v, bool srgb)> entry in normalFlips)
+            {
+                if ((!data.DecodedTextures.TryGetValue(entry.Key, out DecodedImage image) || !HasPixels(image)) &&
+                    data.TextureBytes.TryGetValue(entry.Key, out byte[] bytes) && bytes != null && bytes.Length > 0)
+                {
+                    deferredFlips.Add(entry.Key);
+                }
+            }
+
+            Action pack = () =>
+            {
+                foreach (string path in deferredFlips)
+                {
+                    if (!data.DecodedTextures.TryGetValue(path, out DecodedImage image) || !HasPixels(image) || image.Rgba == null)
+                    {
+                        continue;
+                    }
+
+                    var flip = normalFlips[path];
+                    FlipNormalChannels(image.Rgba, flip.u, flip.v, flip.srgb);
+                    image.Transformed = true;
+                    if (options.CompressTextures && !mixedUse.Contains(path) && !packSources.Contains(path))
+                    {
+                        CompressDecoded(image, flip.srgb);
+                    }
+                }
+
+                PackMetallicRoughness(data, options);
+                PackAlbedoMask(data, options);
+                PackRoughnessRange(data, options);
+                PackAlbedoOpacity(data, options);
+                ReleasePackSources(data, options, packSources, nonOrmUse, srgbUse);
+            };
+
+            // A JPEG is decoded by LoadImage at upload time, on the main thread; nothing on this
+            // thread reads one. A packed map needs its sources' pixels, so one fed by a JPEG
+            // (OpenChessSet's metalness and roughness maps all are) found nothing to pack and the
+            // material kept its constants: every piece at 0.5 smoothness, gold flat, glass a white
+            // ball. Those wait for the main thread, which decodes them and packs then
+            // (RunDeferredPacking).
+            var deferred = new List<string>(deferredFlips);
+            foreach (string source in packSources)
+            {
+                if ((!data.DecodedTextures.TryGetValue(source, out DecodedImage image) || !HasPixels(image)) &&
+                    data.TextureBytes.TryGetValue(source, out byte[] bytes) && bytes != null && bytes.Length > 0)
+                {
+                    deferred.Add(source);
+                }
+            }
+
+            if (deferred.Count == 0)
+            {
+                pack();
+            }
+            else
+            {
+                data.DeferredPackSources = deferred;
+                data.DeferredPack = pack;
+            }
+        }
+
+        // The packing (and normal-map flips) DecodeUniqueTextures left for the main thread: decodes
+        // the sources only LoadImage reads, then finishes them as the decode pass would have. Once per import; a no-op when
+        // nothing was deferred.
+        private static void RunDeferredPacking(StageData data)
+        {
+            Action pack = data.DeferredPack;
+            if (pack == null)
+            {
+                return;
+            }
+
+            data.DeferredPack = null;
+            foreach (string source in data.DeferredPackSources)
+            {
+                if (!data.TextureBytes.TryGetValue(source, out byte[] bytes) || bytes == null ||
+                    !UsdImageLimits.PermitsLoadImage(bytes, out string reason))
+                {
+                    continue;
+                }
+
+                var texture = new Texture2D(2, 2, TextureFormat.RGBA32, false, true);
+                try
+                {
+                    if (!texture.LoadImage(bytes, false))
+                    {
+                        continue;
+                    }
+
+                    Color32[] pixels = texture.GetPixels32();
+                    var rgba = new byte[pixels.Length * 4];
+                    for (int i = 0, d = 0; i < pixels.Length; i++, d += 4)
+                    {
+                        rgba[d] = pixels[i].r;
+                        rgba[d + 1] = pixels[i].g;
+                        rgba[d + 2] = pixels[i].b;
+                        rgba[d + 3] = pixels[i].a;
+                    }
+
+                    data.DecodedTextures[source] = new DecodedImage { Width = texture.width, Height = texture.height, Rgba = rgba };
+                }
+                finally
+                {
+                    DestroyUnityObject(texture);
+                }
+            }
+
+            data.DeferredPackSources = null;
+            pack();
         }
 
         // Decodes every tile of each UDIM set and stitches them into one atlas, laid out as the
@@ -2024,7 +3671,8 @@ namespace Unity.USDToolkit
 
                     int w, h;
                     byte[] rgba;
-                    bool ok = UsdPngDecoder.TryDecode(bytes, out w, out h, out rgba);
+                    bool ok = UsdPngDecoder.TryDecode(bytes, out w, out h, out rgba) ||
+                              (!UsdExrDecoder.IsExr(bytes) && UsdTgaDecoder.TryDecode(bytes, out w, out h, out rgba));
                     if (!ok && UsdExrDecoder.IsExr(bytes))
                     {
                         ok = TryDecodeExr(bytes, srgb, out w, out h, out rgba, out string why);
@@ -2244,6 +3892,223 @@ namespace Unity.USDToolkit
 
             int packedAt = key.IndexOf("#packed:", StringComparison.Ordinal);
             return stage.UdimLayouts.TryGetValue(packedAt >= 0 ? key.Substring(0, packedAt) : key, out layout);
+        }
+
+        private static bool HasMaskBlend(MaterialData material)
+        {
+            return !string.IsNullOrEmpty(material.MaskPath) && !string.IsNullOrEmpty(material.AlbedoPath);
+        }
+
+        // Bakes lerp(MaskColor, albedo, mask) into the albedo, as Unreal-connector MDL computes its
+        // base colour (MI_Floor_01: ColorAlbedo where MaskSelection is 0). The blend runs in linear
+        // space, where MDL does it (the albedo is read as sRGB, the mask as linear), and the result
+        // is stored sRGB like any albedo. Keyed on the albedo plus mask and colour, since the same
+        // albedo file is blended with different colours by different materials.
+        private static void PackAlbedoMask(StageData data, UsdImportOptions options)
+        {
+            var jobs = new List<(string key, string albedo, string mask, Vector3 colour, int mode, Vector3[] channels)>();
+            var keys = new HashSet<string>();
+            foreach (MaterialData material in data.Materials)
+            {
+                if (!HasMaskBlend(material))
+                {
+                    continue;
+                }
+
+                string signature = material.MaskPath + "|" + material.MaskMode + "|" + Vec(material.MaskColor);
+                if (material.MaskMode == 1 && material.ChannelColours != null)
+                {
+                    signature += "|" + Vec(material.ChannelColours[0]) + "|" + Vec(material.ChannelColours[1]) + "|" + Vec(material.ChannelColours[2]);
+                }
+
+                string key = material.AlbedoPath + "#packed:mask:" + signature.GetHashCode().ToString("x", CultureInfo.InvariantCulture);
+                if (keys.Add(key))
+                {
+                    jobs.Add((key, material.AlbedoPath, material.MaskPath, material.MaskColor, material.MaskMode, material.ChannelColours));
+                }
+
+                material.AlbedoPath = key;
+            }
+
+            var toLinear = new float[256];
+            for (int i = 0; i < 256; i++)
+            {
+                toLinear[i] = Mathf.GammaToLinearSpace(i / 255f);
+            }
+
+            var packed = new DecodedImage[jobs.Count];
+            System.Threading.Tasks.Parallel.For(0, jobs.Count, index =>
+            {
+                var job = jobs[index];
+                DecodedImage albedo = data.DecodedTextures.TryGetValue(job.albedo, out DecodedImage a) ? a : null;
+                DecodedImage mask = data.DecodedTextures.TryGetValue(job.mask, out DecodedImage m) ? m : null;
+                if (albedo?.Rgba == null || !HasPixels(mask))
+                {
+                    return;
+                }
+
+                int width = albedo.Width, height = albedo.Height;
+                var rgba = new byte[width * height * 4];
+                if (job.mode == 2 && mask.Rgba != null)
+                {
+                    // Unreal's BlendOverlay, as the connector writes it (M_AisleSign): the overlay
+                    // is read linear (gamma_linear), the albedo as sRGB, and per channel
+                    // t >= 0.5 ? 1 - 2(1 - t)(1 - a) : 2 t a, in linear space.
+                    for (int y = 0; y < height; y++)
+                    {
+                        int my = mask.Height == height ? y : (int)((long)y * mask.Height / height);
+                        for (int x = 0; x < width; x++)
+                        {
+                            int mx = mask.Width == width ? x : (int)((long)x * mask.Width / width);
+                            int mi = (my * mask.Width + mx) * 4;
+                            int at = (y * width + x) * 4;
+                            for (int k = 0; k < 3; k++)
+                            {
+                                float t = mask.Rgba[mi + k] / 255f;
+                                float a0 = toLinear[albedo.Rgba[at + k]];
+                                float lin = t >= 0.5f ? 1f - 2f * (1f - t) * (1f - a0) : 2f * t * a0;
+                                rgba[at + k] = (byte)Mathf.Clamp(Mathf.RoundToInt(Mathf.LinearToGammaSpace(Mathf.Clamp01(lin)) * 255f), 0, 255);
+                            }
+
+                            rgba[at + 3] = albedo.Rgba[at + 3];
+                        }
+                    }
+                }
+                else if (job.mode == 1 && job.channels != null && mask.Rgba != null)
+                {
+                    // lerp(lerp(lerp(lerp(0, c0, m.r), c1, m.g), c2, m.b), albedo, m.a), linear.
+                    Vector3 c0 = job.channels[0], c1 = job.channels[1], c2 = job.channels[2];
+                    for (int y = 0; y < height; y++)
+                    {
+                        int my = mask.Height == height ? y : (int)((long)y * mask.Height / height);
+                        for (int x = 0; x < width; x++)
+                        {
+                            int mx = mask.Width == width ? x : (int)((long)x * mask.Width / width);
+                            int mi = (my * mask.Width + mx) * 4;
+                            float r = mask.Rgba[mi] / 255f, g = mask.Rgba[mi + 1] / 255f, b = mask.Rgba[mi + 2] / 255f, w = mask.Rgba[mi + 3] / 255f;
+                            Vector3 c = c0 * r;
+                            c += (c1 - c) * g;
+                            c += (c2 - c) * b;
+                            int at = (y * width + x) * 4;
+                            for (int k = 0; k < 3; k++)
+                            {
+                                float lin = c[k] + (toLinear[albedo.Rgba[at + k]] - c[k]) * w;
+                                rgba[at + k] = (byte)Mathf.Clamp(Mathf.RoundToInt(Mathf.LinearToGammaSpace(lin) * 255f), 0, 255);
+                            }
+
+                            rgba[at + 3] = albedo.Rgba[at + 3];
+                        }
+                    }
+                }
+                else
+                {
+                float cr = job.colour.x, cg = job.colour.y, cb = job.colour.z;
+                for (int y = 0; y < height; y++)
+                {
+                    for (int x = 0; x < width; x++)
+                    {
+                        int at = (y * width + x) * 4;
+                        float t = Sample(mask, x, y, width, height) / 255f;
+                        rgba[at] = (byte)Mathf.Clamp(Mathf.RoundToInt(Mathf.LinearToGammaSpace(cr + (toLinear[albedo.Rgba[at]] - cr) * t) * 255f), 0, 255);
+                        rgba[at + 1] = (byte)Mathf.Clamp(Mathf.RoundToInt(Mathf.LinearToGammaSpace(cg + (toLinear[albedo.Rgba[at + 1]] - cg) * t) * 255f), 0, 255);
+                        rgba[at + 2] = (byte)Mathf.Clamp(Mathf.RoundToInt(Mathf.LinearToGammaSpace(cb + (toLinear[albedo.Rgba[at + 2]] - cb) * t) * 255f), 0, 255);
+                        rgba[at + 3] = albedo.Rgba[at + 3];
+                    }
+                }
+                }
+
+                var image = new DecodedImage { Width = width, Height = height, Rgba = rgba, Transformed = true };
+                if (options.CompressTextures)
+                {
+                    CompressDecoded(image, true);
+                }
+
+                packed[index] = image;
+            });
+
+            for (int index = 0; index < jobs.Count; index++)
+            {
+                if (packed[index] != null)
+                {
+                    data.DecodedTextures[jobs[index].key] = packed[index];
+                }
+                else if (data.DecodedTextures.TryGetValue(jobs[index].albedo, out DecodedImage plain))
+                {
+                    data.DecodedTextures[jobs[index].key] = plain;
+                }
+            }
+        }
+
+        private static string Vec(Vector3 v)
+        {
+            return v.x.ToString("R", CultureInfo.InvariantCulture) + "," + v.y.ToString("R", CultureInfo.InvariantCulture) + "," +
+                   v.z.ToString("R", CultureInfo.InvariantCulture);
+        }
+
+        // Unreal-connector roughness: lerp(RoughnessMin, RoughnessMax, ORM.g). The ORM map was
+        // repacked on decode (metallic in red, smoothness = 1 - ORM.g in alpha), so the alpha is
+        // remapped to 1 - lerp(min, max, 1 - alpha). Taken as it was, ORM.g reached 0 on worn
+        // concrete and the warehouse floor rendered as polished. A copy per range, keyed on it.
+        private static void PackRoughnessRange(StageData data, UsdImportOptions options)
+        {
+            var jobs = new List<(string key, string source, Vector2 range)>();
+            var keys = new HashSet<string>();
+            foreach (MaterialData material in data.Materials)
+            {
+                if (!material.HasRoughnessRange || string.IsNullOrEmpty(material.MetallicGlossPath))
+                {
+                    continue;
+                }
+
+                string key = material.MetallicGlossPath + "#packed:range:" +
+                             (material.RoughnessRange.x.ToString("R", CultureInfo.InvariantCulture) + "," +
+                              material.RoughnessRange.y.ToString("R", CultureInfo.InvariantCulture)).GetHashCode().ToString("x", CultureInfo.InvariantCulture);
+                if (keys.Add(key))
+                {
+                    jobs.Add((key, material.MetallicGlossPath, material.RoughnessRange));
+                }
+
+                material.MetallicGlossPath = key;
+            }
+
+            var packed = new DecodedImage[jobs.Count];
+            System.Threading.Tasks.Parallel.For(0, jobs.Count, index =>
+            {
+                var job = jobs[index];
+                DecodedImage source = data.DecodedTextures.TryGetValue(job.source, out DecodedImage o) ? o : null;
+                if (source?.Rgba == null)
+                {
+                    return;
+                }
+
+                var rgba = (byte[])source.Rgba.Clone();
+                float min = job.range.x, span = job.range.y - job.range.x;
+                for (int at = 3; at < rgba.Length; at += 4)
+                {
+                    float rough = min + span * (1f - rgba[at] / 255f);
+                    rgba[at] = (byte)Mathf.Clamp(Mathf.RoundToInt((1f - rough) * 255f), 0, 255);
+                }
+
+                var image = new DecodedImage { Width = source.Width, Height = source.Height, Rgba = rgba, Transformed = true };
+                if (options.CompressTextures)
+                {
+                    CompressDecoded(image, false);
+                }
+
+                packed[index] = image;
+            });
+
+            for (int index = 0; index < jobs.Count; index++)
+            {
+                if (packed[index] != null)
+                {
+                    data.DecodedTextures[jobs[index].key] = packed[index];
+                }
+                else if (data.DecodedTextures.TryGetValue(jobs[index].source, out DecodedImage plain))
+                {
+                    data.DecodedTextures[jobs[index].key] = plain;
+                }
+            }
         }
 
         private static bool HasSeparateOpacity(MaterialData material)
@@ -2566,7 +4431,7 @@ namespace Unity.USDToolkit
             {
                 albedo = GetOrUploadTexture(data.AlbedoPath, false, stage, decodeCache, options);
                 occlusion = GetOrUploadTexture(data.OcclusionPath, true, stage, decodeCache, options);
-                normal = GetOrUploadTexture(data.NormalPath, true, stage, decodeCache, options);
+                normal = GetOrUploadTexture(data.NormalPath, !data.NormalIsSrgb, stage, decodeCache, options);
                 metallicGloss = GetOrUploadTexture(data.MetallicGlossPath, true, stage, decodeCache, options);
                 emission = GetOrUploadTexture(data.EmissionPath, false, stage, decodeCache, options);
             }
@@ -2574,10 +4439,22 @@ namespace Unity.USDToolkit
             return AssembleMaterial(data, options, stage, albedo, normal, metallicGloss, emission, occlusion);
         }
 
-        // The lit shader every imported material uses: URP, then HDRP, then Built-in.
+        // The lit shader every imported material uses: the active render pipeline's. A project on
+        // the Built-in pipeline can still have URP or HDRP installed, and their shaders draw
+        // nothing there, so the pipeline in use decides, not which shaders exist.
         private static Shader FindLitShader()
         {
+            UnityEngine.Rendering.RenderPipelineAsset active = UnityEngine.Rendering.GraphicsSettings.currentRenderPipeline;
+            string pipeline = active != null
+                ? active.GetType().Name
+                : null;
+            Shader preferred =
+                pipeline == null ? Shader.Find("Standard")
+                : pipeline.Contains("Universal") ? Shader.Find("Universal Render Pipeline/Lit")
+                : pipeline.Contains("HDRenderPipeline") ? Shader.Find("HDRP/Lit")
+                : null;
             return
+                preferred ??
                 Shader.Find("Universal Render Pipeline/Lit") ??
                 Shader.Find("HDRP/Lit") ??
                 Shader.Find("Standard") ??
@@ -2602,8 +4479,12 @@ namespace Unity.USDToolkit
                 Shader shader = FindLitShader();
                 if (shader != null)
                 {
+                    // UsdPreviewSurface's own defaults (diffuseColor 0.18 linear, roughness 0.5,
+                    // metallic 0): what Hydra and Isaac Sim draw a mesh with no material and no
+                    // displayColor in. Measured on Isaac Sim 6.2 against 18% and 50% grey
+                    // reference spheres under the same light, the unbound one matched the 18%.
                     var material = new Material(shader) { name = "UsdDefaultMaterial" };
-                    SetMaterialColor(material, new Color(0.7f, 0.7f, 0.7f, 1f));
+                    SetMaterialColor(material, UsdColorToMaterialColor(new Color(0.18f, 0.18f, 0.18f, 1f)));
                     SetMaterialFloat(material, "_Metallic", 0f);
                     SetMaterialFloat(material, "_Smoothness", 0.5f);
                     SetMaterialFloat(material, "_Glossiness", 0.5f);
@@ -2680,6 +4561,12 @@ namespace Unity.USDToolkit
                 material.EnableKeyword("_METALLICSPECGLOSSMAP");
                 // Smoothness is sourced from the metallic map's alpha (matches export packing).
                 SetMaterialFloat(material, "_SmoothnessTextureChannel", 0f);
+                // URP and Standard multiply _Smoothness into that alpha. The authored roughness
+                // is the fallback for an unconnected input, as with the albedo above, and a
+                // constant standing in for a missing roughness map is already in the packed
+                // alpha: left at 1 - roughness, every packed surface came out at half its
+                // smoothness (the 0.5 default roughness halving it again).
+                SetMaterialFloat(material, "_Smoothness", 1f);
 
                 // A repacked ORM map carries occlusion in green, which is the channel URP's
                 // occlusion map is read from -- so the same texture fills both slots without a
@@ -2701,7 +4588,11 @@ namespace Unity.USDToolkit
             }
 
             // emission → _EmissionMap and/or _EmissionColor, enable _EMISSION
-            Color emissiveColor = UsdColorToMaterialColor(new Color(source.EmissiveR, source.EmissiveG, source.EmissiveB));
+            // _EmissionColor (URP) and _EmissiveColor (HDRP) are [HDR] colours: Unity stores them
+            // linear and does not convert them on SetColor, unlike the base colour. The USD value is
+            // therefore written as authored. Converting it to sRGB like the base colour made every
+            // emitter render as sRGB(E): washed out and too bright (an emissive 0.18 grey showed as 0.46).
+            Color emissiveColor = new Color(source.EmissiveR, source.EmissiveG, source.EmissiveB);
             bool hasEmissiveColor = source.EmissiveR > 0f || source.EmissiveG > 0f || source.EmissiveB > 0f;
             if (emission != null || hasEmissiveColor)
             {
@@ -2832,6 +4723,11 @@ namespace Unity.USDToolkit
             material.EnableKeyword("_ALPHABLEND_ON");            // Built-in Standard
             material.SetOverrideTag("RenderType", "Transparent");
             material.renderQueue = (int)UnityEngine.Rendering.RenderQueue.Transparent;
+            // URP and Built-in draw a blended surface into the shadow map as if it were opaque, so
+            // glass cast a solid shadow and a glazed roof blocked the sun completely. USD renderers
+            // (Isaac Sim RTX) let light through it. Without translucent shadows the closer match is
+            // no shadow: the pass is turned off on the material, the renderer is left alone.
+            material.SetShaderPassEnabled("ShadowCaster", false);
         }
 
         // Turns an authored texture path into the key its bytes are cached under: the absolute
@@ -3069,6 +4965,28 @@ namespace Unity.USDToolkit
         private const StringComparison PathComparison = StringComparison.OrdinalIgnoreCase;
 #endif
 
+        // Textures of a remote material the importer downloaded itself (UsdRemoteMaterials) sit in
+        // its cache folder, outside the stage; they are the importer's own files, not paths the
+        // stage chose, so they are allowed.
+        private static bool IsInRemoteMaterialCache(string canonicalPath)
+        {
+            if (string.IsNullOrEmpty(s_remoteMaterialCache))
+            {
+                return false;
+            }
+
+            try
+            {
+                string root = Path.GetFullPath(s_remoteMaterialCache)
+                    .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+                return canonicalPath.StartsWith(root, PathComparison);
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
+
         // True when `candidate` canonicalizes to a location inside the stage's own folder, which
         // is the only place an untrusted stage may pull assets from unless the caller opted in
         // with UsdImportOptions.AllowExternalAssetPaths. Canonicalizing first is what makes this
@@ -3102,7 +5020,7 @@ namespace Unity.USDToolkit
                 return false;
             }
 
-            if (stage.AllowExternalAssetPaths)
+            if (stage.AllowExternalAssetPaths || IsInRemoteMaterialCache(canonicalPath))
             {
                 return true;
             }
@@ -3134,7 +5052,7 @@ namespace Unity.USDToolkit
             // Lexical containment is not containment. Path.GetFullPath normalizes "." and ".."
             // as text; it does not follow links, so a symlink (or a Windows junction) sitting
             // inside the stage folder and pointing at /etc/passwd or an SSH key passes the check
-            // above and is then read straight off disk (SECURITY-282834, CWE-59/CWE-22).
+            // above and is then read straight off disk (CWE-59/CWE-22).
             return !HasLinkBelowRoot(root, canonicalPath);
         }
 
@@ -3223,9 +5141,9 @@ namespace Unity.USDToolkit
                 try
                 {
                     texture = decoded.Blocks != null || decoded.Native != null
-                        ? CreateTextureFromBlocks(decoded, linear, name)
+                        ? CreateTextureFromBlocks(decoded, linear, name, options.KeepTexturesReadable)
                         : CreateTextureFromRgba(decoded.Width, decoded.Height, decoded.Rgba, linear, name,
-                                                options.CompressTextures);
+                                                options.CompressTextures, options.KeepTexturesReadable);
 
                     // The compressed chain now lives in the texture; keeping the managed copy
                     // until the import ends held every texture twice -- 5 GB of blocks beside
@@ -3252,7 +5170,8 @@ namespace Unity.USDToolkit
             }
             else if (stage.TextureBytes.TryGetValue(path, out byte[] bytes) && bytes != null && bytes.Length > 0)
             {
-                texture = CreateTextureViaLoadImage(bytes, linear, name, options.CompressTextures);
+                texture = CreateTextureViaLoadImage(bytes, linear, name, options.CompressTextures,
+                                                    options.KeepTexturesReadable);
                 pixelsAreTheFiles = true;
             }
 
@@ -3278,7 +5197,7 @@ namespace Unity.USDToolkit
         // Uploads blocks a worker thread already compressed. Nothing here touches the pixels: the
         // texture is created in its final format and the bytes go straight across, which is the
         // whole reason for compressing off the main thread in the first place.
-        private static Texture2D CreateTextureFromBlocks(DecodedImage image, bool linear, string name)
+        private static Texture2D CreateTextureFromBlocks(DecodedImage image, bool linear, string name, bool keepReadable)
         {
             TextureFormat format = image.HasAlpha ? TextureFormat.DXT5 : TextureFormat.DXT1;
             var texture = new Texture2D(image.Width, image.Height, format, image.MipCount, linear)
@@ -3298,22 +5217,23 @@ namespace Unity.USDToolkit
                 texture.LoadRawTextureData(image.Blocks);
             }
 
-            texture.Apply(false, true); // no mip generation -- the chain is in the blocks
+            texture.Apply(false, !keepReadable); // no mip generation -- the chain is in the blocks
             return texture;
         }
 
         private static Texture2D CreateTextureFromRgba(int width, int height, byte[] rgba, bool linear,
-                                                       string name, bool compress)
+                                                       string name, bool compress, bool keepReadable)
         {
             var texture = new Texture2D(width, height, TextureFormat.RGBA32, true, linear) { name = name };
             texture.SetPixelData(rgba, 0);
             texture.Apply(true, false); // mipmaps now; stays readable for Finish
-            return Finish(texture, compress);
+            return Finish(texture, compress, keepReadable);
         }
 
-        private static Texture2D CreateTextureViaLoadImage(byte[] bytes, bool linear, string name, bool compress)
+        private static Texture2D CreateTextureViaLoadImage(byte[] bytes, bool linear, string name, bool compress,
+                                                           bool keepReadable = false)
         {
-            // Re-checked at the sink (SECURITY-282834, CWE-400). LoadImage applies no size limit
+            // Re-checked at the sink (CWE-400). LoadImage applies no size limit
             // of its own, and DecodeUniqueTextures already refused what fails this -- this keeps
             // that true if another caller is ever added.
             if (!UsdImageLimits.PermitsLoadImage(bytes, out string reason))
@@ -3330,10 +5250,11 @@ namespace Unity.USDToolkit
                 return null;
             }
 
-            return Finish(texture, compress);
+            return Finish(texture, compress, keepReadable);
         }
 
-        // Compresses a freshly decoded texture and releases its CPU copy.
+        // Compresses a freshly decoded texture and releases its CPU copy, unless the texture is to be
+        // saved as an asset, which serializes the CPU copy.
         //
         // RGBA32 is four bytes a pixel whatever the image contains, and a stage's worth of them is
         // what has been taking imports past the memory the machine has. Block compression is a
@@ -3343,7 +5264,7 @@ namespace Unity.USDToolkit
         // Both steps are conditional on what the texture allows. Block compression works on
         // dimensions that are multiples of four, and a texture that is not gets left alone rather
         // than refused: a non-conforming image is still a valid texture, just a larger one.
-        private static Texture2D Finish(Texture2D texture, bool compress)
+        private static Texture2D Finish(Texture2D texture, bool compress, bool keepReadable)
         {
             if (compress && (texture.width & 3) == 0 && (texture.height & 3) == 0 &&
                 texture.width >= 4 && texture.height >= 4)
@@ -3352,7 +5273,7 @@ namespace Unity.USDToolkit
             }
 
             // The GPU has the pixels; the CPU copy is what the import no longer needs.
-            texture.Apply(false, true);
+            texture.Apply(false, !keepReadable);
             return texture;
         }
 
@@ -3364,14 +5285,25 @@ namespace Unity.USDToolkit
             }
         }
 
-        // USD shading colours (diffuseColor, emissiveColor, displayColor, MaterialX/MDL colours) are
-        // linear. A Unity material colour is authored in sRGB and converted to linear for
+        // USD shading colours (diffuseColor, displayColor, MaterialX/MDL colours) are
+        // linear. emissiveColor is linear too but goes to an [HDR] property, which is not converted. A Unity material colour is authored in sRGB and converted to linear for
         // rendering when the project uses the Linear colour space, so the linear value went
         // through that conversion a second time: the Teapot's (0.325, 0.825, 0) rendered a dark
         // saturated green where every USD renderer shows yellow-green. Converting to sRGB here
         // undoes that; UsdExporter does the inverse. A Gamma-space project renders material
         // colours unconverted, so they are left as authored there.
         internal static Color UsdColorToMaterialColor(Color linear)
+        {
+            return QualitySettings.activeColorSpace == ColorSpace.Linear ? linear.gamma : linear;
+        }
+
+        // inputs:color is linear, and Light.color is sRGB: with the Linear colour space URP renders
+        // a light at color.linear x intensity. Assigning the USD value as it was darkened every
+        // tinted light by that second conversion: NVIDIA's Factory hangs its 15 sphere lights at
+        // inputs:color 0.216, which rendered at 0.038, 5.6 x too dark, and the hall outside the
+        // central rect light came out at 0.4-0.6 x Isaac Sim while the white rect matched. White
+        // lights (every other bench stage) were not affected. UsdExporter does the inverse.
+        internal static Color UsdLightColor(Color linear)
         {
             return QualitySettings.activeColorSpace == ColorSpace.Linear ? linear.gamma : linear;
         }
@@ -3496,9 +5428,18 @@ namespace Unity.USDToolkit
 
             // The version gate used to live only in the export path, so an import ran against
             // whatever plugin happened to be loaded. That was backwards: the import path is where
-            // untrusted file content is parsed, and the SECURITY-282834 fixes live there.
+            // untrusted file content is parsed, and the security review fixes live there.
             UsdExporter.ValidateNativeApiVersion();
+
+            // The remote material cache: set here, on the main thread, where
+            // Application.temporaryCachePath may be read; the stage read uses it from a worker.
+            s_remoteMaterialCache = options == null || string.IsNullOrEmpty(options.RemoteMaterialCacheFolder)
+                ? UsdRemoteMaterials.DefaultCacheFolder
+                : options.RemoteMaterialCacheFolder;
+            UsdNative.SetRemoteAssetCache(s_remoteMaterialCache);
         }
+
+        private static string s_remoteMaterialCache;
 
         private static UsdImportException CreateImportException(Exception exception)
         {
@@ -3581,6 +5522,14 @@ namespace Unity.USDToolkit
             public string InputPath;
             public string BaseDirectory;
 
+            // Packing DecodeUniqueTextures could not finish off the main thread (a source only
+            // LoadImage decodes), and those sources. See RunDeferredPacking.
+            public Action DeferredPack;
+            public List<string> DeferredPackSources;
+
+            // Build-time cache: each imported material's Render Face Both copy (GetDoubleSidedMaterial).
+            public readonly Dictionary<Material, Material> DoubleSidedMaterials = new Dictionary<Material, Material>();
+
             // Copied from UsdImportOptions so the read pass can confine authored asset paths
             // without threading the options through every texture helper.
             public bool AllowExternalAssetPaths;
@@ -3589,6 +5538,10 @@ namespace Unity.USDToolkit
             public int UpAxis;
             public string NativeDiagnostics;
             public string CompositionReport;
+
+            // UsdImportOptions.ImportPhysics: the stage's physics, read on the read pass.
+            public UsdNativePhysics Physics;
+            public string PhysicsReadError;
             public readonly List<NodeData> Nodes = new List<NodeData>();
             public readonly List<KeyValuePair<RUsdImportLight, string>> Lights = new List<KeyValuePair<RUsdImportLight, string>>();
             public readonly List<RUsdImportCamera> Cameras = new List<RUsdImportCamera>();
@@ -3624,6 +5577,22 @@ namespace Unity.USDToolkit
             // (a .usdz): resolved identifier → the authored path the resolver reads it back by.
             // Their bytes come from the native resolver instead of File.ReadAllBytes.
             public readonly Dictionary<string, string> PackageAssets = new Dictionary<string, string>();
+
+            // Time and skinning (native API 13). HasTimeInfo is false on older plugins.
+            public RUsdImportTimeInfo TimeInfo;
+            public bool HasTimeInfo;
+            public readonly List<UsdNativeSkeleton> Skeletons = new List<UsdNativeSkeleton>();
+
+            // Set by the build: prims left out because the joints stand for them (FindJointMirrorPrims).
+            public HashSet<string> JointMirrorPrims = new HashSet<string>(StringComparer.Ordinal);
+            public readonly List<UsdNativeNodeTrack> NodeTracks = new List<UsdNativeNodeTrack>();
+            public string[] LayerFiles = Array.Empty<string>();
+
+            // The stage, kept open past the read for the UsdStageSource (UsdImportOptions.KeepStageOpen).
+            public IntPtr KeptStage;
+
+            // A live switch's light reference (see BuildSceneComponents); 0 or less computes it.
+            public float LightReference;
         }
 
         private struct NodeData
@@ -3640,11 +5609,24 @@ namespace Unity.USDToolkit
             public string Name;
             public bool Visible;
             public int MaterialIndex;
+
+            // The mesh's authored doubleSided (read through the Stage API, native API 13); false
+            // when unauthored or when the plugin has no Stage API.
+            public bool DoubleSided;
             public RUsdVec3[] Points;
             public int[] Indices;
             public RUsdVec3[] Normals;
             public RUsdVec2[][] UvSets;
             public RUsdSubmesh[] Submeshes;
+
+            // Joint weights and blend shapes when the mesh is skinned (native API 13); null otherwise.
+            public UsdNativeSkin Skin;
+
+            // Animated points (native API 13); null when the points hold still.
+            public UsdNativePointCache PointCache;
+
+            // Set while building: the Unity blend-shape index each USD blend shape became.
+            public int[] UnityBlendShapeIndices;
 
             // MeshShareCache's content hash, computed on first use.
             public ulong GeometryKey;
@@ -3759,6 +5741,13 @@ namespace Unity.USDToolkit
                     return true;
                 }
 
+                // A double-sided mesh is built with its back faces baked in (AddBackFaces), so it
+                // never shares a Mesh with a one-sided mesh of the same buffers.
+                if (a.DoubleSided != b.DoubleSided)
+                {
+                    return false;
+                }
+
                 if (!SameVec3(a.Points, b.Points) || !SameInts(a.Indices, b.Indices) || !SameVec3(a.Normals, b.Normals))
                 {
                     return false;
@@ -3862,6 +5851,30 @@ namespace Unity.USDToolkit
             }
         }
 
+        // Everything a built Material depends on, so two MaterialData with the same key build
+        // identical Materials (UsdImportOptions.ShareIdenticalMaterials). The prim path and name are
+        // left out on purpose: Omniverse and Unreal-connector stages bind a material prim per mesh
+        // (NVIDIA's Simple_Warehouse: 3,471 material prims over 17 MDL modules), and one Unity
+        // Material each is both memory and, under Surface Cache GI, one 256x256 atlas slice each --
+        // past 2,048 the slice array cannot be created and GI fails for the whole scene.
+        private static string MaterialShareKey(MaterialData m)
+        {
+            RUsdMaterial s = m.Source;
+            var b = new System.Text.StringBuilder(256);
+            b.Append(s.R.ToString("R")).Append('|').Append(s.G.ToString("R")).Append('|').Append(s.B.ToString("R")).Append('|')
+             .Append(s.A.ToString("R")).Append('|').Append(s.Metallic.ToString("R")).Append('|').Append(s.Roughness.ToString("R")).Append('|')
+             .Append(s.UvScaleX.ToString("R")).Append('|').Append(s.UvScaleY.ToString("R")).Append('|')
+             .Append(s.UvOffsetX.ToString("R")).Append('|').Append(s.UvOffsetY.ToString("R")).Append('|')
+             .Append(s.EmissiveR.ToString("R")).Append('|').Append(s.EmissiveG.ToString("R")).Append('|').Append(s.EmissiveB.ToString("R")).Append('|')
+             .Append(m.AlbedoPath).Append('|').Append(m.NormalPath).Append('|').Append(m.MetallicGlossPath).Append('|')
+             .Append(m.EmissionPath).Append('|').Append(m.OpacityPath).Append('|').Append(m.OpacityThreshold.ToString("R")).Append('|')
+             .Append(m.NormalIsSrgb).Append('|').Append(m.NormalFlipU).Append('|').Append(m.NormalFlipV).Append('|').Append(m.MetallicIsOrm).Append('|').Append(m.OcclusionPath).Append('|').Append(m.MetallicIsPlain).Append('|').Append(m.RoughnessPath).Append('|')
+             .Append(m.MaskPath).Append('|').Append(m.MaskColor.x.ToString("R")).Append(',').Append(m.MaskColor.y.ToString("R")).Append(',').Append(m.MaskColor.z.ToString("R"))
+             .Append('|').Append(m.MaskMode).Append('|').Append(m.ChannelColours == null ? "" : Vec(m.ChannelColours[0]) + ";" + Vec(m.ChannelColours[1]) + ";" + Vec(m.ChannelColours[2]))
+             .Append('|').Append(m.HasRoughnessRange).Append(',').Append(m.RoughnessRange.x.ToString("R")).Append(',').Append(m.RoughnessRange.y.ToString("R"));
+            return b.ToString();
+        }
+
         private sealed class MaterialData
         {
             public string Name;
@@ -3870,6 +5883,13 @@ namespace Unity.USDToolkit
             // keyed by path, so files shared across materials are read/decoded only once.
             public string AlbedoPath;
             public string NormalPath;
+            // The normal map decodes as sRGB: its colour space is authored "sRGB", or left "auto"
+            // on an 8-bit file, which Isaac Sim reads as sRGB (NormalMapColorSpaceLikeIsaac).
+            public bool NormalIsSrgb;
+            // The normal map's tangent frame is flipped along U / V (OmniPBR flip_tangent_u / _v):
+            // Isaac Sim reads an OmniPBR normal map with green down unless told otherwise.
+            public bool NormalFlipU;
+            public bool NormalFlipV;
             public string MetallicGlossPath;
             public string EmissionPath;
             // Authored opacity: the texture whose alpha drives transparency (null when the USD
@@ -3886,6 +5906,16 @@ namespace Unity.USDToolkit
             // during decoding; see PackMetallicRoughness.
             public bool MetallicIsPlain;
             public string RoughnessPath;
+            // An albedo blended with MaskColor (linear) by this mask texture; see PackAlbedoMask.
+            public string MaskPath;
+            public Vector3 MaskColor;
+            // 0: MaskColor where the mask is 0. 1: ChannelColours painted by the mask's red, green
+            // and blue, the albedo in its alpha (API 13). -1: no mask.
+            public int MaskMode = -1;
+            public Vector3[] ChannelColours;
+            // Roughness = lerp(x, y, ORM.g) (API 13); see PackRoughnessRange.
+            public bool HasRoughnessRange;
+            public Vector2 RoughnessRange;
         }
 
         // Raw decoded pixels (RGBA32, Unity layout) produced off the main thread.
@@ -3927,7 +5957,7 @@ namespace Unity.USDToolkit
     }
 
     // The texture size limits, and the header check that enforces them on the Texture2D.LoadImage
-    // fallback (SECURITY-282834, CWE-400). UsdPngDecoder obeys these on the managed path; LoadImage
+    // fallback (CWE-400). UsdPngDecoder obeys these on the managed path; LoadImage
     // obeys nothing, so every image headed there -- a PNG the managed decoder declined, or a JPEG,
     // which it never handles -- is sized from its header first. LoadImage reads PNG and JPEG only,
     // so anything whose header is neither is refused without losing a texture that would have loaded.
@@ -4063,6 +6093,142 @@ namespace Unity.USDToolkit
     // during async import (touches no Unity API). Supports 8-bit, non-interlaced PNGs of color
     // types 0/2/4/6 with filter types 0–4 — the common case for the toolkit's exported PNGs and
     // typical PBR textures. Anything else returns false so the caller falls back to LoadImage.
+    // Targa (.tga), uncompressed and RLE, true-colour (24/32-bit BGR[A]) and greyscale (8-bit).
+    // TGA has no signature, so the header is validated field by field before anything is read:
+    // no colour map, a supported image type and depth, dimensions within UsdImageLimits, and a
+    // buffer long enough for what the header claims (an RLE stream is bounds-checked as it is
+    // expanded). Output is RGBA32 in Unity layout (row 0 = bottom), like UsdPngDecoder.
+    internal static class UsdTgaDecoder
+    {
+        public static bool TryDecode(byte[] data, out int width, out int height, out byte[] rgba)
+        {
+            width = 0;
+            height = 0;
+            rgba = null;
+            if (data == null || data.Length < 18)
+            {
+                return false;
+            }
+
+            int idLength = data[0];
+            int colorMapType = data[1];
+            int imageType = data[2];
+            int w = data[12] | (data[13] << 8);
+            int h = data[14] | (data[15] << 8);
+            int depth = data[16];
+            int descriptor = data[17];
+            bool rle = imageType == 10 || imageType == 11;
+            bool gray = imageType == 3 || imageType == 11;
+            if (colorMapType != 0 || (imageType != 2 && imageType != 3 && imageType != 10 && imageType != 11))
+            {
+                return false;
+            }
+
+            if (gray ? depth != 8 : (depth != 24 && depth != 32))
+            {
+                return false;
+            }
+
+            if (!UsdImageLimits.IsWithin(w, h))
+            {
+                return false;
+            }
+
+            int bpp = depth / 8;
+            long pixels = (long)w * h;
+            int offset = 18 + idLength;
+            if (!rle && data.Length < offset + pixels * bpp)
+            {
+                return false;
+            }
+
+            var src = new byte[pixels * bpp];
+            if (rle)
+            {
+                long written = 0;
+                int read = offset;
+                while (written < src.Length)
+                {
+                    if (read >= data.Length)
+                    {
+                        return false;
+                    }
+
+                    int header = data[read++];
+                    int count = (header & 0x7F) + 1;
+                    if (written + (long)count * bpp > src.Length)
+                    {
+                        return false;
+                    }
+
+                    if ((header & 0x80) != 0)
+                    {
+                        if (read + bpp > data.Length)
+                        {
+                            return false;
+                        }
+
+                        for (int i = 0; i < count; i++)
+                        {
+                            Buffer.BlockCopy(data, read, src, (int)written, bpp);
+                            written += bpp;
+                        }
+
+                        read += bpp;
+                    }
+                    else
+                    {
+                        int bytes = count * bpp;
+                        if (read + bytes > data.Length)
+                        {
+                            return false;
+                        }
+
+                        Buffer.BlockCopy(data, read, src, (int)written, bytes);
+                        written += bytes;
+                        read += bytes;
+                    }
+                }
+            }
+            else
+            {
+                Buffer.BlockCopy(data, offset, src, 0, src.Length);
+            }
+
+            // Bit 5 of the descriptor: rows run top to bottom. Unity wants bottom to top.
+            bool topDown = (descriptor & 0x20) != 0;
+            bool rightToLeft = (descriptor & 0x10) != 0;
+            var outPixels = new byte[pixels * 4];
+            for (int y = 0; y < h; y++)
+            {
+                int srcRow = topDown ? (h - 1 - y) : y;
+                for (int x = 0; x < w; x++)
+                {
+                    int srcX = rightToLeft ? (w - 1 - x) : x;
+                    long s = ((long)srcRow * w + srcX) * bpp;
+                    long d = ((long)y * w + x) * 4;
+                    if (gray)
+                    {
+                        outPixels[d] = outPixels[d + 1] = outPixels[d + 2] = src[s];
+                        outPixels[d + 3] = 255;
+                    }
+                    else
+                    {
+                        outPixels[d] = src[s + 2];
+                        outPixels[d + 1] = src[s + 1];
+                        outPixels[d + 2] = src[s];
+                        outPixels[d + 3] = bpp == 4 ? src[s + 3] : (byte)255;
+                    }
+                }
+            }
+
+            width = w;
+            height = h;
+            rgba = outPixels;
+            return true;
+        }
+    }
+
     internal static class UsdPngDecoder
     {
         // Hard caps on the attacker-controlled IHDR dimensions. A malicious .usd/.usdz can

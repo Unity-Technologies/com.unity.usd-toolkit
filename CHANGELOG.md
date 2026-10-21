@@ -7,7 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.1-exp.1] - 2026-10-22
+
 ### Added
+
+- **Physics on import (`UsdImportOptions.ImportPhysics`, 0.8.1 native plugin)**
+  The stage's UsdPhysics, read with OpenUSD's own parser (PhysX attributes included), is built as
+  Unity physics. Each articulation becomes an `ArticulationBody` tree: links an Isaac Sim robot keeps
+  as siblings are moved under their parent link, world pose kept, and the root is immovable when a
+  joint fixes the base. Revolute and prismatic limits carry over as authored, and the anchor is turned
+  so a positive USD angle is a positive Unity angle. Drive stiffness and damping go from Isaac Sim's
+  per-degree units to PhysX's per-radian units. Other rigid bodies become `Rigidbody` with
+  `FixedJoint` / `ConfigurableJoint`, and colliders (convex approximations and guide-purpose
+  collision meshes included), physics materials, self-collision, filtered pairs and collision groups
+  are built too. A `UsdPhysicsJoint` / `UsdPhysicsBody` next to each keeps the authored values, with
+  `TryReadUnityValues` to compare against. `UsdImportResult.PhysicsNotes` lists what Unity cannot
+  hold: tendons, distance joints, and an inertia far below what the colliders give. A mimic joint
+  (`PhysxMimicJointAPI`, as on the Franka's second finger) follows its reference joint through a
+  drive that a `UsdPhysicsMimicJoint` moves every physics step, with PhysX's gearing and offset.
+  **Import Physics** is the same option on a USD asset. Off by default.
+
+- **Isaac Robot Physics sample**
+  `Samples~/Isaac Robot Physics` imports a robot with its physics and puts what Isaac Sim's Property
+  panel shows for every joint and body next to what Unity built. It also drives the joints and runs a
+  limit test in Play Mode. It ships a small Isaac-style arm and downloads NVIDIA's Franka Panda
+  (Isaac Sim 6.0, Apache 2.0) on request, each file checked against a pinned SHA-256. All 109 of the
+  Franka's compared values match, and every limit holds within 0.1 degree of Isaac Sim's. The Play
+  Mode panel sits on the left and can be hidden (**H**). It has a robot picker (bundled arm, Franka,
+  or any USD file) and a download location, which the **Robot Physics** window shares.
+
+- **Recordings as overrides on the imported stage**
+  `UsdAnimationRecorder.Save` with `Composition = UsdCompositionMode.Preserve` writes a recording
+  of an imported stage as a layer over its source file (sublayered, or referenced when the import
+  sits below the recorded object) with the samples on the source's own prims: transforms and
+  visibility as time samples, and an imported character's Skeleton prim a new `SkelAnimation`.
+  Nothing of the source is copied, so an Isaac Sim robot's geometry and physics stay with the
+  asset: Franka FR3 (17 MB) records 61 frames into 101 KB instead of 19.8 MB. The Unity Recorder's
+  USD Animation recorder has an **Overrides Only** setting for it. Flattened stays the default.
+
+- **Remote MDL materials from NVIDIA's library are downloaded and imported (0.8.1 native plugin)**
+  Isaac Sim stages often bind NVIDIA's material library by URL
+  (`https://omniverse-content-production.s3.us-west-2.amazonaws.com/Materials/.../Base/...mdl`).
+  The resolver cannot open a URL, so those surfaces imported default grey (the SO-101 lightbox's
+  Paper mat and Rubber_Smooth parts). `UsdImportOptions.DownloadRemoteMaterials` (off by default: the import reaches the network only when the caller turns it on)
+  fetches such a module and the textures it names into `RemoteMaterialCacheFolder`
+  (`Application.temporaryCachePath/UsdRemoteMaterials` by default) and reads the stage again; a
+  module that is one `OmniPBR(...)` call is then imported as that OmniPBR, its arguments standing
+  in for every input the stage does not author. Only HTTPS on NVIDIA's content hosts is fetched,
+  only `.mdl` modules and the image files beside them, each within a size limit; the native layer
+  itself never downloads (`RUsd_SetRemoteAssetCache`, `RUsd_GetImportRemoteRequestCount`,
+  `RUsd_GetImportRemoteRequest`).
 
 - **AGV Fleet LiveSync Demo sample**
   `Samples~/AGVFleet_LiveSync Demo` ports the AGV fleet LiveSync booth demo into the package. Unity
@@ -53,7 +102,187 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `USDSamples/plm_indexer_anim.usda` has a default prim with its own translate and rotate and a
   time-sampled turntable and clamp (0–48 at 24 fps), so a referencing export shows both fixes below.
 
+- **Lights, cameras, UV sets 1-2, vertex colours and OmniPBR / MaterialX on export (0.8.1 native plugin)**
+  The export side of what import already reads. `UsdExportOptions.ExportLights` writes each Unity
+  `Light` as a UsdLux light (directional to `DistantLight`, point and spot to a normalized
+  `SphereLight` with a `ShapingAPI` cone, rectangle to `RectLight`, disc to `DiskLight`, with
+  `ShadowAPI` and colour temperature), its intensity divided by the factors
+  `UsdImportOptions.PhysicalLightUnits` multiplies by, so a light imports back as it was.
+  `ExportCameras` writes each `Camera` as a `UsdGeomCamera` (a physical camera keeps its focal
+  length, sensor and lens shift; any other gets a 24 mm aperture and the focal length of its field
+  of view; orthographic size in the importer's tenths-of-a-unit apertures). Both sit on a child
+  prim turned 180 degrees about Y, the importer's helper convention, and lights and cameras the
+  importer itself created are skipped. `ExportUvSets` writes `Mesh.uv2` / `uv3` as
+  `primvars:st1` / `st2`, the names the importer reads back, and `ExportVertexColors` writes
+  `Mesh.colors` as per-vertex `displayColor` / `displayOpacity`. All four are on by default.
+  `MaterialFlavors` (none by default) adds an OmniPBR MDL shader under `outputs:mdl:*` and a
+  MaterialX 1.39 `standard_surface` under `outputs:mtlx:surface` beside the UsdPreviewSurface,
+  with colour, metallic, roughness, normal map, emission, opacity and UV tiling; Unity's packed
+  metallic/smoothness map stays in the UsdPreviewSurface only, because neither has an input that
+  reads it. Verified by exporting from Unity and importing the file back: directional, point and
+  spot lights, perspective, physical and orthographic cameras and both UV sets return with the
+  same values and directions. A rectangle light returns as the importer's cookie point light,
+  carrying intensity x area, since URP has no real-time area light. The MaterialX nodes and inputs
+  match the MaterialX 1.39 library the payload ships. Needs the 0.8.1 native plugin; with an older one these,
+  the albedo mask and the Unreal-connector blend stay off, with a warning when one was asked for.
+
+- **Reference Look sample** (Package Manager > Samples > Reference Look)
+  A URP render setup fitted against Isaac Sim 6.2's RTX Real-Time 2.0 renderer on NVIDIA's
+  Factory stage: a Deferred renderer with Surface Cache GI, screen-space reflections and GTAO,
+  4096 shadow maps in 4 cascades to 150 m, and a volume profile with the tonemapper off, post
+  exposure -4.2 and Isaac Sim's measured tone curve as a 64-step colour lookup (the curve and a
+  menu to rebuild the LUT ship with it). `USD Toolkit > Import into Reference Look scene...` assigns
+  the pipeline, opens the sample scene (camera and global volume, no lights), imports a USD file
+  with the importer's defaults, waits for the reflection captures and saves the result as a new
+  scene. The importer and exporter are unchanged: the remaining difference to Isaac Sim was in
+  the render settings, which the sample packages. One import per editor session (Surface Cache
+  GI's same-key failure on a second import) and the per-scene adjustments are noted in its README.
+  The pipeline renders at 0.67 scale with FSR, on Deferred+ with the GPU Resident Drawer and GPU
+  occlusion culling (the assign menu keeps the BatchRendererGroup variants the drawer needs):
+  Factory 75.7 to 54.2 ms a frame on the car-line view in the Editor (measured with STP), the
+  look unchanged. STP was replaced by FSR at the same scale: STP left dark speckles along
+  silhouettes against a distant background. On the shader ball's backdrop box, 1080p pixels
+  darker than 70/255 went from 558 with STP to 165 with FSR (121 at native resolution with no
+  upscaling); turning Surface Cache GI, SSAO or SSR off changed them by under 10%.
+  The sample is the Factory match made general: the import fits the shadow distance (2.1 x the
+  stage's bounding diagonal) and the Surface Cache GI volume (next power of two above 1.2 x, at
+  least 32 m) to the stage, which gives the Factory its matched 150 m and 128 m and a table-top
+  stage 32 m; and the importer's dome ambient (1.5) and rect-light factor (x1.8) are the Factory's
+  final values. Over 47 stages against Isaac Sim this improved the Factory (12.9 to 10.1 mean
+  CIEDE2000), the props and the assets; the Isaac Simple Warehouse got brighter than Isaac
+  (its custom MDL floor and ceiling import as default grey, which the extra light amplifies).
+
+- **`UsdImportOptions.SmoothNormalsLikeIsaac`** (on by default)
+  Every mesh is shaded with smooth normals computed from its geometry (faces meeting at more than
+  60 degrees keep their edge) instead of the normals the stage authors. Isaac Sim's RTX renderer
+  draws a mesh the same whether its `normals` or `primvars:normals` are present, blocked or
+  replaced (measured on NVIDIA's Factory by editing the session layer live), so it never shows
+  the hard breaks an exporter writes into them. The Factory's car body carries such breaks across
+  19% of its adjacent corners and imported as wedge-shaped facets while Isaac Sim drew it smooth;
+  with this option the two match. Turn it off to import the authored normals as they are.
+
+- **`UsdImportOptions.ShareIdenticalMaterials`** (on by default)
+  Material prims that resolve to the same values and texture files share one Unity `Material`.
+  Omniverse and Unreal-connector stages bind a material prim per mesh: Simple_Warehouse went from
+  3,471 Materials to 1,681. Under Surface Cache GI every Material takes an atlas slice, and past
+  2,048 the slice array cannot be created and GI fails for the whole scene.
+
 ### Fixed
+
+- **Physics import on a 0.8.1 plugin without the physics reader**
+  An API 13 plugin built without `RUsd_ReadPhysics` (the Linux payload built from `main` has 118
+  exports instead of 120) reported the same version, so **Import Physics** called a missing entry
+  point and the notes showed the raw `EntryPointNotFoundException`. The package now probes for the
+  entry point once and says the plugin was built without the physics reader; the physics tests
+  skip with that reason instead of failing.
+
+- **Skinned meshes whose Skeleton is authored `guide` are skinned again (0.8.1 native plugin)**
+  The import skips proxy and guide prims (ALab's proxy copies doubled its triangles), and that
+  rule also dropped Skeleton prims authored `purpose = "guide"`, which DCC exporters use to mark
+  bones as viewport-only. The skeleton was never built, so its meshes imported unskinned in their
+  bind shape: the Elephant with Monochord stood arms down where Isaac Sim shows it playing.
+  Skeletons are now exempt from the purpose rule; they are not geometry.
+
+- **Tinted lights render at their colour, not 5.6 x darker**
+  A USD light's `inputs:color` is linear; `Light.color` is sRGB, and with the Linear colour space
+  URP renders `color.linear x intensity`. The importer assigned the USD value as it was, so every
+  tinted light went through that conversion a second time: NVIDIA's Factory hangs its 15 sphere
+  lights at 0.216 grey, which rendered at 0.038, and the hall outside the central rect light came
+  out at 0.4-0.6 x Isaac Sim while the white rect matched. Light colours (and the emissive-surface
+  helper lights) are now converted to sRGB on import and back to linear on export. White lights
+  are unchanged. Sphere, disk and cylinder lights also reach until their illuminance falls to
+  0.002 instead of a 30 m range set by size alone, which cut the strong fixtures off across the
+  hall. The Factory's seven views went from mean CIEDE2000 8.84 to 7.53 against Isaac Sim.
+
+- **Metalness, roughness and opacity maps stored as JPEG are packed again**
+  The packed metallic+smoothness map (and the albedo+opacity bake) is built from decoded pixels on the decode pass, off the main thread, where only PNG, EXR and TGA
+  are read; a JPEG waits for LoadImage on the main thread. A packed map fed by a JPEG therefore
+  found nothing to pack and the material kept its constants. OpenChessSet stores every metalness
+  and roughness map as a greyscale JPEG, so every piece imported at 0.5 smoothness with no metal
+  (no gold trim, flat board). Packing that needs a JPEG now runs on the main thread before the
+  materials are built, once the JPEG is decoded there. A JPEG normal map whose channels OmniPBR
+  flips (`flip_tangent_v`) had the same gap and was uploaded unflipped; it is flipped there too.
+- **A packed metallic+smoothness map is no longer halved by `_Smoothness`**
+  URP and Standard multiply `_Smoothness` into the packed map's alpha. The importer left it at
+  1 - roughness, the authored fallback for an unconnected input (0.5 by default), so every surface
+  whose smoothness came from a map rendered at half of it. With a map bound it is now 1; a
+  constant standing in for a missing roughness map is already in the packed alpha.
+- **Transmissive glass no longer imports as a white ball (native)**
+  The real-time stand-in for MaterialX `transmission` (and OmniSurface
+  `specular_transmission_weight`) made the surface partly transparent and painted the transmission
+  colour on as its diffuse colour. Under a bright uniform dome every clear glass then read as a
+  white ball (OpenChessSet's pawn tops), where Isaac Sim, refracting what is below, draws them
+  dark. The diffuse colour now keeps only the (1 - weight) share standard_surface gives the diffuse
+  lobe; alpha blending cannot tint what is behind, so the transmission colour is not kept.
+- **Reference Look sample: the GI volume and shadow distance reach a stage seen from afar**
+  Both are centred on the camera, and `FitToStage` sized them from the stage alone, so a stage
+  framed from further than half the GI volume fell outside it and its diffuse lighting went black
+  (Vehicle Variants: authored in centimetres, read as a 632 m stage, seen from 1.2 km). While a
+  fitted scene is open and the Game camera stands outside the stage, they now grow to reach the
+  stage's farthest corner from it, and return to the stage fit when the camera comes closer or
+  goes inside (growing them for an interior coarsened its GI).
+- **Rect lights bounce the flux they emit, and invisible lights light mostly by bounce**
+  A rect light is drawn as a grid of point lights shaped by a cosine cookie. Surface Cache GI
+  ignores cookies, so the grid fed it the whole sphere, the ceiling above each fixture included:
+  four times the lobe's flux, half of it upward. The grid now bounces nothing and one bounce-only
+  spot per rect (a 120 degree cone, the lobe's flux; `UsdLightGI`) carries its light into the
+  surface cache. A light authored invisible keeps 1.5 % of its direct light and all of its bounce,
+  as Isaac Sim measures (one invisible rect over an open floor: 0.0034 against 0.22 visible); it
+  used to keep a third of both. NVIDIA's Simple_Warehouse, lit by invisible ceiling rects, went
+  from 23-31 to 12-13 mean CIEDE2000 against Isaac Sim with the surface cache working.
+- **OmniPBR normal maps follow flip_tangent_u / flip_tangent_v (0.8.1 native plugin)**
+  OmniPBR flips its normal map's V tangent unless told otherwise (`flip_tangent_v` defaults to
+  true), so Isaac Sim reads an OmniPBR normal map with green pointing down, where Unity reads green
+  up. The importer now flips the channels OmniPBR flips (`RUsd_GetImportMaterialNormalFlip`), and
+  the exporter writes `flip_tangent_v = false` beside the normal map it writes, whose bumps came out
+  inside out in Isaac Sim. A MaterialX normal image with no colorspace is data (MaterialX manages
+  only colour types) and is read as raw.
+- **A stage at a hundred times its size is no longer taken for an interior**
+  The interior reflection is captured only for a stage with a roof over it. Any renderer above
+  1.5 m counted towards the roof, so a stage authored in centimetres and read as metres (Vehicle
+  Variants: a tractor 300 m tall) had its cab and body taken for a roof, the reflection was
+  captured from inside the bodywork, and the tractor rendered black under a dome. Only flat
+  renderers (flatter than half their width) count now; the Warehouse's and the Factory's roofs still
+  do.
+
+- **Normal maps with no authored colour space decode as sRGB, as in Isaac Sim (0.8.1 native plugin)**
+  USD reads an unauthored colour space as `auto`, which is sRGB for an 8-bit image, and Omniverse
+  applies that to normal maps too. NVIDIA's pallet prop (an OmniPBR with a `.tga` normal map and no
+  `colorSpace`) shades its sunlit top at a quarter of what the same map read as raw gives in Isaac
+  Sim 6.2 (0.25 against 3.46 times the albedo, from its HdrColor and DiffuseAlbedo outputs), while
+  Unity read every normal map as linear: the pallet came out 1.7 times too bright. Normal maps now
+  follow the colour space the stage authors (`colorSpace` metadata, through connections, or a
+  UsdUVTexture's `sourceColorSpace`), and an unauthored 8-bit one decodes as sRGB
+  (`UsdImportOptions.NormalMapColorSpaceLikeIsaac`, on by default). `RUsd_GetImportTextureColorSpace`
+  reports the authored colour space of any texture the import named.
+- **Dome and interior reflections are convolved for roughness**
+  URP reads a reflection cubemap mip by the surface's roughness and expects it already blurred by
+  that roughness's GGX lobe. The importer's dome and interior captures had only box-filtered
+  automatic mips, so a rough floor or pallet reflected the HDRI's softboxes almost like a mirror.
+  The captures are now prefiltered on the CPU with GGX importance sampling, per the mip-to-roughness
+  mapping URP uses (`UsdReflectionConvolution`). Simple_Warehouse's shelf view moved from CIEDE2000
+  8.9 to 7.9 against Isaac Sim; scenes without a dome are unchanged.
+
+- **MaterialX metalness and roughness textures are imported**
+  A `standard_surface` whose metalness or specular_roughness comes from an image used to lose
+  both maps with a warning and import constant metallic 0 and roughness 0.5: OpenChessSet's gold
+  crowns and borders came in flat cream and its marble uniformly semi-gloss. The images now go
+  the way OmniPBR's separate metallic and roughness maps go, packed by the host into Unity's
+  metallic(.r) + smoothness(.a) map, with the constant standing in for whichever is not a texture.
+  A roughness image is not taken when the specular layer is weighted off.
+- **UsdPreviewSurface's specular workflow is converted**
+  `useSpecularWorkflow = 1` was ignored: the surface imported from its diffuseColor and its
+  `metallic`, which the specular workflow does not use, so a specular metal came in as a coloured
+  dielectric (CIEDE2000 45 against Isaac Sim on the look bench). A constant specularColor is now
+  converted to the metallic workflow the way Khronos converts glTF specular-glossiness: metallic
+  solved from the diffuse and specular brightness, the base colour blended from both. A textured
+  specularColor keeps the old reading and is reported.
+- **Exported texture coordinate readers write `varname` as a string**
+  It was a token, which OpenUSD 26's validator reports (the type changed in USD 21.11). Import
+  reads both.
+- **Vertices with only degenerate faces get a normal**
+  After the small-triangle fix 0.16% of OpenChessSet's vertices still had a zero normal: every
+  face they belong to has zero area. They now take the average of the faces at their position.
 
 - **Runtime Demo: a referencing export keeps each part's own transform**
   The placement was authored on the referencing prim and replaced the referenced default prim's
@@ -61,8 +290,698 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for the indexer sample). Each source now sits under a wrapper `Xform` that carries the placement.
 - **Runtime Demo: a referencing export keeps the sources' time range**
   A stage reads time metadata from its root layer only, so the assembled layer had none. The
-  writer now copies the first source's rates and the union of the ranges, converted to that rate.
-  Only text (`.usda`) headers can be read; binary sources add nothing and are named in one log line.
+  writer now opens each source with `UsdStage`, so `.usda`, `.usdc`, `.usd` and `.usdz` all count,
+  and writes the union of the ranges, converted to the rates of the first source that has one.
+  Both rates are written with their effective values; the stage API does not say which one a
+  layer authors.
+
+- **Small triangles keep their normals, and imported meshes get tangents**
+  The smooth normals computed for a mesh without authored normals came out zero on triangles
+  under about 3 mm: `Vector3.normalized` returns zero below a length of 1e-5, and a face normal's
+  length is twice the triangle's area. A 15 cm chess piece of 40,000 triangles (openchessset) had
+  99.6% zero normals and rendered as dark blotches. Normalisation is now done in double. Imported
+  meshes with UVs also get tangents (`RecalculateTangents`); USD carries none, and URP Lit built
+  the normal map's frame from zero vectors.
+
+- **Dome reflections are captured, and the dome ambient is 1.0**
+  The sky reflection cubemap captured in the first frames after an import came back black (all
+  six faces zero), so every metal under a dome reflected black; the capture is now checked (its
+  1x1 mip) and retried a frame at a time. The interior reflection probe, which replaced the sky
+  reflection on every stage, is now used only when the stage has something overhead (renderers
+  above the probe covering half the footprint): a probe in the middle of an open stage saw
+  nothing or the inside of an object. With reflections back, the dome ambient the Factory had
+  been raised to (1.5) was compensating for the missing specular; 1.0 fits the 47 stages best
+  (mean CIEDE2000 3.98 at 1.5, 3.81 at 1.0, 3.87 at 0.85).
+
+- **Lights and sides as Isaac Sim renders them (NVIDIA's Simple_Warehouse from 46.8 to 10.6
+  mean CIEDE2000)**
+  Three rules, each measured on Isaac Sim 6.2 with a dedicated stage. (1) Omniverse RTX draws
+  every mesh double-sided whatever `doubleSided` says: a `doubleSided = 0` quad seen from behind
+  is drawn and lit. `UsdImportOptions.DoubleSidedOpenMeshes` (on by default) gives back faces to
+  every mesh with open edges, found on positions welded across the importer's normal and UV
+  seams; closed meshes stay one-sided, since their inside is not seen from outside. The
+  warehouse's single-sheet ceiling was invisible from below. (2) URP shadows one directional
+  light; every other one lit through walls and roofs. The brightest distant light stays
+  directional and each further one becomes a spot light far away along its direction (20 x the
+  stage's bounding radius, a cone just covering the stage, intensity times the distance squared),
+  so it casts shadows; the warehouse's second low sun had lit its closed interior. (3) A light
+  authored invisible still lights the scene in Isaac Sim, through bounces only: the warehouse
+  measured 0.109 with its 37 invisible rect lights, 0.330 with them forced visible and 0.0014
+  without them, and one invisible rect over the open bench lit almost nothing. Unity has no
+  bounce-only light, so an invisible light keeps a third of its intensity.
+
+- **Unreal-connector overlays are baked into the albedo**
+  NVIDIA's Simple_Warehouse aisle signs (`M_AisleSign.mdl`) take one texture parameter, `Text`
+  (the aisle number and "BOXES G - I"), and blend it over the sign's diffuse map with Unreal's
+  BlendOverlay. The importer read the diffuse map from the module body but not the blend, so
+  every sign imported blank, and since the six sign materials then read the same,
+  `ShareIdenticalMaterials` merged them into one. The connector writes BlendOverlay out as a
+  per-channel `>= 0.5 ?` select on the parameter's lookup; the importer now recognises that and
+  bakes `t >= 0.5 ? 1 - 2(1 - t)(1 - a) : 2 t a` (overlay read linear, albedo sRGB, blended
+  linear) into the albedo, through the same path as the Unreal mask blends (mask mode 2; no ABI
+  change). The warehouse now imports six sign materials with their own text. The new
+  `UsdUnrealOverlayTests` has not been run yet.
+
+- **Materials import from the network Isaac Sim renders**
+  A material can carry an MDL, a MaterialX and a UsdPreviewSurface network at once. The importer
+  read the UsdPreviewSurface first; Isaac Sim (Omniverse RTX) renders MDL first, then MaterialX,
+  then UsdPreviewSurface, measured on Isaac Sim 6.2 with one material carrying all three in
+  different colours. The importer now follows that order. A known MDL module or a supported
+  MaterialX surface is read in full; an unknown MDL module, of which only a base colour can be
+  read, is used only when there is no MaterialX or UsdPreviewSurface network beside it. On the
+  Standard Shader Ball, `neutral` has an 18% grey UsdPreviewSurface and a MaterialX OpenPBR with
+  no base colour, which Isaac Sim draws white; Unity drew it grey, and now draws it white too.
+  A MaterialX surface with its specular layer weighted off (`specular_weight` or `specular` 0, not
+  metallic) imports fully rough rather than with its authored roughness, since it has no
+  reflection at all. A file exported with `MaterialFlavors` OmniPBR or MaterialX now imports from
+  the OmniPBR or the MaterialX `standard_surface`. Neither has an input for Unity's packed
+  metallic/smoothness map, so the export keeps that map in the UsdPreviewSurface only; when the
+  network read has no metallic or roughness map of its own and the UsdPreviewSurface beside it
+  has the exporter's packed map (metallic from .r and roughness from .a of one file), the import
+  takes that map from it, and the round trip keeps it. Every other OmniPBR or MaterialX surface
+  imports from its own network alone.
+- **The default material is UsdPreviewSurface's default grey**
+  A mesh with no material and no displayColor got a 0.7 grey. It now gets UsdPreviewSurface's
+  defaults (diffuse 0.18 linear, roughness 0.5, metallic 0), which is what Isaac Sim draws: an
+  unbound sphere matched an 18% grey reference sphere under the same light.
+
+- **Reference Look: the stage fit survives reopening the scene, and Surface Cache GI samples more**
+  `FitToStage` wrote the fitted GI volume size to `Volume.profile`, a runtime copy that is not
+  saved with the scene, so a reopened scene rendered with the sample asset's 128 m (a table-top
+  stage was fitted to 32 m). The size now goes on its own global volume, `ReferenceLook Stage Fit`,
+  one priority above the sample's, whose profile overrides only the volume size; the import saves
+  that profile beside the scene (`<scene>_StageFit.asset`). The sample profile is not edited, so
+  later changes to it still apply. The shadow distance is a pipeline-asset setting every scene
+  shares; it is now applied again from the stage's bounds when a fitted scene is opened.
+  The sample volume's screen lookup and upsampling sample counts go from 6 and 2 (the Medium
+  preset) to 8 and 8: with only a few samples, a pixel whose samples all miss a surface patch got
+  no indirect light and rendered as a dark speckle. That was hard to see in the Factory but
+  covered a lone robot arm; on Franka the speckles in the robot area went from 3,543 to 1,845,
+  and what remains is real detail (seams, silhouettes). The volume size and resolution made no
+  difference. The GPU cost was not measured (the Editor reports no frame timings); only the
+  screen-space passes do more work.
+
+- **doubleSided meshes render from both sides**
+  The importer ignored `UsdGeomGprim.doubleSided`, so every mesh was one-sided. A mesh meant to be
+  seen from inside, such as the Standard Shader Ball's backdrop box, was open from outside where
+  Isaac Sim and Omniverse draw it closed. `doubleSided` is now read for each mesh through the
+  Stage API on the import's own stage, with no plugin rebuild. A plugin older than 0.8.1
+  reads every mesh as one-sided, as before. A doubleSided mesh gets its back faces as geometry:
+  mirrored vertices with negated normals and the triangles wound the other way. Each side then
+  shades with a normal that faces it. A Render Face Both material alone keeps the front normal on
+  the back face, and the box's outer walls rendered black under the key light. The materials stay
+  one-sided. Skinned and point-cached meshes must keep their vertex count, so they get a Render
+  Face Both copy of their material instead (`_Cull` 0, or HDRP's `_DoubleSidedEnable`). A
+  doubleSided mesh never shares a Mesh with a one-sided mesh of the same buffers. Verified on the
+  shader ball, where the box now renders closed and lit. `UsdDoubleSidedImportTests` covers the
+  vertex, normal and winding layout.
+
+- **Rect lights shadowed what they lit**
+  With `PhysicalLightUnits` a rect light became a grid of 179-degree spots. A spot's single
+  shadow map spread over that cone is too coarse to resolve, so walls and floor the light reached
+  came out shadowed: on the Factory's mezzanine the wall measured 0.31 x Isaac Sim and the floor
+  0.50 x, and narrowing the cone to recover the map left the far side unlit. Each cell is now a
+  point light with a cube-map cookie shaped as the cosine lobe of a flat emitter (nothing
+  upward), whose six shadow faces never degenerate; the rect scale factor is refitted to it
+  (0.00018 per nit per square metre). Both Factory views now sit within 0.75-1.9 x Isaac Sim.
+  Needs the render pipeline's light cookies, which URP enables by default.
+
+- **Environment captures rendered inside the import**
+  The dome's reflection cubemap and the interior reflection were rendered from inside the
+  import, in the frame that had just created thousands of renderers, so the first thing Surface
+  Cache GI saw of the stage was a cubemap render of a half-registered scene. Both now run after
+  the scene has drawn its first frame (`UsdDeferredRender`), from an update rather than a render
+  callback. Until then a dome-lit scene reflects its skybox through RenderSettings;
+  `UsdImporter.RefreshReflection` still captures immediately when called. Known limitation, not
+  the importer's: importing a stage into an editor session whose Surface Cache GI already held a
+  previous import can throw "An item with the same key has already been added" from URP's
+  ray-tracing acceleration structure (Unity 6.6), after which the renderers past the failing one
+  are missing from GI and a roof no longer occludes the sky (the Factory then measured 7.6 x
+  Isaac Sim under dome + sun instead of 1.3 x). A fresh editor session, or one import per session,
+  does not hit it.
+
+- **Interior reflection captured the sky it was meant to replace**
+  `InteriorReflection` rendered its cube map once, while the sky was still the scene's reflection
+  source, so every interior surface in the capture reflected sky that the roof blocks and the
+  hall came out 6-9 x too bright in the shade (Factory, dome + sun) until the capture was taken
+  a second time. The import now takes the capture three times on consecutive frames, each with
+  the previous one as the scene's reflection, which converges to the hall's own specular bounce:
+  0.94 x Isaac Sim on the Factory car line under full lighting. The passes have to be frames
+  apart, since a second cube map render in the same frame does not see the one just assigned to
+  RenderSettings and renders with no reflection (chrome car body at 0.44 x). A caller that
+  changes the lights calls `UsdImporter.RefreshReflection` on consecutive frames the same way.
+
+- **OmniPBR `emissive_intensity` normalised by its 40-nit default**
+  OmniPBR authors emission in nits. The importer divided by the 40-nit default, so a 29,000-nit
+  status light (Isaac Sim's Franka) came in at 725x its colour and bleached the robot around it.
+  Kit renders a `UsdPreviewSurface` `emissiveColor` of E as E x pi x 1133.6 nits
+  (`UsdPreviewSurface.mdl`), and that `emissiveColor` already imports 1:1 into Unity emission, so
+  nits now divide by the same constant: the Franka light imports at 8.1x, and the untouched
+  40-nit default at the faint glow Kit shows for it.
+
+- **OmniGlass frosting ignored for opacity**
+  `frosting_roughness` only set the roughness, and every pane blended at 0.25 opacity. A real-time
+  blend has no rough refraction, so a frosted pane cannot blur what is behind it; the closest it
+  gets is to show less of it. Opacity now rises with frosting (0.25 clear, up to 0.85), and a
+  `thin_walled` pane stays clear. On NVIDIA's `Factory.usd` the `Glass_Tinted_Mid` roof
+  (frosting 0.1) rendered see-through in Unity while Isaac Sim draws it milky.
+
+- **Albedo texture with no file ignored its fallback colour**
+  `diffuseColor` wired to a `UsdUVTexture` that names no `inputs:file` was warned about and then
+  left at the default white, while the spec's `fallback` input on that texture is the colour to
+  show. It is read now when authored (usd-wg StandardShaderBall `neutral`).
+
+- **OmniGlass panes rendered as lit white sheets**
+  `glass_color` became the diffuse colour of a blended Lit material, so every pane was a diffuse
+  surface lit from the front: the Factory cell fence (glass_color 0.94) measured 179 against
+  Isaac Sim's 107 on the same pixels. Glass only sends back its Fresnel reflection and a thin
+  haze, so the diffuse colour is now `glass_color` x 0.1 and the specular carries the look.
+  Frosting blurs the reflection (roughness = 2.5 x `frosting_roughness`) and veils what shows
+  through (opacity 0.25 + 2.5 x frosting, up to 0.85). Known limitation: Isaac Sim's frosted pane
+  blurs the view behind it more with distance (rough refraction); a blended Lit surface cannot,
+  so the veil is uniform at every depth.
+
+- **Emission colour rendered as sRGB(E)**
+  `emissiveColor` was converted to sRGB like the base colour, but `_EmissionColor` (URP) and
+  `_EmissiveColor` (HDRP) are `[HDR]` properties that Unity stores linear and does not convert,
+  so every emitter rendered washed out and too bright (an emissive 0.18 grey showed as 0.46).
+  Import now writes the authored linear value and export reads it back unchanged. Measured on the
+  Isaac Sim look bench (Unity 6.6 URP against Isaac Sim 6.2.0): the emissive cube's CIE Lab
+  difference dropped from 24-33 to 4-6.
+
+- **Transparent materials cast solid shadows**
+  An alpha-blended material (glass: `OmniGlass`, or any constant opacity below 1) still drew into
+  the shadow map as an opaque surface, so a glazed roof blocked the sun and glass fence panels cast
+  black shadows, while Isaac Sim lets light through. Import now disables the `ShadowCaster` pass on
+  blended materials; cut-out materials keep their shadows. Seen on NVIDIA's `Factory.usd`.
+
+- **Animated stages imported at the wrong time**
+  Every read used `UsdTimeCode::Default()`, so on a stage that authors a time range an animated
+  prim took its authored default instead of the pose usdview and Isaac Sim show at the start time.
+  On NVIDIA's `Factory.usd` the car-body sledges came in about 10 m from where Isaac draws them.
+  Transforms, visibility, points, topology, primvars, instancers and implicit shapes are now read
+  at `startTimeCode` when the stage has a time range, and at the default time otherwise.
+
+- **Targa textures refused**
+  `.tga` maps went to `Texture2D.LoadImage`, which reads PNG and JPEG only, and were refused (Isaac
+  Sim's pallet props). A managed TGA decoder (uncompressed and RLE, 8-bit grey, 24- and 32-bit
+  colour, the same size limits as PNG) now reads them on the worker thread.
+
+- **Unreal-connector MDL imported untextured**
+  Materials exported by the Omniverse Unreal Engine connector are per-instance MDL modules on
+  `OmniUe4Base` whose inputs carry Unreal parameter names, so none matched and NVIDIA's
+  Simple_Warehouse imported without textures. Albedo, normal and ORM maps are now picked by
+  parameter name and texture suffix (`_D`, `_N`, `_ORM`), with `*Tint`, `Roughness`, `Metallic`
+  and `U_Tiling`/`V_Tiling`. The colour mask blend those master materials use,
+  `lerp(ColorAlbedo, AlbedoTexture, MaskSelection)`, is baked into the albedo at import (native API
+  13, `RUsd_GetImportMaterialAlbedoMask`), which brings back the warehouse's navy floor and orange
+  racks. API 14 (`RUsd_GetImportMaterialUnrealBlend`) adds the per-channel form those materials
+  use for barrels and crates, `lerp(lerp(lerp(lerp(0, Body, m.r), Handle, m.g), Cap, m.b), albedo,
+  m.a)`, and the roughness range `lerp(RoughnessMin, RoughnessMax, ORM.g)` (the ORM map was read as
+  roughness directly, which made worn concrete render polished). Parameters the stage leaves
+  unauthored take their defaults from the module file, and modules with no parameters
+  (`M_AisleSign`) take the textures their body names: 1,697 of the warehouse's 1,698 materials now
+  have a colour map. The rest of the graph is not evaluated.
+- **Time, animation and UsdSkel on import (0.8.1 native plugin)**
+  The native importer read every attribute at `UsdTimeCode::Default()` and had no UsdSkel code,
+  although UsdSkel is compiled into the shipped OpenUSD libraries on every platform. Thirteen
+  additive entry points now report the stage's time range and the time static values were read
+  at (`RUsd_GetImportTimeInfo`); animated transforms and visibility as per-node tracks; every
+  skeleton a SkelRoot binds, with joint order, parents, bind, rest and read-time poses and its
+  animation; per-vertex joint weights carried through the vertex split and moved into the
+  skeleton's joint order (a mesh-local `skel:joints` order and rigid bindings included); and blend
+  shapes as dense per-vertex frames (inbetweens included) with their weights and weight
+  animation. Tracks, skeleton animations and blend shapes that pass the new animation budgets are
+  dropped with a warning, not the import. Covered by `Native~/Tests~/skel_import_test.cpp` against
+  `Tests/Fixtures~/Skel`. In the macOS, Windows and Linux payloads.
+- **Skinned meshes import as `SkinnedMeshRenderer`s (`UsdImportOptions.ImportSkinning`, on by default)**
+  Skinned meshes used to arrive as static meshes in their authored points, which is the bind
+  pose, not what USD draws: on a warehouse stage with 17 rigged workers (97 meshes) they sat up
+  to 1 m away from where OpenUSD skins them. Each Skeleton prim now gets a joint hierarchy, posed
+  as the stage is at the read time, and a `UsdSkeleton` listing the joints in the skeleton's
+  order; each skinned mesh gets a `SkinnedMeshRenderer` with those joints as bones, bone weights,
+  bind poses (`inverse(bind) * geomBindTransform`) and its blend shapes (inbetweens as extra
+  frames, weights from the skeleton's animation at the read time). On that stage every skinned
+  vertex now matches OpenUSD's own skinning to 0.07 mm. Joints are not prims: the root joints
+  carry `UsdImportHelperObject`, so `UsdPrimSource` and both exporters skip them. Skinned meshes
+  are never shared by `ShareIdenticalMeshes` and get no `MeshCollider`. Needs the 0.8.1 native plugin; the
+  option off, or an older plugin, imports them as before.
+- **`UsdImportOptions.ReadAtStageStartTime`** (on by default) chooses the read time described
+  below; off reads at USD's Default time as before.
+- **Animation playback: `UsdAnimationPlayer` and `UsdAnimationData` (`UsdImportOptions.ImportAnimation`, on by default)**
+  A stage with time-sampled prim transforms or visibility, skeleton animation or blend-shape
+  weights now imports with a `UsdAnimationPlayer` on its root (`UsdImportResult.Animation`),
+  playing a `UsdAnimationData` that keeps the samples at the times the stage authors them. It
+  interpolates as USD does -- positions and scales linearly, rotations along the short arc,
+  blend-shape weights linearly, visibility held -- and needs no Animator, AnimationClip or
+  Timeline, so it works the same in players and the Editor. `Evaluate(seconds)` and
+  `EvaluateAtTimeCode` pose everything; `Play`, `Pause`, `Stop`, `Loop` and `Speed` drive it in
+  Play Mode and players, and `PlayOnStart` starts it. The import is posed at the read time.
+  At 13 times across the two test stages, skinned vertices, transforms and visibility match
+  OpenUSD.
+- **Timeline track for imported animation (`Unity.USDToolkit.Timeline`)**
+  `UsdAnimationTrack` binds a `UsdAnimationPlayer`, and each `UsdAnimationClip` on it poses the
+  stage at the clip's local time, with clip-in, speed, looping and extrapolation, in the Timeline
+  window's preview as in Play Mode and players; a clip given the `UsdAnimationData` takes its
+  length from it. The assembly compiles only when com.unity.timeline 1.7 or newer is in the
+  project, so the package itself still depends on nothing.
+- **USD files in the project import as model assets (`UsdStageImporter`)**
+  `.usd`, `.usda`, `.usdc` and `.usdz` files in a project import through the same importer as
+  `UsdImporter.Import`, as a model asset: the stage's root object as the main asset, its meshes,
+  materials, textures (with their pixels) and `UsdAnimationData` as sub-assets, under
+  identifiers that stay the same across reimports. Content then builds for every platform Unity
+  targets, not only those the native plugin supports. The importer's Inspector holds the import
+  settings and a dropdown for each variant set the stage offers. The asset reimports when the
+  stage or any project file it read changes: sublayers, references and payloads, through the
+  new `RUsd_GetImportLayers` (API 13, additive), and textures. With com.unity.importer.usd or
+  com.unity.formats.usd installed it is offered as an alternative importer instead of taking the
+  extensions over.
+- **`UsdImportOptions.KeepTexturesReadable`** keeps each texture's CPU copy (for reading pixels or
+  saving it as an asset); **`UsdImportResult.SourceFiles`** lists the layer and texture files an
+  import read.
+- **`UsdAnimationPlayer` Inspector** plays, pauses, stops and scrubs in Play Mode, and the
+  Timeline track registers everything it drives, so a Timeline preview in Edit Mode restores the
+  scene and leaves no prefab overrides.
+- **`UsdStageSource.CreateOptionsWithVariant(primPath, set, variant, template)`** copies every
+  other setting from `template`. The three-argument form returned defaults for everything but
+  payloads and variants, so a re-import lost its parent, texture and unit settings.
+- **Animation and UsdSkel on export (0.8.1 native plugin)**
+  Eight more additive entry points write the stage's time range (`RUsd_SetExportTimeRange`),
+  transform and visibility samples on a written prim (`RUsd_SetXformSamples`,
+  `RUsd_SetVisibilitySamples`), a SkelRoot, a Skeleton with bind and rest transforms, a mesh's
+  joint weights and geomBindTransform, blend-shape frames (inbetweens included), and a
+  SkelAnimation with joint transforms and blend-shape weights, static or sampled. Covered by
+  `Native~/Tests~/skel_export_test.cpp`, which writes a stage through them and reads it back
+  through the import entry points. In all three payloads, like the rest of API 13.
+- **Skinned meshes export as UsdSkel (`TransformPolicy = PreserveHierarchy`)**
+  The renderers that share their bones become one character: their lowest common ancestor is
+  written as a SkelRoot, with a Skeleton whose joints are the bones (a skeleton this package
+  imported keeps its Skeleton prim and joint names), and each mesh keeps its bind-pose points,
+  weights and blend shapes, with bind and geomBind transforms chosen so that OpenUSD skins it
+  exactly as Unity draws it; the current pose and blend-shape weights are written as the rest
+  pose and a static SkelAnimation. Bones stay Xform prims too, for whatever hangs off them. On a
+  warehouse stage with 17 rigged workers (97 skinned meshes), posed at random and exported,
+  OpenUSD's own skinning of the file matches what Unity drew to 0.07 mm. With
+  `TransformPolicy = BakedMesh`, or for a renderer the skeleton cannot carry (a mesh without
+  Read/Write, bones outside the exported hierarchy, bind poses that fit no shared skeleton), the
+  mesh is written as the static mesh it currently draws, with a warning in the Preserve case.
+- **`UsdAnimationRecorder`: record a hierarchy as an animated stage**
+  `Capture(seconds)` once per frame, or `CaptureClip(AnimationClip)` and
+  `CapturePlayer(UsdAnimationPlayer)` to sample one through, then `Save(path)`. The stage is
+  written with `PreserveHierarchy`; the first frame is its static pose, transforms and active
+  states that change become samples on their prims (only those that change), and each skinned
+  character's bones and blend-shape weights a SkelAnimation. Time codes are frames at the
+  recorder's rate. Works in players as in the Editor. A recording of the skel_arm test stage
+  played through, skinned again by OpenUSD, matches OpenUSD's numbers for the original to 1e-6.
+  UsdSkel stores joint scales as half floats, so an animated joint scale comes back to about
+  three decimal places. Needs the 0.8.1 native plugin.
+- **Unity Recorder: "USD Animation" recorder (`Unity.USDToolkit.Recorder.Editor`)**
+  With com.unity.recorder 5.0 or newer in the project, the Recorder window (and Timeline
+  Recorder clips) offers a USD Animation recorder: pick a GameObject, a format (.usdc, .usda or
+  .usdz) and whether to write textures, and the Play Mode session is saved through
+  `UsdAnimationRecorder`, imported as an asset when it lands under `Assets`. At a constant frame
+  rate each recorded frame is one time code. The assembly compiles only when the Recorder is
+  installed; the package still depends on nothing.
+- **Geometry below animated visibility** A prim hidden at the read time and shown later by its
+  animation had no geometry, because hidden geometry is not read. Below a prim whose
+  visibility is animated, geometry is now read regardless and every prim reports its own
+  visibility opinion, leaving inheritance to Unity's active hierarchy, which is the same rule.
+- **Point caches: meshes whose points are time-sampled play their animation**
+  A mesh that animates its points (simulations, Alembic conversions, baked deformers) imported as
+  one frame. Every sample now arrives as a `UsdAnimationData.PointCacheTrack` on the imported
+  vertices (through the vertex split), and `UsdAnimationPlayer` interpolates it linearly, as USD
+  does. Normals come with it: recomputed per sample when the mesh authors none, read per sample
+  when authored ones animate, and left alone when authored ones hold still. The player draws the
+  points through the renderer's `MeshRenderer.additionalVertexStreams`, so the imported Mesh is
+  never written, an asset's mesh is never dirtied, and two instances of one mesh play at different
+  times; `RestoreMeshes()` shows the imported mesh again. A mesh whose topology animates, whose
+  point count changes, that is skinned, or that sits inside a point-instancer prototype keeps the
+  read-time frame, with a warning saying which. `UsdAnimationRecorder` writes such a mesh's points
+  back as samples (with normals), and a flattened export writes the frame on screen, as it writes
+  a skinned mesh's current pose. On skel_arm's point cache every vertex matches OpenUSD at every
+  sample and between them.
+- **Dual-quaternion skinning (`UsdDualQuaternionSkin`, `UsdImportOptions.DualQuaternionSkinning`, on by default)**
+  A mesh UsdSkel marks `primvars:skel:skinningMethod = "dualQuaternion"` was skinned linearly,
+  with a warning, because SkinnedMeshRenderer only blends linearly: a twisting joint collapsed the
+  skin around it. Such meshes now keep a MeshFilter and MeshRenderer and get a
+  `UsdDualQuaternionSkin`, which poses them on the CPU exactly as UsdSkel does -- rotation and
+  translation blended as dual quaternions on the hemisphere of each vertex's heaviest joint,
+  scale and shear blended linearly first, blend shapes before skinning -- and draws the result
+  through `additionalVertexStreams`, so the scene and the asset keep the bind pose. On a tube
+  0.5 wide, twisted 160 degrees, bent and scaled, every vertex matches OpenUSD's own
+  dual-quaternion skinning to 1e-4 (linear blending is up to 0.2 off there). The option off gives
+  SkinnedMeshRenderers as before. Exports write these meshes as UsdSkel with `skinningMethod = "dualQuaternion"`, and
+  the recorder records their blend-shape weights. It runs on the CPU whenever the pose changes;
+  for crowds, turn the option off for GPU linear skinning.
+- **Skinned point-instancer prototypes are drawn posed**
+  A skeleton inside a point-instancer prototype was never linked to its node, so the prototype's
+  meshes imported unskinned and every instance drew the bind pose. The prototype now keeps its
+  skeleton, which the stage's animation poses, and `UsdPointInstancer.SkinnedSource` bakes the
+  posed prototype once a frame and draws that mesh at every placement, so all instances play the
+  prototype's animation together, as OpenUSD renders them; cells grow with the poses. On a
+  three-instance test stage every instance's vertices match OpenUSD's placement of the skinned
+  prototype. A prototype bound to a skeleton outside it -- or one a second instancer reuses --
+  is drawn unskinned, with a warning.
+- **The stage's animation as an AnimationClip (`UsdAnimationClipBuilder`)**
+  `UsdAnimationClipBuilder.Build(player)` makes a generic AnimationClip, for an Animator, the
+  Animation window or a Timeline Animation track: prim and joint transforms, active states and
+  blend-shape weights as curves keyed at the stage's samples, linear where USD is linear, stepped
+  for visibility, with extra rotation keys where samples are more than 10 degrees apart so the
+  quaternion curves follow USD's arc; it lasts the stage's time range and loops like the player.
+  `UsdStageImporter.GenerateAnimationClip` adds one to an imported asset as a sub-asset, and the
+  player's context menu saves one as a `.anim`. Point caches have no curve type and stay with the
+  player.
+- **Edit Mode preview (`UsdAnimationPreview`)**
+  The `UsdAnimationPlayer` Inspector has a Preview button and a time slider in Edit Mode. The
+  preview runs in Unity's animation mode, as the Animation window's does: it registers every
+  property the animation drives, the player poses them exactly, and ending the preview puts back
+  every transform, active state, blend-shape weight and mesh, so nothing reaches the scene file or
+  a prefab's overrides. It ends when Preview is clicked again, the selection changes, the scene is
+  saved or Play Mode starts. Tools can use `UsdAnimationPreview.Start(player)` directly.
+- **C# stage API (`UsdStage`, `UsdPrim`, `UsdAttribute`)** Read and edit USD stages from C#
+  without importing them. `UsdStage.Open`, `CreateNew` and `CreateInMemory` give a stage; `Save`,
+  `Export` (optionally flattened) and `Reload` write and reread it. Prims are reached by path or
+  `Traverse` and carry their type, specifier, flags (active, loaded, instance, ...), kind and
+  metadata, children, variant sets, references, payloads, inherits and specializes, relationships
+  and transforms. `UsdAttribute.Get<T>` and `Set<T>` read and write values at any time code as C#
+  and Unity types -- `Vector3[]` for point3f[], `Color` for color3f, `Matrix4x4`, `Quaternion`,
+  strings, tokens and asset paths, and arrays of each -- converting precision (a double3 reads as
+  a `Vector3`, a half writes from a float) but never shape or kind; `GetComponents` reads any
+  real-valued attribute at full precision. Time samples, blocks and clears; `UsdEditTarget` sends
+  edits to the root, session or a sublayer, or inside a variant. Values are USD's own;
+  `UsdCoordinates` converts to Unity's basis as the importer does. Every read checks the type the
+  value holds, so a stage that authors one type under another declaration is refused, not
+  misread. Calls on one stage are serialized, so it can be used from any thread. A curated API,
+  not the legacy USD.NET binding: no reflection serializer, safe under IL2CPP. Needs the 0.8.1 native plugin.
+- **Switch a variant or the loaded payloads at runtime, in place (`UsdStageSource.SwitchVariant`,
+  `SwitchPayloads`, `LoadPayload`, `UnloadPayload`, and `...Async`)** The change is made on the
+  stage the import keeps open (`UsdStageSource.Stage`, read-only to callers; in its session layer,
+  so no file changes), OpenUSD's change notices say which prims recomposed, and only those
+  subtrees are imported again -- widened to a whole SkelRoot or PointInstancer, so skinning and
+  instancing stay whole -- and put where the old ones were. The rest of the import, and every edit
+  made to it, stays; a hand move, rename or deactivation of a rebuilt prim's own object carries
+  over, and objects added by hand below it move to the new objects. Its animation tracks are
+  replaced in the import's `UsdAnimationPlayer`, which plays on at its time. A change that reaches
+  past one subtree (a material, a skeleton animation), a stage changed on disk since the import,
+  a prefab instance in Edit Mode, or a plugin older than 0.8.1 imports the whole stage again in
+  the import's place instead; `UsdSwitchResult` says which happened, what was rebuilt and why.
+  Rereads are held to the import's limits less what the rest of the import holds. The async forms
+  read off the main thread and keep the old parts until the new ones are built.
+  `UsdImportOptions.KeepStageOpen` keeps the import's own stage for the first switch; otherwise it
+  is opened on first use. `Reimport` still imports the whole stage again;
+  `CreateOptionsWithVariant` and `CreateOptionsWithPayloads` build options without importing.
+- **Native stage API (0.8.1 native plugin)** The stage API's 18 entry points (`RUsd_CreateStage`, `RUsd_QueryText`,
+  `RUsd_EditPrim`, `RUsd_GetAttributeValue`, `RUsd_SetAttributeValue`, ... ; see the header),
+  `RUSD_OPEN_NO_READ`, and `RUsd_ReadSubtrees` / `RUsd_ReleaseImportData` for live switching.
+  Additive; covered by the new `stage_api_test` native suite (429 checks). In the macOS, Windows
+  and Linux payloads.
+- **Import limits as options (`UsdImportOptions.Limits`)** The budgets an import is held to --
+  2,000,000 nodes, 1,000,000 meshes, 4,000,000 point-instancer placements, 268,435,456 points and
+  triangle indices, and the animation ones -- were fixed, and a stage over the node, mesh,
+  placement or geometry budget always failed the import. `UsdImportLimits` sets each per import
+  (raised for a trusted large stage, lowered to keep a device's imports small), and
+  `WhenExceeded = SkipWithWarning` imports what fits instead: the walk stops at the node limit, a
+  mesh over its limits is left out with its instance copies, and an instancer's placements over
+  theirs are not drawn, with a warning that says what was left out. `GetPreviewInfo` opens under
+  the same limits, and its kept stage is reused only by an import with the same ones.
+  `UsdStageImporter` shows them under Limits. The defaults and `Fail` behave as before.
+- **A moved imported object is written as a relocate** An override export
+  (`UsdCompositionMode.Preserve`) wrote an imported object moved under another parent as a copy,
+  with its original deactivated: the copy held only what the exporter writes, so the source's
+  materials, subsets, primvars and composition were lost. When the output references the source
+  (the import below the export root) the move is now a relocate in the output layer, so the source
+  prim is composed at its new place with everything it had, and the object's edits are written
+  there; a new parent made in Unity is written too. A copy of an imported object, with the
+  original in place, is still new content, and so is a move when the output sublayers the source
+  (exporting the import root itself): OpenUSD relocates only prims that come in through a
+  reference or payload. `UsdExportResult.RelocateCount` counts them.
+- **More native import data (0.8.1 native plugin)** `RUsd_GetImportMeshPointCache` and `RUsd_CopyImportMeshPointCache`
+  (a mesh's animated points on its imported vertices, with normals), `RUsdImportMeshSkin.dualQuaternion`
+  (the mesh's skinning method), `RUsd_OpenStageWithLimits` (an import's budgets), and on export
+  `RUsd_SetPointsSamples`, `RUsd_SetSkinningMethod` and `RUsd_AddRelocate` (a namespace move in the
+  export layer's relocates).
+  Additive like the rest of API 13, which is not released yet; covered by
+  `Native~/Tests~/skel_import_test.cpp` and the EditMode tests.
+- **`UsdAnimationPlayer.CollectAnimatedTargets(transforms, toggled, components)`** also reports the
+  `UsdDualQuaternionSkin`s and the MeshRenderers point caches draw into; the Timeline track
+  registers them, so its preview puts them back too.
+- **`UsdSkeleton.BindTransforms`** keeps each joint's bind transform from the stage, which an
+  override export needs to bind a new mesh to an imported skeleton.
+- **The Recorder tests run in batch mode** The Unity Recorder captures at the end of each rendered
+  Game view frame, which batch mode never reaches, so its test needed an Editor with a window. A
+  second test drives the Recorder's own session frame by frame, as its frame component does, so
+  the USD Animation recorder is covered in batch mode and CI; the Play Mode test still checks the
+  whole RecorderController path in a windowed Editor.
+- **Alembic (`.abc`) and Draco (`.drc`) files (OpenUSD's usdAbc and usdDraco plugins)**
+  The payload's OpenUSD is now built with its Alembic and Draco file format plugins, so
+  `UsdImporter.Import` opens an `.abc` like any stage -- meshes, transforms, normals and texture
+  coordinates, with transform animation as tracks and animated points as point caches -- and a
+  stage that references or payloads a `.drc` mesh composes it. Alembic 1.8.5 (with Imath 3.1.9),
+  and Draco 1.5.6, are linked statically into the OpenUSD library: no new files beside it but the
+  two plugins' `plugInfo.json`. In the project, `UsdStageImporter` imports `.abc` files, and `.drc`
+  files on macOS and Linux; `.abc` becomes an override extension when Unity's Alembic package
+  (com.unity.formats.alembic) is installed, as `.usd` does with the USD package. Alembic has no
+  units, and OpenUSD reads it as centimeters, as Unity's Alembic package does by default: an
+  `.abc` written in meters (Blender's default) imports at 1/100 scale unless
+  `ApplyStageUpAxisAndUnits` is off. Materials are not part of what usdAbc reads. Windows has
+  Draco too: OpenUSD's build refuses usdDraco in any monolithic Windows build, for symbols only its
+  Python module needs, and `Native~/patches/openusd-26.05-windows-draco.patch` allows it without
+  Python (Draco is static inside `usd_rt.dll`, no new file). In the macOS, Windows and Linux
+  payloads (Windows with Draco since 2026-10-18, macOS and Linux rebuilt with the newest patches
+  the same day); a payload without the plugins makes the importer and the tests report them
+  missing. Covered by
+  `Native~/Tests~/file_format_test.cpp` and `UsdFileFormatTests`, against an Alembic file Blender
+  wrote and a Draco mesh OpenUSD's own writer encoded (`Tests/Fixtures~/FileFormats`).
+- **Export and record to Alembic (`.abc`)**
+  `UsdExporter` and `UsdAnimationRecorder.Save` write `.abc` through usdAbc. Its layers refuse
+  every edit, so the native exporter builds such a stage in memory and writes it out in the
+  output's format at the end (any format that can be written but not edited). Alembic has no
+  skeletons, so every skinned mesh is written in its current pose, and a recording bakes it every
+  frame into sampled points; the root prim scales the scene from Unity's meters into centimeters,
+  so OpenUSD, Unity's Alembic package and Maya read it at its size. Material bindings and
+  `metersPerUnit` are not kept by Alembic, and `ExportTextures` writes nothing for it. A
+  `UsdCompositionMode.Preserve` export to `.abc` is refused, as is any `.abc` export from a
+  payload without usdAbc.
+- **Export to Draco (`.drc`) (0.8.1 native plugin)** An output path ending in `.drc` writes one
+  Draco-compressed mesh through usdDraco's writer, which OpenUSD's file format cannot do
+  (`WriteToFile` returns false) and which no OpenUSD library exported on Windows:
+  `Native~/patches/openusd-26.05-windows-draco.patch` now exports `UsdDraco_WriteDraco` on every
+  platform. A `.drc` holds one mesh and no hierarchy, so every visible mesh is merged in the export
+  root's space, faces kept facing out through mirroring transforms, with normals and the primary
+  texture coordinates where every mesh has them; skinned meshes are written in their current pose,
+  and the scene in centimeters, as for Alembic (Draco has no units either). Positions are quantized
+  to 14 bits, texture coordinates to 12 and normals to 10, OpenUSD's usdcompress defaults.
+  Materials, animation and composition are not kept: a recording or a `UsdCompositionMode.Preserve`
+  export to `.drc` is refused, as is any `.drc` export from a payload without usdDraco or below API
+  15. Covered by `file_format_test` (two quads, one mirrored, and a hidden one, read back as one
+  mesh) and `UsdFileFormatTests`. In the Windows, macOS and Linux payloads.
+
+
+- **The kept preview stage leaked on every script reload** `GetPreviewInfo` keeps one stage for
+  the import that follows, in a static the Editor's script reload loses; the native stage stayed
+  allocated. It is now released before the reload, with every `UsdStage` still open.
+- **Skinned meshes were left out of exports, silently** `UsdExporter` only looked at
+  `MeshFilter`s. Flattened exports now write every `SkinnedMeshRenderer` (as UsdSkel or baked, see
+  above), and so does `UsdCompositionMode.Preserve` for the ones added to an imported stage: a new
+  character becomes its own SkelRoot and Skeleton in the override layer, and a mesh added to an
+  imported character (a garment on its joints) is bound to that character's existing Skeleton prim,
+  provided it is inside the character's SkelRoot and was bound in the skeleton's bind pose. One
+  that fits neither -- its mesh and bones meet only at a prim of the stage being overridden, whose
+  type a SkelRoot would change -- is written in its current pose, with a warning. Skinned meshes
+  that came from the source are kept by composition as before; prefab assets get theirs written
+  into their own layers.
+- **Override exports wrote the importer's helper objects as prims** A `UsdCompositionMode.Preserve`
+  export of an imported stage wrote every object without a `UsdPrimSource` as new content, and
+  the importer's helpers -- the joint hierarchy under each Skeleton, the turn under a light or a
+  camera -- have none: on a warehouse stage with 17 characters the override layer defined 961
+  Xforms duplicating the joints, and every reader then saw a second skeleton of plain transforms.
+  Helpers are skipped, as the flattened export and `UsdPrimSource` already skip them.
+- **Point-instancer prototypes were also drawn where they stand** A prototype is imported once to
+  be drawn at its placements, but with `IncludeInvisible` on (the default) its renderers stayed
+  on, so every prototype was drawn a second time at its own position. Their renderers are now off;
+  the prototype stays in the hierarchy to be inspected.
+- **Assets in immutable packages failed to import** `UsdStageImporter` read the file at
+  `Path.GetFullPath(assetPath)`, which for a package in `Library/PackageCache` is not where the
+  file is. It now maps the asset path to the file on disk, and dependencies inside such packages
+  are tracked too.
+- **A recording left skinned meshes it could not write as UsdSkel standing still** A renderer the
+  skeleton path cannot carry (its bones meet only at an imported prim, say) is written in its
+  current pose; the recording now poses and bakes it again every frame and samples its points.
+- **Recordings ignored `Renderer.enabled`** A renderer switched off and on during a recording was
+  written as always shown. The recorder now samples it like the active state: on a Unity object's
+  `<name>_Mesh` prim on its own, and together with the active state on a mesh the importer made,
+  whose Xform and Mesh are one prim.
+- **`UsdDomeLight` and `UsdSpatialAudio` could not be saved in scenes or prefabs** All three
+  scene components lived in one file, `UsdSceneComponents.cs`; Unity finds a MonoBehaviour's
+  script by its file name, so two of them had no script asset and came back as missing scripts.
+  Each now has a file of its own (`UsdImportHelperObject.cs` keeps the old file's GUID).
+- **Objects turned and scaled differently along their axes imported turned wrong** Transforms
+  were split into position, rotation and scale with `Matrix4x4.rotation`, which reads the rotation
+  straight from the matrix and is only right while the scale is uniform: a box scaled (1, 2, 0.5)
+  and turned (10, 30, 0) came back turned (10.9, 19.6, 357.2), 0.12 m off at its corners, in every
+  format and in animation tracks alike. The axes are now normalized first; a mirroring matrix puts
+  its sign on X.
+- **Z-up stages exported flattened, or recorded, lay on their back** The stage the exporter writes
+  is always Y-up, but an imported Z-up stage (Isaac Sim, Blender) was written with its Z-up numbers
+  as they stood, so it read back turned 90 degrees. The turn the importer had put on the import
+  root now goes on the exported root prim.
+- **`UsdLibraryScanner.ScanFolder` lists `.abc` and `.drc` files** too.
+- **Linux players loaded a second OpenUSD** `UnityPlayer.so` loads every `.so` under the player's
+  `Plugins` folder at startup, and the Linux payload was there twice: Unity's own flat copies in
+  `Plugins/x86_64/` (the `.so` importers had Linux64 on, and those under `lib/` had no importer
+  settings at all) beside the self-contained `Plugins/x86_64/Linux/` tree the build postprocessor
+  copies. Two monolithic OpenUSD libraries ran in one process, and the player log said
+  `Multiple definitions of TfEnvSetting variable detected (duplicate 'PXR_WORK_THREAD_LIMIT')`.
+  The importers now leave the Linux player to the postprocessor's tree, the only copy.
+- **A generated `AnimationClip` left Isaac Sim characters in their first pose** Omniverse writes a
+  character's joint hierarchy a second time as `SkelJoint` prims below the Skeleton prim, with the
+  joints' names, so the import had two siblings called `Root`, and the clip, whose curves find their
+  objects by name, animated the prim copies (41 degrees and close to 3 m off on a walk). Prims below
+  a Skeleton prim with no mesh under them are now left out, the joints standing for them; a root
+  joint still sharing a name with a sibling gets a suffix, and `UsdAnimationClipBuilder` warns when
+  a curve's path would reach another object.
+- **`Preserve` turned root prims other than the default prim into empty Xforms** When the export
+  references an imported stage (it sits below the export root, or `ReferenceSource`), a root prim
+  beside the default prim, such as a `SphereLight` or an `OmniGraph`, was written as new content,
+  and what the importer had made for it is not a prim. Each root prim is now referenced by its path,
+  with the edits on it written through that reference.
+- **Built-in projects with URP installed got URP materials** Imported materials took URP's Lit
+  shader whenever it existed, which draws nothing on the Built-in pipeline; the active render
+  pipeline now picks the shader.
+- **A `UsdPreviewSurface` with no `diffuseColor` imported white** The importer started every
+  material at white, but UsdPreviewSurface's own fallback for `diffuseColor` is 0.18 grey (linear),
+  which other renderers show. A surface that leaves it out is now that grey; a mesh with no
+  material at all still gets the default material. Textured surfaces are unchanged (the texture is
+  drawn alone), except that one whose texture cannot be loaded and that authors no colour now
+  falls back to the grey.
+
+### Security
+
+- **No build machine name in the Linux and macOS payloads** TBB's version banner, compiled into the TBB
+  libraries OpenUSD's `build_usd.py` builds on Linux and macOS, recorded the building machine's
+  host name, and the payload shipped it. `Native~/patches/openusd-26.05-tbb-build-host.patch`
+  (pinned for Linux and macOS) writes `unknown` instead, and the Linux and macOS payloads are rebuilt with it.
+  Windows ships Intel's
+  prebuilt TBB, which names only Intel's build machine.
+- **Damaged binary USD files no longer exhaust memory** OpenUSD 26.05's reader for binary layers
+  (`.usdc`, and `.usd`/`.usdz` holding them) allocated for counts read from the file -- array
+  lengths, the token, field, spec and path tables, list and dictionary sizes -- before checking
+  them against it, and value-initialized what it allocated, so the memory was committed. One
+  changed byte in a 921-byte file made it hold 1.3 GB with no error (a compressed integer array
+  whose data was short still "succeeded", decoded from uninitialized memory); on Linux and macOS,
+  which overcommit, such counts could take the whole machine, and damaged path jumps made it
+  spawn work without bound. `UsdImportLimits` could not help: the memory was taken before the
+  import counted anything. `Native~/patches/openusd-26.05-crate-hardening.patch`, pinned and
+  applied by `Native~/build_openusd.py` after the file format patch, checks every count before it
+  sizes an allocation and refuses the file (or the one value) it does not fit. Fuzzing the Windows
+  payload with 8,000 mutated `.usdc` files under a 1 GB cap ran 364 of them out of memory; with the
+  patch none of those nor 20,000 more take over ~100 MB, and files OpenUSD writes read exactly as
+  before. The patch also checks two things that did not take memory: every section in the file's
+  table of contents has to lie inside the file (the ranges went unchecked to the prefetch, which on
+  Linux and macOS advises memory outside the mapping), and time samples have to hold one value per
+  time (with more times than values, the reader took another attribute's samples, of any type, as
+  the missing values, with no error; such a layer is now refused as corrupt). `file_format_test` replays five
+  damaged files (`fuzz_regressions/crate_*.usdc`): three fail it if they raise the process's peak
+  memory by more than 128 MB, and two have to be refused. In the Windows, macOS and Linux
+  payloads.
+- **The Alembic and Draco readers no longer crash on damaged files** A `.usda` that references an
+  `.abc` or `.drc` runs those readers too, so they are part of every import. Fuzzing the payload
+  with 16,000 mutated files (each through the importer's full read) crashed it 724 times, in
+  OpenUSD's usdDraco and usdAbc plugins and in Alembic's reader: heap writes past buffers sized
+  from one part of the file and filled from another (usdDraco's attribute values, Alembic's array
+  samples), a polygon walk off the end of its face table that a mesh written by OpenUSD's own Draco
+  writer also hit, and null samples dereferenced. Two Unity patches fix them, pinned and applied by
+  `Native~/build_openusd.py`: `Native~/patches/openusd-26.05-file-format-hardening.patch` to the
+  plugins and `Native~/patches/alembic-1.8.5-hardening.patch` to the Alembic archive (a new
+  `archive-patch` row kind, which `build_openusd.py` extracts and patches where `build_usd.py`
+  builds it). The same 16,000 files and 8,000 more from two further seeds now crash nothing; a
+  damaged file is an import error, or a mesh without the attribute it damaged.
+- **A damaged Alembic transform no longer crashes the process** An `.abc` whose transform names an
+  operation type Alembic does not have (four changed bytes in a test file) made Alembic's
+  `XformSample::getMatrix` read through a null pointer whenever the transform was evaluated, which
+  every import does. `Native~/patches/alembic-1.8.5-hardening.patch` now refuses the unknown op,
+  and also a transform sample with fewer values than its ops have channels (read past the end of
+  a heap buffer), a `.vals` that is not `float64` or an `.ops` that is not `uint8`, and a missing
+  sample. Found by fuzzing the Linux payload (about 144,000 runs); replayed by
+  `file_format_test` (`fuzz_regressions/abc_xform_unknown_op.abc`). Every payload needs its
+  OpenUSD rebuilt with the new patch.
+- **Capturing native diagnostics no longer corrupts the heap** With
+  `UsdImportOptions.CaptureNativeDiagnostics` (`RUSD_OPEN_CAPTURE_DIAGNOSTICS`) on, OpenUSD's
+  warnings were appended to one string from every TBB worker thread that posted one, unguarded;
+  a damaged `.usdc` whose warnings came from parallel reads aborted the process with
+  `double free or corruption` in two to five of five runs. The buffer is now guarded on every
+  access. Replayed 25 times per run by `file_format_test`
+  (`fuzz_regressions/usdc_diagnostics_capture_race.usdc`).
+- **Face-vertex indices outside a mesh's points are refused** On the path that hands
+  `faceVertexIndices` over unchanged they reached Unity's mesh as written (Unity logged an error),
+  and the other path quietly drew such a corner at point 0. The mesh is now skipped with a warning,
+  as inconsistent face counts are.
+- **Array attributes are read as the type their value has** Normals, texture coordinates and
+  display opacity were taken out of their value by the attribute's declared type name, which is
+  only what the layer claims; a value of another type (a crafted usdc, or damaged Alembic data) was
+  reinterpreted as the declared one. The value's own registered type now decides.
+
+### Changed
+
+- **Reference Look renders the Factory 2.6-3.8 x faster: a shadow budget for point lights**
+  A shadowed point light renders the stage once per cube face. NVIDIA's Factory (40 M triangles,
+  15 sphere lights, a 12-light rect grid) spent most of each frame there. With
+  `UsdImportOptions.PhysicalLightUnits` the importer now keeps shadows on the four strongest
+  sphere, disk and cylinder lights only (switching the other eleven off changed the views by
+  0-2 %), drops the shadows of lights authored invisible (1.5 % of their direct light remains),
+  and stops renderers smaller than 0.4 % of the stage's diagonal from casting shadows (they still
+  receive them; relative to the stage, so a chess set keeps its pieces' shadows). Rect grids and
+  the sun keep theirs. The Factory's seven views went from 137-464 ms to 36-176 ms a frame
+  (mean 235 to 81 ms, 1920 x 1080, RTX A4000), and the 47-scene benchmark from mean CIEDE2000
+  3.61 to 3.43.
+- **Reference Look sample: full render scale and TAA** The pipeline renders at render scale 1 with no
+  upscaling (0.67 with FSR left stairs along thin geometry that Isaac Sim's accumulated samples do
+  not have) and the camera uses TAA instead of SMAA.
+- **The native interface number goes up once per release, and messages name the release**
+  The native plugin's interface number (`RUsd_GetApiVersion`) went up with every change: 0.8.0
+  shipped 12, and development reached 17 within a week, each step a rebuild of three platforms.
+  It now goes up once per release that changes the native interface: everything new since 0.8.0
+  is 13, the 0.8.1 interface. Messages and documentation name the release ("needs the 0.8.1
+  native plugin"), and the table of both is in `BUILD_NOTES.md` and the manual's *Native plugin
+  versions*. A development plugin that reports 14 to 17 loads as a 0.8.0 plugin until rebuilt.
+- **Linux: the TBB OpenUSD runs on is checked** The dynamic linker binds a library's calls in the
+  process's global scope first, so in the Editor OpenUSD runs on the Editor's own
+  `Data/Tools/libtbb.so.2` rather than the payload's (the same TBB 2020.3, interface 11103, in
+  the Editors so far). Renaming the payload's TBB, as Windows does with `tbb_usdrt.dll`, cannot
+  prevent that on Linux: tested, it left the two TBBs serving one process between them. Instead
+  every entry point that opens or creates a stage now refuses, with an error naming the file,
+  a TBB older than the one the payload was built against.
+
+- **Preserve exports keep the source's animation**
+  An override export compared each imported prim with its snapshot and wrote any difference as
+  a Default-time override, which hides every time sample below it: after playback, every
+  animated prim would have been exported frozen in its current pose. Transforms and visibility
+  that the import's `UsdAnimationPlayer` drives are now left to the source; a pose the animation
+  does not explain (an animated object moved by hand) is reported in the console instead of
+  written, since writing it would stop the animation.
+- **`UsdStageSource` records files inside the project by their project path**
+  The import's source was recorded as an absolute path, so a prefab or scene holding an imported
+  stage carried the importing machine's user name and checkout location, and an override export
+  failed for anyone else who opened the project. A file under `Assets` or in a package is now
+  recorded as `Assets/...` or `Packages/<name>/...` (`RecordedSourcePath`); `SourcePath` resolves
+  it to the file on disk in the Editor. Files outside the project are recorded as before. The
+  layers composition arcs name are recorded the same way. `UsdStageImporter` assets reimport once
+  (importer version 2), which also gives them the point caches, dual-quaternion skins and skinned
+  instancer prototypes above.
+- **A plugin older than 0.8.1 says what it lacks**, once per session: skinned meshes import
+  static, no animation is imported and time-sampled values are ignored until the Windows or
+  Linux payload is rebuilt.
+- **Static values are read at the stage's start time**
+  Transforms, points, primvars, visibility, implicit surfaces, lights and cameras are read at
+  `startTimeCode` when the stage authors a time range, otherwise at the earliest time (an
+  attribute's first sample when it has samples, its default when it has none), as a viewer opens
+  the stage. Reading at Default ignored samples: Blender's animated exports author every xformOp
+  only as samples, and their objects all arrived at their parent's origin; a mesh whose points
+  were only sampled imported with no geometry. Such a mesh now imports its first frame, and its
+  other samples as a point cache (see above). Stages without time samples read exactly as before. `RUSD_OPEN_DEFAULT_TIME` restores
+  the old reading. Native read time is unchanged within noise on stages without skeletons
+  (+0.1 to 1.5% on four test stages); a stage with 17 skeletons and 97 skinned meshes reads 4%
+  longer, the cost of reading their weights.
 
 ## [0.8.0-exp.1] - 2026-10-14
 

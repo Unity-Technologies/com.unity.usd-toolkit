@@ -3,7 +3,7 @@
 
 The package ships prebuilt OpenUSD and oneTBB libraries that load in-process, so a consumer
 needs a machine-readable record of what native code they are loading and where it came from
-(SECURITY-282834, CWE-494 remediation 4). This regenerates that record from the payload that is
+(CWE-494 remediation 4). This regenerates that record from the payload that is
 actually checked in: the SHA-256 of every shipped native file is read from the file itself, and
 the source tags, commits, build flags and toolchains are the constants below.
 
@@ -32,9 +32,14 @@ OUTPUT = REPO / "ThirdPartyNotices~" / "sbom.cdx.json"
 USD_TAG = "v26.05"
 USD_VERSION = "26.05"
 USD_COMMIT = "2095faf"  # "Merge release v26.05"
-USD_BUILD_FLAGS = (
+USD_COMMON_FLAGS = (
     "--build-variant release --build-monolithic --no-python --no-imaging --no-usdview "
-    "--no-examples --no-tutorials --no-tests --materialx "
+    "--no-examples --no-tutorials --no-tests --materialx --alembic"
+)
+# Per-library arguments, each its own --build-args entry: build_usd.py keeps everything after the
+# first comma as one string and passes it to CMake as one argument, so two -D options cannot share
+# an entry.
+USD_BUILD_ARGS = [
     # usdMtlx links MaterialXCore and MaterialXFormat and nothing else, but MaterialX defaults
     # MATERIALX_BUILD_RENDER on, which builds the viewer's render back-ends. On Linux that wants
     # libXt and the configure step fails outright ("Error in building MaterialXRenderGlsl: Xt was
@@ -45,13 +50,76 @@ USD_BUILD_FLAGS = (
     # One flag, and it has to stay one flag: MaterialX nests the whole render tree inside
     # if(MATERIALX_BUILD_RENDER) (CMakeLists.txt:473), so RENDER=OFF already skips
     # RENDER_PLATFORMS, RenderGlsl, RenderMsl, RenderHw and RenderOsl. Spelling the second
-    # option out would need a quoted value with a space in it, and build_openusd.py:288 splits
-    # these flags with str.split() rather than shlex, so the quotes do not survive.
-    "--build-args MaterialX,-DMATERIALX_BUILD_RENDER=OFF"
-)
-# The one Unity patch applied to that tree before it is built (SECURITY-282834); pinned by SHA-256
-# in Native~/dependency-sources/<platform>.tsv and applied by Native~/build_openusd.py.
+    # option out would need a quoted value with a space in it, and build_openusd.py splits these
+    # flags with str.split() rather than shlex, so the quotes do not survive.
+    "MaterialX,-DMATERIALX_BUILD_RENDER=OFF",
+    # usdAbc, OpenUSD's file format plugin for Alembic (.abc), is a core plugin, which a monolithic
+    # build compiles into the monolithic library as it does usdMtlx. Alembic and the Imath it reads
+    # numbers with are built static and position-independent, so they link into that library and
+    # the payload gains no file of its own. build_usd.py builds Imath through OpenEXR, so OpenEXR is
+    # compiled too, static, but none of its libraries is linked. OpenEXR fetches Imath with CMake's
+    # FetchContent; downloads are disconnected here, and Native~/build_openusd.py points
+    # FETCHCONTENT_SOURCE_DIR_IMATH at the pinned Imath archive, extracted once its digest checks.
+    "OpenEXR,-DBUILD_SHARED_LIBS=OFF",
+    "OpenEXR,-DCMAKE_POSITION_INDEPENDENT_CODE=ON",
+    "OpenEXR,-DFETCHCONTENT_FULLY_DISCONNECTED=ON",
+    "Alembic,-DALEMBIC_SHARED_LIBS=OFF",
+    "Alembic,-DCMAKE_POSITION_INDEPENDENT_CODE=ON",
+]
+# usdDraco, the file format plugin for Draco-compressed meshes (.drc), the same way, on every
+# platform: build_usd.py refuses Draco in a monolithic Windows build ("This currently results in
+# missing symbols", which only its Python module needs), and openusd-26.05-windows-draco.patch
+# allows it without Python.
+DRACO_FLAGS = "--draco"
+DRACO_BUILD_ARGS = [
+    # build_usd.py passes -DBUILD_SHARED_LIBS=ON first; CMake keeps the last value given.
+    "Draco,-DBUILD_SHARED_LIBS=OFF",
+    "Draco,-DCMAKE_POSITION_INDEPENDENT_CODE=ON",
+]
+DRACO_PLATFORMS = ("macos", "linux", "windows")
+
+
+def usd_build_flags(platform):
+    """build_usd.py's flags for `platform`, as one string Native~/build_openusd.py splits on spaces.
+
+    build_openusd.py adds one more --build-args entry per FetchContent source the platform's record
+    pins (OpenEXR,-DFETCHCONTENT_SOURCE_DIR_IMATH=<the extracted Imath archive>); it depends on
+    where the install is, so it is not part of this string.
+    """
+    draco = platform in DRACO_PLATFORMS
+    return " ".join([USD_COMMON_FLAGS] + ([DRACO_FLAGS] if draco else []) + ["--build-args"] +
+                    USD_BUILD_ARGS + (DRACO_BUILD_ARGS if draco else []))
+
+
+# The libraries the file format plugins link, compiled into each platform's monolithic library.
+ALEMBIC_VERSION = "1.8.5"
+ALEMBIC_ARCHIVE = f"https://github.com/alembic/alembic/archive/refs/tags/{ALEMBIC_VERSION}.zip"
+ALEMBIC_ARCHIVE_SHA256 = "9196561b785102b48a731359642e9fbdf62c3a5183de5caca7c6f03292f474df"
+IMATH_VERSION = "3.1.9"
+IMATH_ARCHIVE = f"https://github.com/AcademySoftwareFoundation/Imath/archive/refs/tags/v{IMATH_VERSION}.zip"
+IMATH_ARCHIVE_SHA256 = "fb0acf39405f587b0ee792cc4053609b2ae5da34ba6a0290d665f08332e87a24"
+OPENEXR_VERSION = "3.1.13"
+OPENEXR_ARCHIVE = f"https://github.com/AcademySoftwareFoundation/openexr/archive/refs/tags/v{OPENEXR_VERSION}.zip"
+OPENEXR_ARCHIVE_SHA256 = "28cd733dbf1e25b942bd31594ffd29c85929822c85116eeda9a67b71fa0b13e8"
+DRACO_VERSION = "1.5.6"
+DRACO_ARCHIVE = f"https://github.com/google/draco/archive/refs/tags/{DRACO_VERSION}.zip"
+DRACO_ARCHIVE_SHA256 = "40ed351fbb4ee4e37d84197a3394567c2f6e4b444f693c1fd37c7bdfc961b0ea"
+# A payload carries a plugin when its plugInfo is shipped beside it; the SBOM lists the plugin's
+# libraries for exactly the payloads that do, so a payload not yet rebuilt is not described as
+# containing them.
+PLUGIN_INFO = "plugin/usd/{plugin}/resources/plugInfo.json"
+
+# The Unity patches applied to that tree before it is built, in order -- LZ4 1.10.0 (security review),
+# then bounds and null checks in the usdDraco and usdAbc plugins -- and the one applied to the Alembic
+# archive; pinned by SHA-256 in Native~/dependency-sources/<platform>.tsv and applied by
+# Native~/build_openusd.py.
 USD_PATCH = "Native~/patches/openusd-26.05-lz4-1.10.0.patch"
+USD_FILE_FORMAT_PATCH = "Native~/patches/openusd-26.05-file-format-hardening.patch"
+USD_CRATE_PATCH = "Native~/patches/openusd-26.05-crate-hardening.patch"
+USD_WINDOWS_DRACO_PATCH = "Native~/patches/openusd-26.05-windows-draco.patch"
+# macOS and Linux only: Windows takes Intel's prebuilt TBB, which the patch does not touch.
+USD_TBB_BUILD_HOST_PATCH = "Native~/patches/openusd-26.05-tbb-build-host.patch"
+ALEMBIC_PATCH = "Native~/patches/alembic-1.8.5-hardening.patch"
 LZ4_VERSION = "1.10.0"
 LZ4_UPSTREAM_VERSION = "1.9.2"  # what OpenUSD v26.05 itself vendors
 USD_LICENSE = "Tomorrow Open Source Technology License 1.0"
@@ -62,7 +130,7 @@ UNITY_LICENSE = "Unity Companion License / see LICENSE.md"
 TOOLCHAIN = {
     "macOS universal": (
         "macOS 26.6.2 (25G83), Xcode 26.6 (17F113), Apple clang 21.0.0 (clang-2100.1.1.101), "
-        "CMake 4.3.2, SDK 26.5, x86_64+arm64"
+        "CMake 3.31.6 (OpenUSD) and 4.3.2 (wrapper), SDK 26.5, x86_64+arm64"
     ),
     "Windows x64": (
         "Windows, VS Build Tools 2022 (MSVC 14.44), Windows SDK 10.0.26100, CMake 4.3.3, x64"
@@ -166,9 +234,9 @@ def named_license(name):
 
 def component(bom_ref, name, version, *, shipped_path=None, purl=None, licenses=None,
               description=None, properties=(), external_refs=None, nested=None, pedigree=None,
-              kind="library"):
+              kind="library", scope="required"):
     entry = {"bom-ref": bom_ref, "type": kind, "name": name, "version": version,
-             "scope": "required"}
+             "scope": scope}
     if description:
         entry["description"] = description
     if purl:
@@ -247,9 +315,86 @@ def usd_patch():
         "resolves": [
             dict(CVE_2021_3520, name=("LZ4 1.9.2 memmove() with a negative size; OpenUSD's "
                                       "crate reader could pass an output size above INT_MAX")),
-            {"type": "security", "id": "SECURITY-282834",
+            {"type": "security", "id": "security-review-2026-09",
              "name": ("TfFastCompression::DecompressFromBuffer did not check chunk count or "
                       "chunk sizes read from the file against the buffer")},
+        ],
+    }
+
+
+def file_format_patch():
+    """The Unity patch to the usdDraco and usdAbc plugins in the OpenUSD tree."""
+    return {
+        "type": "unofficial",
+        "diff": {"url": USD_FILE_FORMAT_PATCH},
+        "resolves": [
+            {"type": "defect", "name": ("usdDraco wrote past its value buffers and read outside its "
+                                        "face table on indices and strides read from the file, "
+                                        "and crashed on meshes UsdDraco_WriteDraco itself wrote")},
+            {"type": "defect", "name": ("usdAbc dereferenced the null samples Alembic returns under "
+                                        "kQuietNoopPolicy for data it cannot read")},
+        ],
+    }
+
+
+def crate_patch():
+    """The Unity patch to OpenUSD's binary layer (crate) reader."""
+    return {
+        "type": "unofficial",
+        "diff": {"url": USD_CRATE_PATCH},
+        "resolves": [
+            {"type": "defect", "name": ("The crate (.usdc) reader allocated, and value-initialized, "
+                                        "for array, table, list and dictionary counts read from the "
+                                        "file before checking them against it, so a damaged file "
+                                        "could exhaust memory, and kept compressed integer arrays "
+                                        "whose data was short, decoded from uninitialized memory")},
+            {"type": "defect", "name": ("Damaged path jumps made the crate reader spawn tasks without "
+                                        "bound and write one path from several threads, and deeply "
+                                        "nested values overflowed the stack")},
+            {"type": "defect", "name": ("The crate reader took table-of-contents section ranges "
+                                        "outside the file and unterminated section names unchecked, "
+                                        "and time samples with more times than values read other "
+                                        "data as their values")},
+        ],
+    }
+
+
+def windows_draco_patch():
+    """The Unity patch that lets OpenUSD build usdDraco into a monolithic Windows library."""
+    return {
+        "type": "unofficial",
+        "diff": {"url": USD_WINDOWS_DRACO_PATCH},
+        "resolves": [
+            {"type": "enhancement", "name": ("OpenUSD refused the Draco plugin in any monolithic "
+                                             "Windows build, for missing symbols only its Python "
+                                             "module needs; allowed without Python")},
+            {"type": "enhancement", "name": ("usdDraco's writer (UsdDraco_WriteDraco) exported from "
+                                             "the OpenUSD library, so .drc files can be written")},
+        ],
+    }
+
+
+def tbb_build_host_patch():
+    """The Unity patch that keeps the build machine's name out of the TBB build_usd.py builds."""
+    return {
+        "type": "unofficial",
+        "diff": {"url": USD_TBB_BUILD_HOST_PATCH},
+        "resolves": [
+            {"type": "defect", "name": ("TBB's version banner, built into the macOS and Linux TBB "
+                                        "libraries, named the machine that built them")},
+        ],
+    }
+
+
+def alembic_patch():
+    """The Unity patch to the Alembic archive."""
+    return {
+        "type": "unofficial",
+        "diff": {"url": ALEMBIC_PATCH},
+        "resolves": [
+            {"type": "defect", "name": ("Ogawa reader copied a data block into a buffer sized by a "
+                                        "separate, unchecked dimensions block (heap overflow), and "
+                                        "dereferenced null data and samples")},
         ],
     }
 
@@ -333,6 +478,70 @@ def materialx_source():
         nested=[pugixml])
 
 
+def archive_source(bom_ref, name, version, purl, license_id, license_file, archive, sha256,
+                   description, vcs, scope="required", patch=None):
+    """A library built from a pinned upstream archive by the same build_usd.py run as OpenUSD,
+    with `patch` (a pedigree patch) applied to the extracted archive first."""
+    properties = [("unity:sourceArchive", archive), ("unity:sourceArchiveSha256", sha256),
+                  ("unity:licenseText", f"ThirdPartyNotices~/licenses/{license_file}")]
+    if patch:
+        properties += [("unity:patch", patch["diff"]["url"]),
+                       ("unity:patchSha256", sha256_of(patch["diff"]["url"]))]
+    return component(
+        bom_ref, name, version, purl=purl, licenses=spdx(license_id), description=description,
+        scope=scope, properties=properties,
+        external_refs=[{"type": "vcs", "url": vcs},
+                       {"type": "distribution", "url": archive,
+                        "hashes": [{"alg": "SHA-256", "content": sha256}]}],
+        pedigree={"patches": [patch]} if patch else None)
+
+
+def file_format_sources():
+    """The libraries the Alembic and Draco file format plugins link into the monolithic library,
+    and OpenEXR, which is compiled only to build Imath and of which nothing ships."""
+    return [
+        archive_source(
+            "alembic-source", "Alembic", ALEMBIC_VERSION, f"pkg:github/alembic/alembic@{ALEMBIC_VERSION}",
+            "BSD-3-Clause", "Alembic-LICENSE.txt", ALEMBIC_ARCHIVE, ALEMBIC_ARCHIVE_SHA256,
+            "Alembic, built static (Ogawa only, no HDF5) and linked into the monolithic OpenUSD "
+            "library by usdAbc, the plugin that reads and writes .abc files, with the Unity patch "
+            "in this component's pedigree applied.",
+            "https://github.com/alembic/alembic", patch=alembic_patch()),
+        archive_source(
+            "imath-source", "Imath", IMATH_VERSION,
+            f"pkg:github/AcademySoftwareFoundation/Imath@v{IMATH_VERSION}", "BSD-3-Clause",
+            "Imath-LICENSE.txt", IMATH_ARCHIVE, IMATH_ARCHIVE_SHA256,
+            "Imath, the vector and half-float types Alembic uses, built static by OpenEXR's build "
+            "from the pinned archive (FetchContent pointed at it, downloads disconnected) and linked "
+            "into the monolithic OpenUSD library with Alembic.",
+            "https://github.com/AcademySoftwareFoundation/Imath"),
+        archive_source(
+            "openexr-source", "OpenEXR", OPENEXR_VERSION,
+            f"pkg:github/AcademySoftwareFoundation/openexr@v{OPENEXR_VERSION}", "BSD-3-Clause",
+            "OpenEXR-LICENSE.txt", OPENEXR_ARCHIVE, OPENEXR_ARCHIVE_SHA256,
+            "Compiled by build_usd.py only because it builds Alembic's Imath through OpenEXR. None "
+            "of its libraries is linked into any shipped file.",
+            "https://github.com/AcademySoftwareFoundation/openexr", scope="excluded"),
+        archive_source(
+            "draco-source", "Draco", DRACO_VERSION, f"pkg:github/google/draco@{DRACO_VERSION}",
+            "Apache-2.0", "Draco-LICENSE.txt", DRACO_ARCHIVE, DRACO_ARCHIVE_SHA256,
+            "Draco, built static and linked into the monolithic OpenUSD library by usdDraco, the "
+            "plugin that reads .drc meshes. Its third_party directory (eigen, filesystem, "
+            "googletest, tinygltf) serves the tests and the glTF transcoder, which are not built.",
+            "https://github.com/google/draco"),
+    ]
+
+
+def plugin_libraries(payload_root):
+    """The file format libraries a payload carries, judged by the plugins it ships."""
+    refs = []
+    if (REPO / payload_root / PLUGIN_INFO.format(plugin="usdAbc")).is_file():
+        refs += ["alembic-source", "imath-source"]
+    if (REPO / payload_root / PLUGIN_INFO.format(plugin="usdDraco")).is_file():
+        refs += ["draco-source"]
+    return refs
+
+
 def mtlx_libraries():
     """usdMtlx's resource data, one component for the identical tree each platform ships."""
     digests = {platform: tree_sha256(f"{root}/{MTLX_LIBRARIES}")
@@ -371,22 +580,35 @@ def build_bom():
         licenses=named_license(USD_LICENSE),
         description=("The source every shipped OpenUSD payload is built from: public tag "
                      f"{USD_TAG}, commit {USD_COMMIT} (\"Merge release v26.05\"), with the Unity "
-                     "patch in this component's pedigree applied, monolithic, the same flags on "
+                     "patches in this component's pedigree applied, monolithic, the same flags on "
                      "every platform."),
         properties=[("unity:sourceTag", USD_TAG), ("unity:sourceCommit", USD_COMMIT),
                     ("unity:patch", USD_PATCH), ("unity:patchSha256", sha256_of(USD_PATCH)),
-                    ("unity:buildFlags", USD_BUILD_FLAGS),
+                    ("unity:patch", USD_FILE_FORMAT_PATCH),
+                    ("unity:patchSha256", sha256_of(USD_FILE_FORMAT_PATCH)),
+                    ("unity:patch", USD_CRATE_PATCH),
+                    ("unity:patchSha256", sha256_of(USD_CRATE_PATCH)),
+                    ("unity:patch", USD_WINDOWS_DRACO_PATCH),
+                    ("unity:patchSha256", sha256_of(USD_WINDOWS_DRACO_PATCH)),
+                    ("unity:patch", USD_TBB_BUILD_HOST_PATCH),
+                    ("unity:patchSha256", sha256_of(USD_TBB_BUILD_HOST_PATCH)),
+                    ("unity:buildFlags (macOS universal)", usd_build_flags("macos")),
+                    ("unity:buildFlags (Windows x64)", usd_build_flags("windows")),
+                    ("unity:buildFlags (Linux x64)", usd_build_flags("linux")),
                     ("unity:licenseText", "ThirdPartyNotices~/licenses/OpenUSD-LICENSE.txt"),
                     ("unity:noticeText", "ThirdPartyNotices~/licenses/OpenUSD-NOTICE.txt")],
         external_refs=USD_REFS, nested=vendored,
-        pedigree={"patches": [usd_patch()]})
+        pedigree={"patches": [usd_patch(), file_format_patch(), crate_patch(), windows_draco_patch(),
+                             tbb_build_host_patch()]})
 
     mtlx_source = materialx_source()
+    file_formats = file_format_sources()
 
     components = [
         openusd_source,
         mtlx_source,
         mtlx_libraries(),
+        *file_formats,
         openusd_binary("usd-macos", "Runtime/Plugins/macOS/libusd_ms.dylib", "macOS universal"),
         openusd_binary("usd-windows", "Runtime/Plugins/x86_64/Windows/usd_rt.dll", "Windows x64"),
         openusd_binary("usd-linux", "Runtime/Plugins/x86_64/Linux/lib/libusd_ms.so", "Linux x64"),
@@ -464,7 +686,7 @@ def build_bom():
                 "licenses": named_license(UNITY_LICENSE),
             },
             "properties": [
-                {"name": "unity:securityTicket", "value": "SECURITY-282834"},
+                {"name": "unity:securityReview", "value": "security-review-2026-09"},
                 {"name": "unity:provenanceNote", "value": PROVENANCE_NOTE},
             ],
         },
@@ -472,17 +694,21 @@ def build_bom():
         "dependencies": [
             {"ref": package["name"],
              "dependsOn": [c["bom-ref"] for c in components
-                           if c["bom-ref"] not in ("openusd-source", "materialx-source")]},
+                           if c["bom-ref"] not in ("openusd-source", "materialx-source") and
+                           c.get("scope") != "excluded" and c not in file_formats]},
             # libdeflate sits in the OpenUSD tree but no OpenUSD binary contains it.
             {"ref": "openusd-source",
              "dependsOn": [c["bom-ref"] for c in vendored if c["bom-ref"] != "libdeflate"]},
             {"ref": "materialx-source", "dependsOn": ["pugixml"]},
             {"ref": "materialx-libraries", "dependsOn": ["materialx-source"]},
-            {"ref": "usd-macos", "dependsOn": ["openusd-source", "tbb-macos"] + macos_materialx},
+            {"ref": "usd-macos", "dependsOn": ["openusd-source", "tbb-macos"] + macos_materialx +
+             plugin_libraries(MTLX_LIBRARY_ROOTS["macOS universal"])},
             {"ref": "usd-windows", "dependsOn": ["openusd-source", "tbb-windows",
-                                                "materialx-core-windows", "materialx-format-windows"]},
+                                                "materialx-core-windows", "materialx-format-windows"] +
+             plugin_libraries(MTLX_LIBRARY_ROOTS["Windows x64"])},
             {"ref": "usd-linux", "dependsOn": ["openusd-source", "tbb-linux",
-                                              "materialx-core-linux", "materialx-format-linux"]},
+                                              "materialx-core-linux", "materialx-format-linux"] +
+             plugin_libraries(MTLX_LIBRARY_ROOTS["Linux x64"])},
             {"ref": "materialx-core-linux", "dependsOn": ["materialx-source"]},
             {"ref": "materialx-format-linux",
              "dependsOn": ["materialx-source", "pugixml", "materialx-core-linux"]},

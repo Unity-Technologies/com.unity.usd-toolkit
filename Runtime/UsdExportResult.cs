@@ -16,6 +16,12 @@ namespace Unity.USDToolkit
         public int VertexCount { get; internal set; }
         public int TriangleCount { get; internal set; }
 
+        /// <summary>UsdLux lights written (the 0.8.1 native plugin, <see cref="UsdExportOptions.ExportLights"/>).</summary>
+        public int LightCount { get; internal set; }
+
+        /// <summary>UsdGeomCameras written (the 0.8.1 native plugin, <see cref="UsdExportOptions.ExportCameras"/>).</summary>
+        public int CameraCount { get; internal set; }
+
         public IReadOnlyList<UsdExportedMeshInfo> Meshes => meshes;
 
         /// <summary>The composition mode the export ran in.</summary>
@@ -35,6 +41,12 @@ namespace Unity.USDToolkit
 
         /// <summary>Opinions written over referenced or sublayered content (moves, visibility, deactivations, additions).</summary>
         public int OverrideCount { get; internal set; }
+
+        /// <summary>
+        /// Imported objects moved under another parent and written as relocates: the source prim,
+        /// with everything its composition brings, composed at the new place.
+        /// </summary>
+        public int RelocateCount { get; internal set; }
 
         /// <summary>Prefab assets and mesh prototypes written once and shared.</summary>
         public int PrototypeCount { get; internal set; }
@@ -78,6 +90,14 @@ namespace Unity.USDToolkit
             builder.Append(" vertices, ");
             builder.Append(TriangleCount);
             builder.Append(" triangles");
+            if (LightCount > 0 || CameraCount > 0)
+            {
+                builder.Append(", ");
+                builder.Append(LightCount);
+                builder.Append(" light(s), ");
+                builder.Append(CameraCount);
+                builder.Append(" camera(s)");
+            }
 
             if (Composition == UsdCompositionMode.Preserve)
             {
@@ -86,6 +106,8 @@ namespace Unity.USDToolkit
                 builder.Append(" reference(s), ");
                 builder.Append(OverrideCount);
                 builder.Append(" override(s), ");
+                builder.Append(RelocateCount);
+                builder.Append(" relocate(s), ");
                 builder.Append(PrototypeCount);
                 builder.Append(" shared prototype(s)");
             }

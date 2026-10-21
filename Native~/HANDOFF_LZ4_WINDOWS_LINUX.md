@@ -13,7 +13,7 @@ into for the gates (Gate 1–10), prerequisites (§3) and troubleshooting (Appen
 
 ## 0. Where the branch stands
 
-Why: SECURITY-282834 blocking finding *"Bundled OpenUSD dependency parsers as vulnerable/unscanned
+Why: security review blocking finding *"Bundled OpenUSD dependency parsers as vulnerable/unscanned
 components (LZ4 1.9.2)"* (CWE-1104, CVE-2021-3520). OpenUSD v26.05 vendors LZ4 1.9.2; its `.usdc`
 reader could hand LZ4 a negative output size, which is the CVE trigger.
 `Native~/patches/openusd-26.05-lz4-1.10.0.patch` replaces the vendored LZ4 with 1.10.0 and
@@ -47,7 +47,7 @@ Linux, every gate green, pushed to `security/lz4-1.10.0`, and the report in §6 
 ## 1. Both machines — before building
 
 ```bash
-git clone https://github.cds.internal.unity3d.com/unity/com.unity.usd-toolkit.git   # or reuse a clone
+git clone https://github.com/Unity-Technologies/com.unity.usd-toolkit.git   # or reuse a clone
 cd com.unity.usd-toolkit
 git lfs install
 git fetch origin
@@ -132,7 +132,7 @@ Remove-Item -Recurse -Force Native~\build~ -ErrorAction SilentlyContinue
 - `-RecordDependencyDigests`: the OpenUSD tree changed, so the record is rewritten; it only works
   because the install carries a valid stamp (P13).
 - `-SkipSigning`: the committed Windows DLLs are unsigned on purpose; CI's `sign_windows` signs
-  them at release (`.yamato/README.md`). Never sign `tbb_usdrt.dll` (P12).
+  them at release (the CI configuration). Never sign `tbb_usdrt.dll` (P12).
 - Expect `Renamed OpenUSD monolithic usd_ms.dll -> usd_rt.dll ...` and `Renamed Intel tbb.dll ->
   tbb_usdrt.dll ...`.
 

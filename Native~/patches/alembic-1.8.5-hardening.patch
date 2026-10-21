@@ -1,0 +1,337 @@
+Unity USD Toolkit patch to Alembic 1.8.5 (archive https://github.com/alembic/alembic/archive/refs/tags/1.8.5.zip,
+tag 1.8.5, commit f4e3cc33e4270ade9d076a2cac7a2a4409c61675): bounds and null checks in the Ogawa reader.
+
+Applied by Native~/build_openusd.py to the checked archive, extracted where build_usd.py extracts it;
+its SHA-256 is pinned in Native~/dependency-sources/<platform>.tsv (an archive-patch row). Every change
+is marked "Unity USD Toolkit" in the source. Found by fuzzing the payload's usdAbc plugin, which reads
+Alembic through this code; files Alembic writes read exactly as before.
+
+1. AbcCoreOgawa/ReadUtil.cpp, ReadDimensions: a sample whose group entries are not data comes back
+   as null IDataPtrs (IGroup::getData), which were dereferenced; a data block shorter than its
+   16-byte key underflowed the element count. Above all, the dimensions and the data are separate
+   blocks, and the reader sizes its buffer from the dimensions and copies the whole data block into
+   it: dimensions smaller than the data wrote past the buffer (to a null one when they said 0). A
+   plain POD array now has to fill exactly its data block, and a string array can hold no more
+   strings than the block has bytes.
+2. ReadData takes how many PODs (strings) its destination holds and writes no more: the string loops
+   wrote one std::string per 0 byte in the data, however many the destination had. ReadArraySample,
+   AprImpl::getAs (which reads and checks the dimensions again for this) and SprImpl::getSample pass
+   it; a POD with no size (which divided by zero, a trap on x86_64) is refused.
+3. AbcGeom/IGeomParam.h, getIndexed/getExpanded: null samples are refused, and each index has to
+   name a value before getExpanded reads it.
+4. AbcGeom/IXform.cpp: an xform op type outside XformOperationType is refused (it left the op with
+   no channels, which XformSample::getMatrix read through a null pointer), and so is a sample whose
+   .vals hold fewer values than the ops have channels (read past the heap buffer), a .vals that is
+   not float64 or an .ops that is not uint8 (read or written as the wrong size), and a missing
+   .vals sample. Found by the Linux fuzz run on 2026-10-17.
+
+diff --git a/lib/Alembic/AbcCoreOgawa/AprImpl.cpp b/lib/Alembic/AbcCoreOgawa/AprImpl.cpp
+index ae30edd..124b69d 100644
+--- a/lib/Alembic/AbcCoreOgawa/AprImpl.cpp
++++ b/lib/Alembic/AbcCoreOgawa/AprImpl.cpp
+@@ -198,8 +198,14 @@ void AprImpl::getAs( index_t iSampleIndex, void *iIntoLocation,
+         AbcA::ArchiveReader > ( getObject()->getArchive() )->getStreamID();
+ 
+     std::size_t id = streamId->getID();
++    // Unity USD Toolkit: the caller sized iIntoLocation from getDimensions; the dimensions are
++    // read (and checked against the data) again here so ReadData knows that size.
++    Ogawa::IDataPtr dims = m_group->getData( index + 1, id );
+     Ogawa::IDataPtr data = m_group->getData( index, id );
+-    ReadData( iIntoLocation, data, id, m_header->header.getDataType(), iPod );
++    Alembic::Util::Dimensions dim;
++    ReadDimensions( dims, data, id, m_header->header.getDataType(), dim );
++    ReadData( iIntoLocation, data, id, m_header->header.getDataType(), iPod,
++              dim.numPoints() * m_header->header.getDataType().getExtent() );
+ }
+ 
+ } // End namespace ALEMBIC_VERSION_NS
+diff --git a/lib/Alembic/AbcCoreOgawa/ReadUtil.cpp b/lib/Alembic/AbcCoreOgawa/ReadUtil.cpp
+index 4850730..5989d2f 100644
+--- a/lib/Alembic/AbcCoreOgawa/ReadUtil.cpp
++++ b/lib/Alembic/AbcCoreOgawa/ReadUtil.cpp
+@@ -59,6 +59,13 @@ ReadDimensions( Ogawa::IDataPtr iDims,
+                 const AbcA::DataType &iDataType,
+                 Util::Dimensions & oDim )
+ {
++    // Unity USD Toolkit: a sample whose group entries are not data comes back as null pointers
++    // (IGroup::getData), which were dereferenced here.
++    if ( !iDims || !iData )
++    {
++        ABCA_THROW( "ReadDimensions invalid: Null IDataPtr." );
++    }
++
+     // find it based on of the size of the data
+     if ( iDims->getSize() == 0 )
+     {
+@@ -68,6 +75,9 @@ ReadDimensions( Ogawa::IDataPtr iDims,
+         }
+         else
+         {
++            // Unity USD Toolkit: data shorter than its 16-byte key underflowed the size.
++            ABCA_ASSERT( iData->getSize() >= 16 && iDataType.getNumBytes() > 0,
++                "ReadDimensions invalid: data too short for its key." );
+             oDim = Util::Dimensions( ( iData->getSize() - 16 ) /
+                                      iDataType.getNumBytes() );
+         }
+@@ -93,6 +103,32 @@ ReadDimensions( Ogawa::IDataPtr iDims,
+             oDim[i] = dims[i];
+         }
+     }
++
++    // Unity USD Toolkit: the dimensions and the data are separate blocks of the file, and the
++    // reader sizes its buffer from the dimensions and then copies the whole data block into it
++    // (ReadData): dimensions smaller than the data wrote past the buffer, or to a null one when
++    // they said 0. A plain POD array has to fill exactly its data block; a string array can hold
++    // no more strings than the block has bytes, each ending in a 0.
++    const Util::uint64_t dataSize = iData->getSize();
++    if ( dataSize >= 16 )
++    {
++        const Util::uint64_t numPoints = oDim.numPoints();
++        const Util::uint64_t extent = iDataType.getExtent();
++        const Util::PlainOldDataType pod = iDataType.getPod();
++        if ( pod == Util::kStringPOD || pod == Util::kWstringPOD )
++        {
++            ABCA_ASSERT( extent == 0 || numPoints <= ( dataSize - 16 ) / extent,
++                "ReadDimensions invalid: more strings than the data holds." );
++        }
++        else
++        {
++            const Util::uint64_t numBytes = iDataType.getNumBytes();
++            ABCA_ASSERT( numBytes > 0 &&
++                ( numPoints == 0 || numPoints <= ( dataSize - 16 ) / numBytes ) &&
++                numPoints * numBytes == dataSize - 16,
++                "ReadDimensions invalid: dimensions do not match the data size." );
++        }
++    }
+ }
+ 
+ //-*****************************************************************************
+@@ -1313,7 +1349,8 @@ ReadData( void * iIntoLocation,
+           Ogawa::IDataPtr iData,
+           size_t iThreadId,
+           const AbcA::DataType &iDataType,
+-          Util::PlainOldDataType iAsPod )
++          Util::PlainOldDataType iAsPod,
++          std::size_t iNumElements )
+ {
+     Alembic::Util::PlainOldDataType curPod = iDataType.getPod();
+     ABCA_ASSERT( ( iAsPod == curPod ) || (
+@@ -1358,6 +1395,11 @@ ReadData( void * iIntoLocation,
+         {
+             if ( buf[i] == 0 )
+             {
++                // Unity USD Toolkit: no more strings than the destination holds.
++                if ( strPos >= iNumElements )
++                {
++                    break;
++                }
+                 strPtr[strPos] = buf + startStr;
+                 startStr = i + 1;
+                 strPos ++;
+@@ -1386,6 +1428,11 @@ ReadData( void * iIntoLocation,
+         // strings above
+         for ( std::size_t i = 0; i < numChars; ++i )
+         {
++            // Unity USD Toolkit: no more strings than the destination holds.
++            if ( strPos >= iNumElements )
++            {
++                break;
++            }
+             std::wstring & wstr = wstrPtr[strPos];
+             if ( buf[i] == 0 )
+             {
+@@ -1399,6 +1446,13 @@ ReadData( void * iIntoLocation,
+ 
+         delete [] buf;
+     }
++    else if ( PODNumBytes( curPod ) == 0 ||
++              ( dataSize - 16 ) / PODNumBytes( curPod ) > iNumElements )
++    {
++        // Unity USD Toolkit: more values than the destination holds (or a POD with no size,
++        // which divided by zero: a trap on x86_64).
++        ABCA_THROW( "ReadData invalid: data larger than its destination." );
++    }
+     else if ( iAsPod == curPod )
+     {
+         // don't read the key
+@@ -1445,7 +1499,8 @@ ReadArraySample( Ogawa::IDataPtr iDims,
+     oSample = AbcA::AllocateArraySample( iDataType, dims );
+ 
+     ReadData( const_cast<void*>( oSample->getData() ), iData,
+-        iThreadId, iDataType, iDataType.getPod() );
++        iThreadId, iDataType, iDataType.getPod(),
++        dims.numPoints() * iDataType.getExtent() );
+ 
+ }
+ 
+diff --git a/lib/Alembic/AbcCoreOgawa/ReadUtil.h b/lib/Alembic/AbcCoreOgawa/ReadUtil.h
+index a3d083b..c1093e1 100644
+--- a/lib/Alembic/AbcCoreOgawa/ReadUtil.h
++++ b/lib/Alembic/AbcCoreOgawa/ReadUtil.h
+@@ -57,12 +57,15 @@ ReadDimensions( Ogawa::IDataPtr iDims,
+                 Util::Dimensions & oDim );
+ 
+ //-*****************************************************************************
++// Unity USD Toolkit: iNumElements is how many PODs iIntoLocation holds (strings for the string
++// PODs); nothing is written past it.
+ void
+ ReadData( void * iIntoLocation,
+           Ogawa::IDataPtr iData,
+           size_t iThreadId,
+           const AbcA::DataType &iDataType,
+-          Util::PlainOldDataType iAsPod );
++          Util::PlainOldDataType iAsPod,
++          std::size_t iNumElements );
+ 
+ //-*****************************************************************************
+ void
+diff --git a/lib/Alembic/AbcCoreOgawa/SprImpl.cpp b/lib/Alembic/AbcCoreOgawa/SprImpl.cpp
+index be06ae0..309c96a 100644
+--- a/lib/Alembic/AbcCoreOgawa/SprImpl.cpp
++++ b/lib/Alembic/AbcCoreOgawa/SprImpl.cpp
+@@ -121,7 +121,8 @@ void SprImpl::getSample( index_t iSampleIndex, void * iIntoLocation )
+                     data->getSize() - 16 );
+     }
+ 
+-    ReadData( iIntoLocation, data, id, dt, dt.getPod() );
++    // Unity USD Toolkit: a scalar sample holds one value of `extent` PODs.
++    ReadData( iIntoLocation, data, id, dt, dt.getPod(), dt.getExtent() );
+ }
+ 
+ //-*****************************************************************************
+diff --git a/lib/Alembic/AbcGeom/IGeomParam.h b/lib/Alembic/AbcGeom/IGeomParam.h
+index 9ee8052..e7139d5 100644
+--- a/lib/Alembic/AbcGeom/IGeomParam.h
++++ b/lib/Alembic/AbcGeom/IGeomParam.h
+@@ -326,6 +326,11 @@ ITypedGeomParam<TRAITS>::getIndexed( typename ITypedGeomParam<TRAITS>::Sample &o
+     if ( m_indicesProperty ) { m_indicesProperty.get( oSamp.m_indices, iSS ); }
+     else
+     {
++        // Unity USD Toolkit: a sample can come back empty from a damaged file.
++        if ( !oSamp.m_vals )
++        {
++            ABCA_THROW( "ITypedGeomParam::getIndexed: no value sample." );
++        }
+         uint32_t size = static_cast< uint32_t > ( oSamp.m_vals->size() );
+ 
+         uint32_t *v = new uint32_t[size];
+@@ -363,6 +368,12 @@ ITypedGeomParam<TRAITS>::getExpanded( typename ITypedGeomParam<TRAITS>::Sample &
+     {
+         Abc::UInt32ArraySamplePtr idxPtr = m_indicesProperty.getValue( iSS );
+ 
++        // Unity USD Toolkit: a sample can come back empty from a damaged file.
++        if ( !idxPtr )
++        {
++            ABCA_THROW( "ITypedGeomParam::getExpanded: no index sample." );
++        }
++
+         size_t size = idxPtr->size();
+ 
+         // no indices?  just return what we have in our values
+@@ -375,6 +386,20 @@ ITypedGeomParam<TRAITS>::getExpanded( typename ITypedGeomParam<TRAITS>::Sample &
+         Alembic::Util::shared_ptr< Abc::TypedArraySample<TRAITS> > valPtr = \
+             m_valProp.getValue( iSS );
+ 
++        // Unity USD Toolkit: the indices are read from the file; each has to name a value.
++        if ( !valPtr )
++        {
++            ABCA_THROW( "ITypedGeomParam::getExpanded: no value sample." );
++        }
++        const size_t numVals = valPtr->size();
++        for ( size_t i = 0 ; i < size ; ++i )
++        {
++            if ( (*idxPtr)[i] >= numVals )
++            {
++                ABCA_THROW( "ITypedGeomParam::getExpanded: index out of range." );
++            }
++        }
++
+         typename TRAITS::value_type *v = new typename TRAITS::value_type[size];
+ 
+         for ( size_t i = 0 ; i < size ; ++i )
+diff --git a/lib/Alembic/AbcGeom/IXform.cpp b/lib/Alembic/AbcGeom/IXform.cpp
+index ca36965..5001677 100644
+--- a/lib/Alembic/AbcGeom/IXform.cpp
++++ b/lib/Alembic/AbcGeom/IXform.cpp
+@@ -129,11 +129,28 @@ void IXformSchema::init( const Abc::Argument &iArg0,
+     {
+ 
+         std::size_t numOps = ops->getHeader().getDataType().getExtent();
++        // Unity USD Toolkit: .ops is read as one byte per op; a header that declares another POD
++        // (or none) made getSample write that many larger values into opVec, and front() on an
++        // empty vector is undefined.
++        if ( ops->getHeader().getDataType().getPod() != Alembic::Util::kUint8POD )
++        {
++            ABCA_THROW( "IXformSchema::init(): .ops is not uint8." );
++        }
+         std::vector<Alembic::Util::uint8_t> opVec( numOps );
+-        ops->getSample( 0, &(opVec.front()) );
++        if ( numOps > 0 )
++        {
++            ops->getSample( 0, &(opVec.front()) );
++        }
+ 
+         for ( std::size_t i = 0; i < numOps; ++i )
+         {
++            // Unity USD Toolkit: the op type is the high nibble of a byte from the file. A type
++            // outside XformOperationType left the op with no channels, and XformSample::getMatrix
++            // then read channel 0..2 through a null pointer.
++            if ( ( opVec[i] >> 4 ) > kRotateZOperation )
++            {
++                ABCA_THROW( "IXformSchema::init(): unknown xform operation type." );
++            }
+             XformOp op( opVec[i] );
+             m_sample.addOp( op );
+         }
+@@ -237,20 +254,49 @@ void IXformSchema::getChannelValues( const AbcA::index_t iSampleIndex,
+ {
+     std::vector<Alembic::Util::float64_t> dataVec;
+ 
++    // Unity USD Toolkit: .vals is read as float64 below whatever its header says. A narrower POD
++    // read past the sample's data; a scalar of a wider one (or of strings) was written into a
++    // vector of doubles.
++    if ( m_valsProperty->getDataType().getPod() != Alembic::Util::kFloat64POD )
++    {
++        ABCA_THROW( "IXformSchema::getChannelValues(): .vals is not float64." );
++    }
++
+     if ( m_useArrayProp )
+     {
+         AbcA::ArraySamplePtr sptr;
+         m_valsProperty->asArrayPtr()->getSample( iSampleIndex, sptr );
+ 
++        // Unity USD Toolkit: no sample is no values, not a null dereference.
++        if ( !sptr || !sptr->getData() )
++        {
++            ABCA_THROW( "IXformSchema::getChannelValues(): no .vals sample." );
++        }
++
+         dataVec.assign(
+             static_cast<const Alembic::Util::float64_t*>( sptr->getData() ),
+             static_cast<const Alembic::Util::float64_t*>( sptr->getData() ) +
+-            sptr->size() );
++            sptr->size() * sptr->getDataType().getExtent() );
+     }
+     else
+     {
+         dataVec.resize( m_valsProperty->asScalarPtr()->getDataType().getExtent() );
+-        m_valsProperty->asScalarPtr()->getSample( iSampleIndex, &(dataVec.front()) );
++        if ( !dataVec.empty() )
++        {
++            m_valsProperty->asScalarPtr()->getSample( iSampleIndex, &(dataVec.front()) );
++        }
++    }
++
++    // Unity USD Toolkit: the ops name more channels than .vals has values; each op's channels
++    // were read from dataVec without a bound, past the end of the heap buffer.
++    std::size_t numChannels = 0;
++    for ( std::size_t i = 0; i < oSamp.m_ops.size(); ++i )
++    {
++        numChannels += oSamp.m_ops[i].getNumChannels();
++    }
++    if ( numChannels > dataVec.size() )
++    {
++        ABCA_THROW( "IXformSchema::getChannelValues(): .vals has fewer values than the ops have channels." );
+     }
+ 
+     std::vector< XformOp >::iterator op = oSamp.m_ops.begin();

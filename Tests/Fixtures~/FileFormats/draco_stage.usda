@@ -1,0 +1,20 @@
+#usda 1.0
+(
+    doc = """A stage that brings its geometry in from a Draco file: /Root/Quad references
+    draco_quad.drc, which the usdDraco file format plugin reads as a layer whose default prim is a
+    Mesh (/DracoMesh). The quad (make_draco.cpp) is unquantized, so its points are exact."""
+    defaultPrim = "Root"
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+def Xform "Root"
+{
+    def "Quad" (
+        prepend references = @./draco_quad.drc@
+    )
+    {
+        double3 xformOp:translate = (0, 0, 2)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+}
