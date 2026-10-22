@@ -2,7 +2,7 @@
   "$schema": "http://cyclonedx.org/schema/bom-1.6.schema.json",
   "bomFormat": "CycloneDX",
   "specVersion": "1.6",
-  "serialNumber": "urn:uuid:be79a3c4-e4f6-5da6-a33c-af9f045e97ba",
+  "serialNumber": "urn:uuid:42b7087a-a2de-5bd4-a04b-3d73c58eac32",
   "version": 1,
   "metadata": {
     "lifecycles": [
@@ -41,8 +41,8 @@
     },
     "properties": [
       {
-        "name": "unity:securityTicket",
-        "value": "SECURITY-282834"
+        "name": "unity:securityReview",
+        "value": "security-review-2026-09"
       },
       {
         "name": "unity:provenanceNote",
@@ -57,7 +57,7 @@
       "name": "OpenUSD",
       "version": "26.05",
       "scope": "required",
-      "description": "The source every shipped OpenUSD payload is built from: public tag v26.05, commit 2095faf (\"Merge release v26.05\"), with the Unity patch in this component's pedigree applied, monolithic, the same flags on every platform.",
+      "description": "The source every shipped OpenUSD payload is built from: public tag v26.05, commit 2095faf (\"Merge release v26.05\"), with the Unity patches in this component's pedigree applied, monolithic, the same flags on every platform.",
       "purl": "pkg:github/PixarAnimationStudios/OpenUSD@v26.05",
       "licenses": [
         {
@@ -84,8 +84,48 @@
           "value": "23a70a125e3d55486139738297cd1ec93f419b7d9be04296a36be2a6744cc565"
         },
         {
-          "name": "unity:buildFlags",
-          "value": "--build-variant release --build-monolithic --no-python --no-imaging --no-usdview --no-examples --no-tutorials --no-tests --materialx --build-args MaterialX,-DMATERIALX_BUILD_RENDER=OFF"
+          "name": "unity:patch",
+          "value": "Native~/patches/openusd-26.05-file-format-hardening.patch"
+        },
+        {
+          "name": "unity:patchSha256",
+          "value": "991afd2a2e27fe091f9cfe3ff967596c45a151488e331fbf2ea8ca301c9aa31a"
+        },
+        {
+          "name": "unity:patch",
+          "value": "Native~/patches/openusd-26.05-crate-hardening.patch"
+        },
+        {
+          "name": "unity:patchSha256",
+          "value": "f6db73e5f1b4731f83ceac1b0db679016a6aa2e1c34dc6a379bcfa40f7b05db7"
+        },
+        {
+          "name": "unity:patch",
+          "value": "Native~/patches/openusd-26.05-windows-draco.patch"
+        },
+        {
+          "name": "unity:patchSha256",
+          "value": "f5afec2066137d74a47e33389adb87e66149881341e76550cbadb31a1e4c0d75"
+        },
+        {
+          "name": "unity:patch",
+          "value": "Native~/patches/openusd-26.05-tbb-build-host.patch"
+        },
+        {
+          "name": "unity:patchSha256",
+          "value": "e95e9e0a35d8b259e69d99dcba9e86737e9d97b623930d8ac3090e433b3f76d8"
+        },
+        {
+          "name": "unity:buildFlags (macOS universal)",
+          "value": "--build-variant release --build-monolithic --no-python --no-imaging --no-usdview --no-examples --no-tutorials --no-tests --materialx --alembic --draco --build-args MaterialX,-DMATERIALX_BUILD_RENDER=OFF OpenEXR,-DBUILD_SHARED_LIBS=OFF OpenEXR,-DCMAKE_POSITION_INDEPENDENT_CODE=ON OpenEXR,-DFETCHCONTENT_FULLY_DISCONNECTED=ON Alembic,-DALEMBIC_SHARED_LIBS=OFF Alembic,-DCMAKE_POSITION_INDEPENDENT_CODE=ON Draco,-DBUILD_SHARED_LIBS=OFF Draco,-DCMAKE_POSITION_INDEPENDENT_CODE=ON"
+        },
+        {
+          "name": "unity:buildFlags (Windows x64)",
+          "value": "--build-variant release --build-monolithic --no-python --no-imaging --no-usdview --no-examples --no-tutorials --no-tests --materialx --alembic --draco --build-args MaterialX,-DMATERIALX_BUILD_RENDER=OFF OpenEXR,-DBUILD_SHARED_LIBS=OFF OpenEXR,-DCMAKE_POSITION_INDEPENDENT_CODE=ON OpenEXR,-DFETCHCONTENT_FULLY_DISCONNECTED=ON Alembic,-DALEMBIC_SHARED_LIBS=OFF Alembic,-DCMAKE_POSITION_INDEPENDENT_CODE=ON Draco,-DBUILD_SHARED_LIBS=OFF Draco,-DCMAKE_POSITION_INDEPENDENT_CODE=ON"
+        },
+        {
+          "name": "unity:buildFlags (Linux x64)",
+          "value": "--build-variant release --build-monolithic --no-python --no-imaging --no-usdview --no-examples --no-tutorials --no-tests --materialx --alembic --draco --build-args MaterialX,-DMATERIALX_BUILD_RENDER=OFF OpenEXR,-DBUILD_SHARED_LIBS=OFF OpenEXR,-DCMAKE_POSITION_INDEPENDENT_CODE=ON OpenEXR,-DFETCHCONTENT_FULLY_DISCONNECTED=ON Alembic,-DALEMBIC_SHARED_LIBS=OFF Alembic,-DCMAKE_POSITION_INDEPENDENT_CODE=ON Draco,-DBUILD_SHARED_LIBS=OFF Draco,-DCMAKE_POSITION_INDEPENDENT_CODE=ON"
         },
         {
           "name": "unity:licenseText",
@@ -125,8 +165,72 @@
               },
               {
                 "type": "security",
-                "id": "SECURITY-282834",
+                "id": "security-review-2026-09",
                 "name": "TfFastCompression::DecompressFromBuffer did not check chunk count or chunk sizes read from the file against the buffer"
+              }
+            ]
+          },
+          {
+            "type": "unofficial",
+            "diff": {
+              "url": "Native~/patches/openusd-26.05-file-format-hardening.patch"
+            },
+            "resolves": [
+              {
+                "type": "defect",
+                "name": "usdDraco wrote past its value buffers and read outside its face table on indices and strides read from the file, and crashed on meshes UsdDraco_WriteDraco itself wrote"
+              },
+              {
+                "type": "defect",
+                "name": "usdAbc dereferenced the null samples Alembic returns under kQuietNoopPolicy for data it cannot read"
+              }
+            ]
+          },
+          {
+            "type": "unofficial",
+            "diff": {
+              "url": "Native~/patches/openusd-26.05-crate-hardening.patch"
+            },
+            "resolves": [
+              {
+                "type": "defect",
+                "name": "The crate (.usdc) reader allocated, and value-initialized, for array, table, list and dictionary counts read from the file before checking them against it, so a damaged file could exhaust memory, and kept compressed integer arrays whose data was short, decoded from uninitialized memory"
+              },
+              {
+                "type": "defect",
+                "name": "Damaged path jumps made the crate reader spawn tasks without bound and write one path from several threads, and deeply nested values overflowed the stack"
+              },
+              {
+                "type": "defect",
+                "name": "The crate reader took table-of-contents section ranges outside the file and unterminated section names unchecked, and time samples with more times than values read other data as their values"
+              }
+            ]
+          },
+          {
+            "type": "unofficial",
+            "diff": {
+              "url": "Native~/patches/openusd-26.05-windows-draco.patch"
+            },
+            "resolves": [
+              {
+                "type": "enhancement",
+                "name": "OpenUSD refused the Draco plugin in any monolithic Windows build, for missing symbols only its Python module needs; allowed without Python"
+              },
+              {
+                "type": "enhancement",
+                "name": "usdDraco's writer (UsdDraco_WriteDraco) exported from the OpenUSD library, so .drc files can be written"
+              }
+            ]
+          },
+          {
+            "type": "unofficial",
+            "diff": {
+              "url": "Native~/patches/openusd-26.05-tbb-build-host.patch"
+            },
+            "resolves": [
+              {
+                "type": "defect",
+                "name": "TBB's version banner, built into the macOS and Linux TBB libraries, named the machine that built them"
               }
             ]
           }
@@ -243,7 +347,7 @@
                   },
                   {
                     "type": "security",
-                    "id": "SECURITY-282834",
+                    "id": "security-review-2026-09",
                     "name": "TfFastCompression::DecompressFromBuffer did not check chunk count or chunk sizes read from the file against the buffer"
                   }
                 ]
@@ -436,6 +540,214 @@
       ]
     },
     {
+      "bom-ref": "alembic-source",
+      "type": "library",
+      "name": "Alembic",
+      "version": "1.8.5",
+      "scope": "required",
+      "description": "Alembic, built static (Ogawa only, no HDF5) and linked into the monolithic OpenUSD library by usdAbc, the plugin that reads and writes .abc files, with the Unity patch in this component's pedigree applied.",
+      "purl": "pkg:github/alembic/alembic@1.8.5",
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-3-Clause"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "unity:sourceArchive",
+          "value": "https://github.com/alembic/alembic/archive/refs/tags/1.8.5.zip"
+        },
+        {
+          "name": "unity:sourceArchiveSha256",
+          "value": "9196561b785102b48a731359642e9fbdf62c3a5183de5caca7c6f03292f474df"
+        },
+        {
+          "name": "unity:licenseText",
+          "value": "ThirdPartyNotices~/licenses/Alembic-LICENSE.txt"
+        },
+        {
+          "name": "unity:patch",
+          "value": "Native~/patches/alembic-1.8.5-hardening.patch"
+        },
+        {
+          "name": "unity:patchSha256",
+          "value": "c58b4132f65d42aa424187306a88ab26e516846c2009deb4cbeacebbb43d5de4"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/alembic/alembic"
+        },
+        {
+          "type": "distribution",
+          "url": "https://github.com/alembic/alembic/archive/refs/tags/1.8.5.zip",
+          "hashes": [
+            {
+              "alg": "SHA-256",
+              "content": "9196561b785102b48a731359642e9fbdf62c3a5183de5caca7c6f03292f474df"
+            }
+          ]
+        }
+      ],
+      "pedigree": {
+        "patches": [
+          {
+            "type": "unofficial",
+            "diff": {
+              "url": "Native~/patches/alembic-1.8.5-hardening.patch"
+            },
+            "resolves": [
+              {
+                "type": "defect",
+                "name": "Ogawa reader copied a data block into a buffer sized by a separate, unchecked dimensions block (heap overflow), and dereferenced null data and samples"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "bom-ref": "imath-source",
+      "type": "library",
+      "name": "Imath",
+      "version": "3.1.9",
+      "scope": "required",
+      "description": "Imath, the vector and half-float types Alembic uses, built static by OpenEXR's build from the pinned archive (FetchContent pointed at it, downloads disconnected) and linked into the monolithic OpenUSD library with Alembic.",
+      "purl": "pkg:github/AcademySoftwareFoundation/Imath@v3.1.9",
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-3-Clause"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "unity:sourceArchive",
+          "value": "https://github.com/AcademySoftwareFoundation/Imath/archive/refs/tags/v3.1.9.zip"
+        },
+        {
+          "name": "unity:sourceArchiveSha256",
+          "value": "fb0acf39405f587b0ee792cc4053609b2ae5da34ba6a0290d665f08332e87a24"
+        },
+        {
+          "name": "unity:licenseText",
+          "value": "ThirdPartyNotices~/licenses/Imath-LICENSE.txt"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/AcademySoftwareFoundation/Imath"
+        },
+        {
+          "type": "distribution",
+          "url": "https://github.com/AcademySoftwareFoundation/Imath/archive/refs/tags/v3.1.9.zip",
+          "hashes": [
+            {
+              "alg": "SHA-256",
+              "content": "fb0acf39405f587b0ee792cc4053609b2ae5da34ba6a0290d665f08332e87a24"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "bom-ref": "openexr-source",
+      "type": "library",
+      "name": "OpenEXR",
+      "version": "3.1.13",
+      "scope": "excluded",
+      "description": "Compiled by build_usd.py only because it builds Alembic's Imath through OpenEXR. None of its libraries is linked into any shipped file.",
+      "purl": "pkg:github/AcademySoftwareFoundation/openexr@v3.1.13",
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-3-Clause"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "unity:sourceArchive",
+          "value": "https://github.com/AcademySoftwareFoundation/openexr/archive/refs/tags/v3.1.13.zip"
+        },
+        {
+          "name": "unity:sourceArchiveSha256",
+          "value": "28cd733dbf1e25b942bd31594ffd29c85929822c85116eeda9a67b71fa0b13e8"
+        },
+        {
+          "name": "unity:licenseText",
+          "value": "ThirdPartyNotices~/licenses/OpenEXR-LICENSE.txt"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/AcademySoftwareFoundation/openexr"
+        },
+        {
+          "type": "distribution",
+          "url": "https://github.com/AcademySoftwareFoundation/openexr/archive/refs/tags/v3.1.13.zip",
+          "hashes": [
+            {
+              "alg": "SHA-256",
+              "content": "28cd733dbf1e25b942bd31594ffd29c85929822c85116eeda9a67b71fa0b13e8"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "bom-ref": "draco-source",
+      "type": "library",
+      "name": "Draco",
+      "version": "1.5.6",
+      "scope": "required",
+      "description": "Draco, built static and linked into the monolithic OpenUSD library by usdDraco, the plugin that reads .drc meshes. Its third_party directory (eigen, filesystem, googletest, tinygltf) serves the tests and the glTF transcoder, which are not built.",
+      "purl": "pkg:github/google/draco@1.5.6",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "unity:sourceArchive",
+          "value": "https://github.com/google/draco/archive/refs/tags/1.5.6.zip"
+        },
+        {
+          "name": "unity:sourceArchiveSha256",
+          "value": "40ed351fbb4ee4e37d84197a3394567c2f6e4b444f693c1fd37c7bdfc961b0ea"
+        },
+        {
+          "name": "unity:licenseText",
+          "value": "ThirdPartyNotices~/licenses/Draco-LICENSE.txt"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/google/draco"
+        },
+        {
+          "type": "distribution",
+          "url": "https://github.com/google/draco/archive/refs/tags/1.5.6.zip",
+          "hashes": [
+            {
+              "alg": "SHA-256",
+              "content": "40ed351fbb4ee4e37d84197a3394567c2f6e4b444f693c1fd37c7bdfc961b0ea"
+            }
+          ]
+        }
+      ]
+    },
+    {
       "bom-ref": "usd-macos",
       "type": "library",
       "name": "OpenUSD (monolithic runtime library)",
@@ -453,7 +765,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "7d28b3a251d8b7053635d29c9add9c43e01f2046b4b79c9dffe4dfdfcfde9430"
+          "content": "ef2c69b6daaead018271bafdcd04892049481173f769de8348adb95f8fa30473"
         }
       ],
       "properties": [
@@ -467,7 +779,7 @@
         },
         {
           "name": "unity:toolchain",
-          "value": "macOS 26.6.2 (25G83), Xcode 26.6 (17F113), Apple clang 21.0.0 (clang-2100.1.1.101), CMake 4.3.2, SDK 26.5, x86_64+arm64"
+          "value": "macOS 26.6.2 (25G83), Xcode 26.6 (17F113), Apple clang 21.0.0 (clang-2100.1.1.101), CMake 3.31.6 (OpenUSD) and 4.3.2 (wrapper), SDK 26.5, x86_64+arm64"
         },
         {
           "name": "unity:sourceCommit",
@@ -503,7 +815,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "680f98dd7c4d37eed0667eb3b151eae246fcb4313b27d1bea31dea362d6ce5c8"
+          "content": "9cca8dc59edf1272fd99422d48b404c280f6ea896d789f7c578cf6d061f49a76"
         }
       ],
       "properties": [
@@ -553,7 +865,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "0bd88b66968991c36fc7c0cef07e10260842faf9ac4ed567b1e511c9eaec7e1c"
+          "content": "af38b5e3c8827feffd48fe308833a2467eb435216680498e46d0929b691c4bdd"
         }
       ],
       "properties": [
@@ -603,7 +915,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "6dcb19f152cf740488be3f3c8be5796bf8af3d0ca03440b56036ae36ee3c90f0"
+          "content": "a4e1e33c6d7e8a0dcc2f812135c174dcd58d4979eaeb50ff34e757f6789c23d7"
         }
       ],
       "properties": [
@@ -649,7 +961,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "a47b92e80ed915565b1e3759b3fb204efd98913ed0bd640bbeb8d55a0e28a7e9"
+          "content": "d2407e44a05fbe52eb62a889e07f645cee69c76389f5334ca50e6e0907cf4403"
         }
       ],
       "properties": [
@@ -695,7 +1007,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "15ea9b6e10c7b0554271a7aa8f7a34d7d2c651a7c7e5f1dd1b4b9d9be7733642"
+          "content": "1508fe7e360ff7784ea3dc1560308085adee158426d32afd08f276dbf97a2ef1"
         }
       ],
       "properties": [
@@ -787,7 +1099,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "560c63c66f82cdb1dd8f803a0e203b10f8cd6af752f8c8cd27233165905657f0"
+          "content": "d7ea70e6265fee19eeddda5fcd7bb3b707a3778a489dc50691dcdb3e64fafb14"
         }
       ],
       "properties": [
@@ -829,7 +1141,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "1800d771ef01e88533f6b52335e71d23328266c3c65a90b9da94a329768a14d2"
+          "content": "f13db2108d04511151da826db9d0a1126961189da8ecded1ae89eff812b7ea42"
         }
       ],
       "properties": [
@@ -871,7 +1183,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "f04332afdd38f635111061b6fca65ba1c289a519c3c79a201e89cfb6e2e78775"
+          "content": "73947876b515880db3db7e68b8d9253ae12c9ab39c506f753ed0bdb3b0ca72cc"
         }
       ],
       "properties": [
@@ -913,7 +1225,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "e573ff460fe0d7079db5eb7c363205b93522afa22d34871943232e622e1538e8"
+          "content": "92a0a0549dfb1292f7cb9f229fd5a43b68ce487f711ea8858a6fc2c374b15372"
         }
       ],
       "properties": [
@@ -955,7 +1267,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "9e42434bcac5052f0fe0617324a5541863ab227f5b751940138f4e82bebd09b2"
+          "content": "e583e0c8935be42906169b38c06fcede77a06fba8823a151c4894e2c588cd611"
         }
       ],
       "properties": [
@@ -1000,7 +1312,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "5ab0a521d5e5103d91b09098abf7a1e4bfdd258f3a76be702dda36d3413f8b14"
+          "content": "3ec3d7ee8f82aff0e1c2f5b4bdd1ece293f38bc371bcfa4ad977d9a992542e65"
         }
       ],
       "properties": [
@@ -1014,11 +1326,11 @@
         },
         {
           "name": "unity:toolchain",
-          "value": "macOS 26.6.2 (25G83), Xcode 26.6 (17F113), Apple clang 21.0.0 (clang-2100.1.1.101), CMake 4.3.2, SDK 26.5, x86_64+arm64"
+          "value": "macOS 26.6.2 (25G83), Xcode 26.6 (17F113), Apple clang 21.0.0 (clang-2100.1.1.101), CMake 3.31.6 (OpenUSD) and 4.3.2 (wrapper), SDK 26.5, x86_64+arm64"
         },
         {
           "name": "unity:nativeApiVersion",
-          "value": "12"
+          "value": "13"
         }
       ]
     },
@@ -1039,7 +1351,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "7e4de9eededcc0a875e182ac8718c5a685834e47059082798096e6712e5b8273"
+          "content": "d1165b9efc58d293bef10fe9edfbbe36a1dd717b8306b3fbcf0e39ff3d263b43"
         }
       ],
       "properties": [
@@ -1057,7 +1369,7 @@
         },
         {
           "name": "unity:nativeApiVersion",
-          "value": "12"
+          "value": "13"
         }
       ]
     },
@@ -1078,7 +1390,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "962b28f38901f9dcf1c34bf4f27dcab4486afe0347fb7ea8e77167df6ce7777b"
+          "content": "46c23ead949a9d5b76c6e94da86fde97909d23e95eed40a4337d5ca23037d47d"
         }
       ],
       "properties": [
@@ -1096,7 +1408,7 @@
         },
         {
           "name": "unity:nativeApiVersion",
-          "value": "12"
+          "value": "13"
         }
       ]
     },
@@ -1118,7 +1430,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "bbbdadde187fd1f5146c7e7b80cb49bdd44223b048f6e48f2d57716f6e0de868"
+          "content": "6bb36210057da19850f510bdb7a4eb098ae23536ac37bc331d1a04336910a752"
         }
       ],
       "properties": [
@@ -1160,7 +1472,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "98cf9d86c965ef6bea18166a39a89388762c2447711bdaecdc6520bc7739cad2"
+          "content": "551348dba8935de148fd7318c4850103665a7707d9ab4214c979cabed9ebf9af"
         }
       ],
       "properties": [
@@ -1236,7 +1548,10 @@
         "openusd-source",
         "tbb-macos",
         "materialx-core-macos",
-        "materialx-format-macos"
+        "materialx-format-macos",
+        "alembic-source",
+        "imath-source",
+        "draco-source"
       ]
     },
     {
@@ -1245,7 +1560,10 @@
         "openusd-source",
         "tbb-windows",
         "materialx-core-windows",
-        "materialx-format-windows"
+        "materialx-format-windows",
+        "alembic-source",
+        "imath-source",
+        "draco-source"
       ]
     },
     {
@@ -1254,7 +1572,10 @@
         "openusd-source",
         "tbb-linux",
         "materialx-core-linux",
-        "materialx-format-linux"
+        "materialx-format-linux",
+        "alembic-source",
+        "imath-source",
+        "draco-source"
       ]
     },
     {

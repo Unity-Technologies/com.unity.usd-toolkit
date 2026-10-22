@@ -1,0 +1,190 @@
+#usda 1.0
+(
+    doc = """Skinning, blend-shape and transform-animation fixture for the UsdSkel import.
+
+    Every value here is small enough to check by hand, and skel_arm.expected.json holds what
+    OpenUSD itself computes from it (make_expected.py). What each prim covers:
+      Arm          SkelRoot with its own translate + rotateY, so the stage-to-Unity conversion and
+                   the skeleton's world transform both matter. skel:skeleton is bound here and
+                   inherited by the meshes.
+      Arm/Skel     Three-joint chain. The animation lists only two of the joints, in a different
+                   order, so Shoulder falls back to its rest transform.
+      Arm/Strip    Two influences per point (elementSize 2), a non-identity geomBindTransform,
+                   faceVarying UVs that force vertex splits on the two middle rows, and a blend
+                   shape with sparse point indices and one inbetween.
+      Arm/Hand     Rigid binding (constant jointIndices) through a mesh-local skel:joints order.
+      Spinner      Time-sampled translate + rotateY on a plain Xform.
+      Blinker      Time-sampled visibility (held: tokens do not interpolate).
+      LateBlinker  Invisible at the start and shown later, so its geometry must be read even
+                   though nothing of it is visible at the read time.
+      PointCache   Points authored only as time samples, with no default value."""
+    defaultPrim = "Root"
+    endTimeCode = 10
+    framesPerSecond = 24
+    metersPerUnit = 1
+    startTimeCode = 0
+    timeCodesPerSecond = 24
+    upAxis = "Y"
+)
+
+def Xform "Root"
+{
+    def SkelRoot "Arm" (
+        prepend apiSchemas = ["SkelBindingAPI"]
+    )
+    {
+        rel skel:skeleton = </Root/Arm/Skel>
+        double3 xformOp:translate = (1, 0, 0)
+        float xformOp:rotateY = 30
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateY"]
+
+        def Skeleton "Skel" (
+            prepend apiSchemas = ["SkelBindingAPI"]
+        )
+        {
+            uniform matrix4d[] bindTransforms = [
+                ((1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1)),
+                ((1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 1, 0, 1)),
+                ((1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 2, 0, 1))
+            ]
+            uniform token[] joints = ["Shoulder", "Shoulder/Elbow", "Shoulder/Elbow/Wrist"]
+            uniform matrix4d[] restTransforms = [
+                ((1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1)),
+                ((1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 1, 0, 1)),
+                ((1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 1, 0, 1))
+            ]
+            rel skel:animationSource = </Root/Arm/Skel/Anim>
+
+            def SkelAnimation "Anim"
+            {
+                uniform token[] blendShapes = ["Bulge"]
+                float[] blendShapeWeights.timeSamples = {
+                    0: [0],
+                    10: [1],
+                }
+                uniform token[] joints = ["Shoulder/Elbow/Wrist", "Shoulder/Elbow"]
+                quatf[] rotations.timeSamples = {
+                    0: [(1, 0, 0, 0), (1, 0, 0, 0)],
+                    10: [(0.70710677, 0.70710677, 0, 0), (0.70710677, 0, 0, 0.70710677)],
+                }
+                half3[] scales = [(1, 1, 1), (1, 1, 1)]
+                float3[] translations = [(0, 1, 0), (0, 1, 0)]
+            }
+        }
+
+        def Mesh "Strip" (
+            prepend apiSchemas = ["SkelBindingAPI"]
+        )
+        {
+            int[] faceVertexCounts = [4, 4, 4]
+            int[] faceVertexIndices = [0, 1, 3, 2, 2, 3, 5, 4, 4, 5, 7, 6]
+            normal3f[] normals = [(0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1)] (
+                interpolation = "vertex"
+            )
+            point3f[] points = [(-0.25, -1.5, 0), (0.25, -1.5, 0), (-0.25, -0.5, 0), (0.25, -0.5, 0), (-0.25, 0.5, 0), (0.25, 0.5, 0), (-0.25, 1.5, 0), (0.25, 1.5, 0)]
+            matrix4d primvars:skel:geomBindTransform = ((1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 1.5, 0, 1))
+            int[] primvars:skel:jointIndices = [0, 0, 0, 0, 0, 1, 0, 1, 1, 2, 1, 2, 2, 0, 2, 0] (
+                elementSize = 2
+                interpolation = "vertex"
+            )
+            float[] primvars:skel:jointWeights = [1, 0, 1, 0, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 1, 0, 1, 0] (
+                elementSize = 2
+                interpolation = "vertex"
+            )
+            texCoord2f[] primvars:st = [(0, 0), (0.3, 0), (0.3, 1), (0, 1), (0.35, 0), (0.65, 0), (0.65, 1), (0.35, 1), (0.7, 0), (1, 0), (1, 1), (0.7, 1)] (
+                interpolation = "faceVarying"
+            )
+            uniform token[] skel:blendShapes = ["Bulge"]
+            rel skel:blendShapeTargets = </Root/Arm/Strip/Bulge>
+            uniform token subdivisionScheme = "none"
+
+            def BlendShape "Bulge"
+            {
+                uniform vector3f[] inbetweens:Half = [(-0.05, 0, 0), (0.05, 0, 0)] (
+                    weight = 0.5
+                )
+                uniform vector3f[] offsets = [(-0.25, 0, 0), (0.25, 0, 0)]
+                uniform int[] pointIndices = [2, 3]
+            }
+        }
+
+        def Mesh "Hand" (
+            prepend apiSchemas = ["SkelBindingAPI"]
+        )
+        {
+            int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+            int[] faceVertexIndices = [0, 1, 2, 3, 4, 7, 6, 5, 0, 4, 5, 1, 3, 2, 6, 7, 0, 3, 7, 4, 1, 5, 6, 2]
+            point3f[] points = [(-0.2, 3, -0.2), (0.2, 3, -0.2), (0.2, 3, 0.2), (-0.2, 3, 0.2), (-0.2, 3.4, -0.2), (0.2, 3.4, -0.2), (0.2, 3.4, 0.2), (-0.2, 3.4, 0.2)]
+            int[] primvars:skel:jointIndices = [0] (
+                elementSize = 1
+                interpolation = "constant"
+            )
+            float[] primvars:skel:jointWeights = [1] (
+                elementSize = 1
+                interpolation = "constant"
+            )
+            uniform token[] skel:joints = ["Shoulder/Elbow/Wrist"]
+            uniform token subdivisionScheme = "none"
+        }
+    }
+
+    def Xform "Spinner"
+    {
+        float xformOp:rotateY.timeSamples = {
+            0: 0,
+            10: 90,
+        }
+        double3 xformOp:translate.timeSamples = {
+            0: (0, 0, 2),
+            10: (4, 0, 2),
+        }
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateY"]
+
+        def Cube "Box"
+        {
+            double size = 0.5
+        }
+    }
+
+    def Xform "Blinker"
+    {
+        token visibility.timeSamples = {
+            0: "inherited",
+            4: "invisible",
+            8: "inherited",
+        }
+        double3 xformOp:translate = (-2, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+        def Cube "Box"
+        {
+            double size = 0.5
+        }
+    }
+
+    def Xform "LateBlinker"
+    {
+        token visibility.timeSamples = {
+            0: "invisible",
+            6: "inherited",
+        }
+        double3 xformOp:translate = (-2, 0, 2)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+        def Cube "Box"
+        {
+            double size = 0.5
+        }
+    }
+
+    def Mesh "PointCache"
+    {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points.timeSamples = {
+            0: [(0, 0, -2), (1, 0, -2), (0, 1, -2)],
+            10: [(0, 0, -2), (2, 0, -2), (0, 2, -2)],
+        }
+        uniform token subdivisionScheme = "none"
+    }
+}

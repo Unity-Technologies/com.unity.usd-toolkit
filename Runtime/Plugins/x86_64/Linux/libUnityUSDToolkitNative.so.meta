@@ -21,7 +21,7 @@ PluginImporter:
         DefaultValueInitialized: true
         OS: Linux
     Linux64:
-      enabled: 1
+      enabled: 0
       settings:
         CPU: x86_64
     OSXUniversal:

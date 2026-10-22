@@ -24,7 +24,7 @@ With the default settings the sample picks all of this by itself: the factory wh
 | Requirement | Detail |
 | --- | --- |
 | **Unity** | 6000.4 or later. Tested with 6000.4.5f1. |
-| **Packages** | Unity USD Toolkit 0.8.0-exp.1, Universal Render Pipeline (tested with 17.4), Input System 1.7.0 or later. Without the Input System, the sample's assemblies are skipped rather than failing to compile. |
+| **Packages** | Unity USD Toolkit 0.8.1-exp.1, Universal Render Pipeline (tested with 17.4), Input System 1.7.0 or later. Without the Input System, the sample's assemblies are skipped rather than failing to compile. |
 | **Isaac Sim** | Optional. Isaac Sim 6.1.0 on Windows 10 or 11 with an NVIDIA RTX GPU, on the same machine as Unity. |
 | **Asset pack** | Optional. NVIDIA USD Explorer Sample Asset Pack, see [Use the NVIDIA factory](#use-the-nvidia-factory). |
 | **Python** | Only for the optional tools and tests in `Tools~/agv_fleet`: Python 3.10 or later, standard library only. Isaac Sim brings its own Python for the simulator. |

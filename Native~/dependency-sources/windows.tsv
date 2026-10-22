@@ -2,10 +2,11 @@
 #
 # One row per upstream artifact a build fetches, plus one per Unity patch applied to the OpenUSD
 # tree before it is built (artifact "patch": url is the patch's path in this repository, git_commit
-# the commit it applies to). Everything else in the payload is compiled from the OpenUSD tree at
+# the commit it applies to) or to a pinned archive's tree (artifact "archive-patch": git_commit is
+# that archive row's, which names it; Native~/build_openusd.py extracts and patches it). Everything else in the payload is compiled from the OpenUSD tree at
 # the pinned commit, including the four libraries OpenUSD vendors in (pxr/base/tf/pxrCLI11,
 # pxrDoubleConversion, pxrLZ4, pxrTslRobinMap), so those need no row of their own -- except where
-# a patch replaces one, as openusd-26.05-lz4-1.10.0.patch does pxrLZ4 (SECURITY-282834). The same
+# a patch replaces one, as openusd-26.05-lz4-1.10.0.patch does pxrLZ4 (security review). The same
 # holds for libdeflate 1.18 under pxr/imaging/plugin/hioOpenEXR/OpenEXR/deflate, which our wrapper
 # compiles although OpenUSD is built --no-imaging, and for the pugixml MaterialX vendors into
 # MaterialXFormat: both are inside a pinned tree or archive, so a scan record for that row has to
@@ -17,4 +18,18 @@
 OpenUSD	26.05	git-clone	https://github.com/PixarAnimationStudios/OpenUSD.git	-	2095fafafd033fa23386d7ec6d58c7cc33974518	none published: v26.05 is a lightweight tag and commit 2095faf is unsigned	2026-09-25
 oneTBB	2020.3	release-asset	https://github.com/oneapi-src/oneTBB/releases/download/v2020.3/tbb-2020.3-win.zip	cda37eed5209746a79c88a658f8c1bf3782f58bd9f9f6ba0da3a16624a9bfaa1	eca91f16d7490a8abfdee652dadf457ec820cc37	Authenticode (Intel Corporation) on the DLLs inside; the shipped tbb_usdrt.dll is byte-identical to tbb/bin/intel64/vc14/tbb.dll in this archive, renamed only	2026-09-25
 OpenUSD-patch	lz4-1.10.0	patch	Native~/patches/openusd-26.05-lz4-1.10.0.patch	23a70a125e3d55486139738297cd1ec93f419b7d9be04296a36be2a6744cc565	2095fafafd033fa23386d7ec6d58c7cc33974518	Unity patch, reviewed in this repository: LZ4 1.9.2 -> 1.10.0 and bounds checks in TfFastCompression (CVE-2021-3520)	2026-09-29
+OpenUSD-patch	file-format-hardening	patch	Native~/patches/openusd-26.05-file-format-hardening.patch	991afd2a2e27fe091f9cfe3ff967596c45a151488e331fbf2ea8ca301c9aa31a	2095fafafd033fa23386d7ec6d58c7cc33974518	Unity patch, reviewed in this repository: bounds and null checks in the usdDraco and usdAbc file format plugins, found by fuzzing the payload; applied after lz4-1.10.0	2026-10-17
+OpenUSD-patch	crate-hardening	patch	Native~/patches/openusd-26.05-crate-hardening.patch	f6db73e5f1b4731f83ceac1b0db679016a6aa2e1c34dc6a379bcfa40f7b05db7	2095fafafd033fa23386d7ec6d58c7cc33974518	Unity patch, reviewed in this repository: counts in binary layers (.usdc) checked against the file before they size an allocation, found by fuzzing the payload; applied after file-format-hardening	2026-10-18
+OpenUSD-patch	windows-draco	patch	Native~/patches/openusd-26.05-windows-draco.patch	f5afec2066137d74a47e33389adb87e66149881341e76550cbadb31a1e4c0d75	2095fafafd033fa23386d7ec6d58c7cc33974518	Unity patch, reviewed in this repository: OpenUSD refuses usdDraco in a monolithic Windows build for symbols only its Python module needs; allowed without Python; and the writer exported (UsdDraco_WriteDraco) for .drc export; applied after crate-hardening	2026-10-18
 MaterialX	1.39.4	github-archive	https://github.com/AcademySoftwareFoundation/MaterialX/archive/v1.39.4.zip	3910b2498d7da6c8e5ac150b9e6a74e530626044309edb077829c024ed691e0e	-	none published: the v1.39.4 source archive carries no checksum; digest observed 2026-10-10; tag v1.39.4 is commit 270b5cf2ae2be24a3b6ef4b0569f1c93038dda1d (2026-10-11)	2026-10-10
+# Alembic, Imath, OpenEXR and Draco are built by the same build_usd.py run for
+# the usdAbc and usdDraco file format plugins; see USD_BUILD_ARGS in Native~/generate_sbom.py.
+# Imath is not something build_usd.py downloads: OpenEXR's CMake fetches it with FetchContent,
+# so its row is a fetchcontent-archive, which Native~/build_openusd.py downloads, checks and
+# extracts itself and hands to OpenEXR's build with downloads disconnected.
+zlib	1.2.13	github-archive	https://github.com/madler/zlib/archive/v1.2.13.zip	c2856951bbf30e30861ace3765595d86ba13f2cf01279d901f6c62258c57f4ff	04f42ceca40f73e2978b50e93806c2a18c1281fc	none published: the v1.2.13 source archive carries no checksum; digest observed 2026-10-17; annotated tag v1.2.13 (f0def28) is commit 04f42ce; build_usd.py builds it on Windows only, for OpenEXR, and nothing of it ships	2026-10-17
+OpenEXR	3.1.13	github-archive	https://github.com/AcademySoftwareFoundation/openexr/archive/refs/tags/v3.1.13.zip	28cd733dbf1e25b942bd31594ffd29c85929822c85116eeda9a67b71fa0b13e8	fad1d1a9dc188aceabbea1313580d73b7236b79b	none published: the v3.1.13 source archive carries no checksum; digest observed 2026-10-17; annotated tag v3.1.13 (2f61a7b) is commit fad1d1a; built only to build Imath, nothing of it ships	2026-10-17
+Imath	3.1.9	fetchcontent-archive	https://github.com/AcademySoftwareFoundation/Imath/archive/refs/tags/v3.1.9.zip	fb0acf39405f587b0ee792cc4053609b2ae5da34ba6a0290d665f08332e87a24	d690a3fcff4e877ead5ae56c7e964595ade8a35e	none published: the v3.1.9 source archive carries no checksum; digest observed 2026-10-17; tag v3.1.9 is commit d690a3f, the tag OpenEXR 3.1.13 fetches (IMATH_TAG)	2026-10-17
+Alembic	1.8.5	github-archive	https://github.com/alembic/alembic/archive/refs/tags/1.8.5.zip	9196561b785102b48a731359642e9fbdf62c3a5183de5caca7c6f03292f474df	f4e3cc33e4270ade9d076a2cac7a2a4409c61675	none published: the 1.8.5 source archive carries no checksum; digest observed 2026-10-17; tag 1.8.5 is commit f4e3cc3	2026-10-17
+Alembic-patch	hardening	archive-patch	Native~/patches/alembic-1.8.5-hardening.patch	c58b4132f65d42aa424187306a88ab26e516846c2009deb4cbeacebbb43d5de4	f4e3cc33e4270ade9d076a2cac7a2a4409c61675	Unity patch, reviewed in this repository: bounds and null checks in the Ogawa reader and the IXform schema, found by fuzzing the payload's usdAbc plugin (IXform: Linux fuzz run, 2026-10-17)	2026-10-17
+Draco	1.5.6	github-archive	https://github.com/google/draco/archive/refs/tags/1.5.6.zip	40ed351fbb4ee4e37d84197a3394567c2f6e4b444f693c1fd37c7bdfc961b0ea	9f856abaafb4b39f1f013763ff061522e0261c6f	none published: the 1.5.6 source archive carries no checksum; digest observed 2026-10-17; tag 1.5.6 is commit 9f856ab	2026-10-17

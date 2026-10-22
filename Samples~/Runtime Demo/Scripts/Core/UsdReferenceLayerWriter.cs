@@ -28,9 +28,9 @@ namespace Unity.USDToolkit.RuntimeDemo
     /// defaultPrim's own xformOpOrder, and with it any transform the source puts on that prim.
     ///
     /// A stage takes its time metadata from its root layer only, so the sources' time range
-    /// would otherwise be lost: the layer carries the first source's timeCodesPerSecond and
-    /// framesPerSecond and the union of the sources' ranges, converted to that rate. Only what a
-    /// source authors is copied, and only text sources can be read (see
+    /// would otherwise be lost: the layer carries the timeCodesPerSecond and framesPerSecond of the
+    /// first source with a time range and the union of the sources' ranges, converted to that rate.
+    /// Sources are read through <see cref="UsdStage"/>, in any format (see
     /// <see cref="UsdLayerTimeMetadata"/>).
     /// </remarks>
     public static class UsdReferenceLayerWriter
@@ -150,19 +150,22 @@ namespace Unity.USDToolkit.RuntimeDemo
         }
 
         /// <summary>
-        /// Writes timeCodesPerSecond / framesPerSecond (from the first source that authors each)
-        /// and startTimeCode / endTimeCode (the union of the sources' ranges), each only when some
-        /// source authors it. Sources without time metadata leave the header as it was.
+        /// Writes startTimeCode / endTimeCode (the union of the sources' ranges) and
+        /// timeCodesPerSecond / framesPerSecond (those of the first source with a time range).
+        /// A source without a time range adds nothing; when no source has one, nothing is written.
         /// </summary>
         /// <remarks>
         /// USD scales a referenced layer's time samples by the root's time codes per second over
         /// the source's, so each source's range is converted into the root's rate before the union:
         /// a 30 tcps source with 0-30 covers 0-24 under a 24 tcps root.
+        ///
+        /// The stage API reports effective rates only, not whether a layer authors them, so both
+        /// rates are written explicitly. A source that authors only framesPerSecond = 12 gives
+        /// timeCodesPerSecond = 12 as well, which is the rate USD already runs it at.
         /// </remarks>
         private static void AppendTimeMetadata(StringBuilder builder, IReadOnlyList<UsdSceneEntry> entries)
         {
             var sources = new List<UsdLayerTimeMetadata>();
-            var skippedBinary = new List<string>();
             var read = new HashSet<string>(StringComparer.Ordinal);
             foreach (UsdSceneEntry entry in entries)
             {
@@ -176,65 +179,48 @@ namespace Unity.USDToolkit.RuntimeDemo
                 {
                     time = UsdLayerTimeMetadata.Read(entry.SourcePath);
                 }
-                catch (Exception exception) when (exception is IOException || exception is UnauthorizedAccessException)
+                catch (NotSupportedException exception)
                 {
-                    Debug.LogWarning($"Referencing export: could not read the time metadata of {entry.DisplayName}, so its time range and rate are unknown. {exception.Message}");
+                    // The loaded native plugin has no stage API, so no source can be read.
+                    Debug.LogWarning($"Referencing export: the sources' time range is not copied. {exception.Message}");
+                    return;
+                }
+                catch (Exception exception) when (exception is UsdExportException || exception is UsdStageException ||
+                                                  exception is IOException)
+                {
+                    Debug.LogWarning($"Referencing export: could not open {entry.DisplayName} to read its time range, so it adds none. {exception.Message}");
                     continue;
                 }
 
-                if (time.IsBinary)
+                if (time.HasTimeRange)
                 {
-                    // Not a problem in itself: most binary sources carry no animation at all, and
-                    // whether this one does cannot be told without the toolkit reporting it.
-                    skippedBinary.Add(entry.DisplayName);
-                    continue;
+                    sources.Add(time);
                 }
-
-                sources.Add(time);
             }
 
-            if (skippedBinary.Count > 0)
+            if (sources.Count == 0)
             {
-                Debug.Log(
-                    $"Referencing export: time range not read from {skippedBinary.Count} binary source(s) (.usdc/.usd/.usdz): " +
-                    $"{string.Join(", ", skippedBinary)}. Only .usda headers are read.");
+                return;
             }
 
-            double? timeCodesPerSecond = null, framesPerSecond = null;
+            double rootRate = sources[0].TimeCodesPerSecond;
+            double start = double.MaxValue, end = double.MinValue;
             foreach (UsdLayerTimeMetadata time in sources)
             {
-                timeCodesPerSecond ??= time.TimeCodesPerSecond;
-                framesPerSecond ??= time.FramesPerSecond;
-            }
-
-            double rootRate = UsdLayerTimeMetadata.EffectiveTimeCodesPerSecond(timeCodesPerSecond, framesPerSecond);
-            double? start = null, end = null;
-            foreach (UsdLayerTimeMetadata time in sources)
-            {
-                double scale = rootRate / time.EffectiveRate;
-                if (time.StartTimeCode.HasValue)
-                {
-                    start = Math.Min(start ?? double.MaxValue, Round(time.StartTimeCode.Value * scale));
-                }
-
-                if (time.EndTimeCode.HasValue)
-                {
-                    end = Math.Max(end ?? double.MinValue, Round(time.EndTimeCode.Value * scale));
-                }
+                double scale = rootRate / time.TimeCodesPerSecond;
+                start = Math.Min(start, Round(time.StartTimeCode * scale));
+                end = Math.Max(end, Round(time.EndTimeCode * scale));
             }
 
             AppendNumber(builder, "startTimeCode", start);
             AppendNumber(builder, "endTimeCode", end);
-            AppendNumber(builder, "timeCodesPerSecond", timeCodesPerSecond);
-            AppendNumber(builder, "framesPerSecond", framesPerSecond);
+            AppendNumber(builder, "timeCodesPerSecond", sources[0].TimeCodesPerSecond);
+            AppendNumber(builder, "framesPerSecond", sources[0].FramesPerSecond);
         }
 
-        private static void AppendNumber(StringBuilder builder, string key, double? value)
+        private static void AppendNumber(StringBuilder builder, string key, double value)
         {
-            if (value.HasValue)
-            {
-                builder.AppendLine($"    {key} = {FormatNumber(value.Value)}");
-            }
+            builder.AppendLine($"    {key} = {FormatNumber(value)}");
         }
 
         private static string FormatNumber(double value)

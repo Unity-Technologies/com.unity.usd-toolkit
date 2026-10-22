@@ -1,2 +1,2 @@
-Built against /Users/Shared/usd-26.05-mtlx/install, which build_openusd.py did not build with --require-scan.
+Built against /Users/Shared/usd-26.05-physics/install, which build_openusd.py did not build with --require-scan.
 Not for release: Native~/generate_native_hashes.py --release refuses this payload.

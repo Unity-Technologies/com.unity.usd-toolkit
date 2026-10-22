@@ -1,0 +1,896 @@
+Unity USD Toolkit patch to OpenUSD v26.05 (commit 2095fafafd033fa23386d7ec6d58c7cc33974518), applied
+after openusd-26.05-file-format-hardening.patch: counts in binary layers (.usdc, the crate format)
+checked before anything they size is allocated.
+
+Applied by Native~/build_openusd.py to a worktree of the pinned commit, never to the clone itself;
+its SHA-256 is pinned in Native~/dependency-sources/<platform>.tsv. Every change is marked
+"Unity USD Toolkit" in the source. The crate reader took counts from the file -- array lengths, the
+token, field, spec and path tables, list and dictionary sizes -- and allocated for them before the
+read that would have failed; resize() value-initializes, so the memory was committed, not just
+reserved. One changed byte in a valid file made it take gigabytes (on Linux and macOS, which
+overcommit, enough to exhaust the machine), and a compressed integer array whose data was short
+still "succeeded": the reader kept an array of the claimed length, decoded from uninitialized
+memory. Found by fuzzing the Windows payload (8,000 mutated .usdc files under a 1 GB cap: 364
+ran out of memory, 12 of them by filling it); with this patch none of them, nor 20,000 further
+cases, take more than ~100 MB, and files OpenUSD writes read exactly as before.
+
+crateFile.cpp:
+1. The byte streams report their length, and _Reader::CheckCount refuses a count that cannot fit
+   in the bytes left (SdfReadOutOfBoundsError, which the callers already turn into a corrupt-file
+   error): uncompressed arrays (also keeping sizeof(T) * size from overflowing into a small range
+   that passed the zero-copy check), vectors, list ops, dictionaries, time-sample value counts, the
+   token and field-value byte counts.
+2. Compressed integers (_CompressedIntsReader) are read in two steps: Prepare reads and
+   decompresses them and checks the data holds the count claimed; only then is the destination
+   allocated, and Decode fills it. Used by compressed int and float arrays and by the fields,
+   field sets, specs and paths tables. A float array's lookup-table index is checked.
+3. Tokens: the decompressed size is at most 256 times the compressed one, decompression has to
+   produce all of it, and the token count cannot exceed its bytes. Field value reps have to fill
+   their table.
+4. Paths: the total cannot exceed the encoded paths plus the empty one, and the encoded count is
+   checked before _paths is allocated. The jumps are walked once before the paths are built and
+   must reach each entry at most once: damaged jumps that reached one entry two ways made
+   _BuildDecompressedPathsImpl spawn tasks without bound and write one SdfPath from several
+   threads.
+5. Values nest at most 256 deep (the recursion guard's size): deeper nesting overflowed the stack.
+6. The table of contents: every section has to lie inside the file and have a terminated name.
+   Their ranges went unchecked to the prefetch (on Linux and macOS, posix_madvise over memory
+   outside the mapping) and, when a layer is saved over itself, to new char[size] for sections
+   this version does not know; an unterminated name sent the section lookup's strcmp past it.
+7. Time samples have to hold one value per time, as the writer stores them. The values are read
+   by index into the times, so a damaged file with more times than values read what follows the
+   values as value reps -- another attribute's samples, of any type -- without an error.
+
+integerCoding.{h,cpp}:
+8. Decoding checks, from the codes, that the decompressed bytes hold numInts integers before it
+   reads them (it read past what was decompressed), and DecompressToWorkingSpace /
+   DecodeFromWorkingSpace split the two steps for item 2.
+
+diff --git a/pxr/usd/sdf/crateFile.cpp b/pxr/usd/sdf/crateFile.cpp
+index c66f645..15a802c 100644
+--- a/pxr/usd/sdf/crateFile.cpp
++++ b/pxr/usd/sdf/crateFile.cpp
+@@ -632,6 +632,10 @@ struct _MmapStream {
+     inline int64_t Tell() const {
+         return _cur - _mapping->GetMapStart();
+     }
++    // Unity USD Toolkit: the stream's length, for _Reader::Remaining.
++    inline int64_t Size() const {
++        return static_cast<int64_t>(_mapping->GetLength());
++    }
+     inline void Seek(int64_t offset) {
+         _cur = _mapping->GetMapStart() + offset;
+     }
+@@ -684,6 +688,7 @@ struct _PreadStream {
+     explicit _PreadStream(FileRange const &fr)
+         : _start(fr.startOffset)
+         , _cur(0)
++        , _length(fr.length)
+         , _file(fr.file) {}
+     inline void Read(void *dest, size_t nBytes) {
+         int64_t nRead = ArchPRead(_file, dest, nBytes, _start + _cur);
+@@ -697,6 +702,8 @@ struct _PreadStream {
+         _cur += nRead;
+     }
+     inline int64_t Tell() const { return _cur; }
++    // Unity USD Toolkit: the stream's length, for _Reader::Remaining.
++    inline int64_t Size() const { return _length; }
+     inline void Seek(int64_t offset) { _cur = offset; }
+     inline void Prefetch(int64_t offset, int64_t size) {
+         ArchFileAdvise(_file, _start+offset, size, ArchFileAdviceWillNeed);
+@@ -705,6 +712,7 @@ struct _PreadStream {
+ private:
+     int64_t _start;
+     int64_t _cur;
++    int64_t _length;
+     FILE *_file;
+ };
+ 
+@@ -727,6 +735,10 @@ struct _AssetStream {
+         _cur += nRead;
+     }
+     inline int64_t Tell() const { return _cur; }
++    // Unity USD Toolkit: the stream's length, for _Reader::Remaining.
++    inline int64_t Size() const {
++        return static_cast<int64_t>(_asset->GetSize());
++    }
+     inline void Seek(int64_t offset) { _cur = offset; }
+     inline void Prefetch(int64_t offset, int64_t size) {
+         /* no prefetch impl */
+@@ -1057,6 +1069,32 @@ struct CrateFile::_PackingContext
+ /////////////////////////////////////////////////////////////////////////
+ // Reader
+ 
++// Unity USD Toolkit: the fewest bytes one T takes in a crate file, to bound
++// counts read from it.  Strings, tokens and paths are stored as 32-bit indexes.
++template <class T>
++constexpr size_t _MinBytesOnDisk()
++{
++    if constexpr (_IsBitwiseReadWrite<T>::value) {
++        return sizeof(T);
++    }
++    else if constexpr (std::is_same_v<T, string> ||
++                       std::is_same_v<T, TfToken> ||
++                       std::is_same_v<T, SdfPath> ||
++                       std::is_same_v<T, SdfAssetPath> ||
++                       std::is_same_v<T, SdfPathExpression>) {
++        return sizeof(uint32_t);
++    }
++    else {
++        return 1;
++    }
++}
++
++// Unity USD Toolkit: how deeply values may nest (dictionaries in dictionaries,
++// and so on).  Nesting is otherwise bounded only by the file's size, and each
++// level recurses through Read<VtValue> and UnpackValue: a damaged file
++// overflowed the stack.
++static constexpr size_t _MaxValueNesting = 256;
++
+ template <class ByteStream>
+ class CrateFile::_Reader
+ {
+@@ -1094,6 +1132,7 @@ class CrateFile::_Reader
+     template <class T>
+     vector<T> _Read(vector<T> *) {
+         auto sz = Read<uint64_t>();
++        CheckCount(sz, _MinBytesOnDisk<T>(), "a list");
+         vector<T> vec(sz);
+         ReadContiguous(vec.data(), sz);
+         return vec;
+@@ -1110,6 +1149,28 @@ public:
+ 
+     void Seek(uint64_t offset) { src.Seek(offset); }
+ 
++    // Unity USD Toolkit: the bytes left in the stream, and a check that a count
++    // read from the file fits in them.  A damaged file can declare counts far
++    // beyond its size, and what such a count sized was allocated -- and
++    // value-initialized, which commits the memory -- before the read that
++    // would have failed, enough to exhaust a machine.  The callers already
++    // handle SdfReadOutOfBoundsError as a corrupt file.
++    uint64_t Remaining() const {
++        const int64_t pos = src.Tell();
++        const int64_t size = src.Size();
++        return pos >= 0 && pos < size ? static_cast<uint64_t>(size - pos) : 0;
++    }
++
++    void CheckCount(uint64_t count, size_t minBytesEach,
++                    char const *what) const {
++        if (count > Remaining() / minBytesEach) {
++            PXR_TF_THROW(SdfReadOutOfBoundsError, TfStringPrintf(
++                "Corrupt asset <%s>: %s claims %" PRIu64 " elements, more "
++                "than the %" PRIu64 " bytes left in the file can hold",
++                crate->GetAssetPath().c_str(), what, count, Remaining()));
++        }
++    }
++
+     template <class T>
+     T GetUninlinedValue(uint32_t x) const {
+         if constexpr (std::is_same_v<T, string>) {
+@@ -1150,6 +1211,8 @@ public:
+     Map ReadMap() {
+         Map map;
+         auto sz = Read<uint64_t>();
++        CheckCount(sz, _MinBytesOnDisk<typename Map::key_type>(),
++                   "a dictionary");
+         while (sz--) {
+             // Do not combine the following into one statement.  It must be
+             // separate because the two modifications to 'src' must be correctly
+@@ -1262,6 +1325,15 @@ public:
+             // recursion via VtValues that claim to contain themselves.
+             auto &recursionGuard = _LocalUnpackRecursionGuard::Get();
+             VtValue result;
++            // Unity USD Toolkit: the guard holds the values being unpacked on
++            // this thread, so its size is how deeply they nest.
++            if (recursionGuard.size() >= _MaxValueNesting) {
++                TF_RUNTIME_ERROR("Corrupt asset <%s>: values nest more than "
++                                 "%zu deep -- returning an empty VtValue "
++                                 "instead", crate->GetAssetPath().c_str(),
++                                 _MaxValueNesting);
++                return result;
++            }
+             if (!recursionGuard.insert(rep).second) {
+                 TF_RUNTIME_ERROR("Corrupt asset <%s>: a VtValue claims to "
+                                  "recursively contain itself -- returning "
+@@ -1316,6 +1388,17 @@ public:
+             // jump over that uint64_t and store the start of the reps.  Then we
+             // seek forward past the reps to continue.
+             auto numValues = Read<uint64_t>();
++            CheckCount(numValues, sizeof(ValueRep), "time samples");
++            // Unity USD Toolkit: one value per time, as the writer stores them.
++            // The values are read later by index into the times, so more times
++            // than values read whatever follows the values as value reps --
++            // another attribute's samples, of any type, without an error.
++            if (numValues != ret.times.Get().size()) {
++                PXR_TF_THROW(SdfReadOutOfBoundsError, TfStringPrintf(
++                    "Corrupt asset <%s>: time samples have %zu times but "
++                    "%" PRIu64 " values", crate->GetAssetPath().c_str(),
++                    ret.times.Get().size(), numValues));
++            }
+             ret.valuesFileOffset = src.Tell();
+             
+             // Now move past the reps to continue.
+@@ -2003,10 +2086,12 @@ _ReadUncompressedArray(
+     // The reader's bytestream does not support zero-copy, or the element type
+     // is not bitwise identical in memory and on disk, so just read the contents
+     // into memory.
+-    out->resize(
++    const uint64_t size =
+         ver < CrateFile::Version(0,7,0) ?
+         reader.template Read<uint32_t>() :
+-        reader.template Read<uint64_t>());
++        reader.template Read<uint64_t>();
++    reader.CheckCount(size, _MinBytesOnDisk<T>(), "an array");
++    out->resize(size);
+     reader.ReadContiguous(out->data(), out->size());
+ }
+ 
+@@ -2028,6 +2113,10 @@ _ReadUncompressedArray(
+         reader.template Read<uint32_t>() :
+         reader.template Read<uint64_t>();
+ 
++    // Unity USD Toolkit: also keeps sizeof(T) * size below from overflowing
++    // into a small range that passes the zero-copy range check.
++    reader.CheckCount(size, sizeof(T), "an array");
++
+     // Check size and alignment -- the standard requires that alignments
+     // are power-of-two.
+     size_t numBytes = sizeof(T) * size;
+@@ -2072,46 +2161,84 @@ _ReadPossiblyCompressedArray(
+     _ReadUncompressedArray(reader, rep, out, ver);
+ }
+ 
++// Unity USD Toolkit: reading compressed integers is split in two.  Prepare
++// reads and decompresses them and checks that the data holds the numInts they
++// claim; only then does the caller allocate anything numInts long, and Decode
++// fills it.  numInts comes from the file: a damaged count used to size the
++// destination (value-initialized, so committed) and the buffers first, and a
++// decompression that came up short still "succeeded", decoding garbage from
++// uninitialized memory into an array kept with the layer.
+ struct _CompressedIntsReader
+ {
+-    template <class Reader, class Int>
+-    void Read(Reader &reader, Int *out, size_t numInts) {
+-        using Compressor = typename std::conditional<
+-            sizeof(Int) == 4,
+-            Sdf_IntegerCompression,
+-            Sdf_IntegerCompression64>::type;
+-        
+-        _AllocateBufferAndWorkingSpace<Compressor>(numInts);
++    template <class Int, class Reader>
++    void Prepare(Reader &reader, size_t numInts) {
++        using Compressor = _Compressor<Int>;
++
+         auto compressedSize = reader.template Read<uint64_t>();
++        reader.CheckCount(compressedSize, 1, "compressed integers");
++        // TfFastCompression (LZ4) expands at most about 255 times and an
++        // encoded integer takes at least 2 bits, so a count beyond this cannot
++        // be in the data; it bounds the working space allocated below.
++        if (numInts / 1024 > compressedSize) {
++            _ThrowCorrupt(reader, numInts);
++        }
+         if (compressedSize > _compBufferSize) {
+-            // Don't read more than the available memory buffer.
+-            compressedSize = _compBufferSize;
++            _compBuffer.reset(new char[compressedSize]);
++            _compBufferSize = compressedSize;
+         }
+         reader.ReadContiguous(_compBuffer.get(), compressedSize);
+-        Compressor::DecompressFromBuffer(
+-            _compBuffer.get(), compressedSize, out, numInts,
+-            _workingSpace.get());
+-    }
+ 
+-private:
+-    template <class Comp>
+-    void _AllocateBufferAndWorkingSpace(size_t numInts) {
+-        size_t reqBufferSize = Comp::GetCompressedBufferSize(numInts);
+-        size_t reqWorkingSize = Comp::GetDecompressionWorkingSpaceSize(numInts);
+-        if (reqBufferSize > _compBufferSize) {
+-            _compBuffer.reset(new char[reqBufferSize]);
+-            _compBufferSize = reqBufferSize;
++        _decompressedSize = 0;
++        if (numInts == 0) {
++            return;
+         }
++        // Allocated, not initialized: only what decompresses is touched.
++        size_t reqWorkingSize =
++            Compressor::GetDecompressionWorkingSpaceSize(numInts);
+         if (reqWorkingSize > _workingSpaceSize) {
+             _workingSpace.reset(new char[reqWorkingSize]);
+             _workingSpaceSize = reqWorkingSize;
+         }
++        _decompressedSize = Compressor::DecompressToWorkingSpace(
++            _compBuffer.get(), compressedSize, numInts, _workingSpace.get());
++        if (_decompressedSize == 0) {
++            _ThrowCorrupt(reader, numInts);
++        }
+     }
+-    
++
++    template <class Int>
++    void Decode(Int *out, size_t numInts) {
++        if (numInts != 0) {
++            _Compressor<Int>::DecodeFromWorkingSpace(
++                _workingSpace.get(), _decompressedSize, out, numInts);
++        }
++    }
++
++    template <class Reader, class Int>
++    void Read(Reader &reader, Int *out, size_t numInts) {
++        Prepare<Int>(reader, numInts);
++        Decode(out, numInts);
++    }
++
++private:
++    template <class Int>
++    using _Compressor = typename std::conditional<
++        sizeof(Int) == 4,
++        Sdf_IntegerCompression,
++        Sdf_IntegerCompression64>::type;
++
++    template <class Reader>
++    [[noreturn]] static void _ThrowCorrupt(Reader &reader, size_t numInts) {
++        PXR_TF_THROW(SdfReadOutOfBoundsError, TfStringPrintf(
++            "Corrupt asset <%s>: compressed integers do not hold the %zu "
++            "they claim", reader.crate->GetAssetPath().c_str(), numInts));
++    }
++
+     std::unique_ptr<char[]> _compBuffer;
+     size_t _compBufferSize = 0;
+     std::unique_ptr<char[]> _workingSpace;
+     size_t _workingSpaceSize = 0;
++    size_t _decompressedSize = 0;
+ };
+ 
+ template <class Reader, class Int>
+@@ -2138,13 +2265,19 @@ _ReadPossiblyCompressedArray(
+     }
+     else {
+         // Read total elements.
+-        out->resize(ver < CrateFile::Version(0,7,0) ?
+-                    reader.template Read<uint32_t>() :
+-                    reader.template Read<uint64_t>());
+-        if (out->size() < MinCompressedArraySize) {
++        const uint64_t size = ver < CrateFile::Version(0,7,0) ?
++            reader.template Read<uint32_t>() :
++            reader.template Read<uint64_t>();
++        if (size < MinCompressedArraySize) {
++            reader.CheckCount(size, sizeof(T), "an array");
++            out->resize(size);
+             reader.ReadContiguous(out->data(), out->size());
+         } else {
+-            _ReadCompressedInts(reader, out->data(), out->size());
++            // Unity USD Toolkit: checked before the array is allocated.
++            _CompressedIntsReader r;
++            r.Prepare<T>(reader, size);
++            out->resize(size);
++            r.Decode(out->data(), out->size());
+         }
+     }
+ }
+@@ -2164,34 +2297,51 @@ _ReadPossiblyCompressedArray(
+         return;
+     }
+ 
+-    out->resize(ver < CrateFile::Version(0,7,0) ?
+-                reader.template Read<uint32_t>() :
+-                reader.template Read<uint64_t>());
+-    auto odata = out->data();
+-    auto osize = out->size();
++    // Unity USD Toolkit: the array is allocated only once its size is checked
++    // against the data that fills it (CheckCount, _CompressedIntsReader).
++    const uint64_t osize = ver < CrateFile::Version(0,7,0) ?
++        reader.template Read<uint32_t>() :
++        reader.template Read<uint64_t>();
+ 
+     if (osize < MinCompressedArraySize) {
+         // Not stored compressed.
+-        reader.ReadContiguous(odata, osize);
++        reader.CheckCount(osize, sizeof(T), "an array");
++        out->resize(osize);
++        reader.ReadContiguous(out->data(), osize);
+         return;
+     }
+-    
++
+     // Read the code
+     char code = reader.template Read<int8_t>();
+     if (code == 'i') {
+         // Compressed integers.
++        _CompressedIntsReader r;
++        r.Prepare<int32_t>(reader, osize);
+         vector<int32_t> ints(osize);
+-        _ReadCompressedInts(reader, ints.data(), ints.size());
+-        std::copy(ints.begin(), ints.end(), odata);
++        r.Decode(ints.data(), ints.size());
++        out->resize(osize);
++        std::copy(ints.begin(), ints.end(), out->data());
+     } else if (code == 't') {
+         // Lookup table & indexes.
+         auto lutSize = reader.template Read<uint32_t>();
++        reader.CheckCount(lutSize, sizeof(T), "a lookup table");
+         vector<T> lut(lutSize);
+         reader.ReadContiguous(lut.data(), lut.size());
++        _CompressedIntsReader r;
++        r.Prepare<uint32_t>(reader, osize);
+         vector<uint32_t> indexes(osize);
+-        _ReadCompressedInts(reader, indexes.data(), indexes.size());
+-        auto o = odata;
++        r.Decode(indexes.data(), indexes.size());
++        out->resize(osize);
++        auto o = out->data();
+         for (auto index: indexes) {
++            // Unity USD Toolkit: an index from the file, checked before it
++            // reads the table.
++            if (index >= lut.size()) {
++                PXR_TF_THROW(SdfReadOutOfBoundsError, TfStringPrintf(
++                    "Corrupt asset <%s>: lookup table index %u >= %zu",
++                    reader.crate->GetAssetPath().c_str(), index,
++                    lut.size()));
++            }
+             *o++ = lut[index];
+         }
+     } else {
+@@ -3491,7 +3641,31 @@ CrateFile::_TableOfContents
+ CrateFile::_ReadTOC(Reader reader, _BootStrap const &b) const
+ {
+     reader.Seek(b.tocOffset);
+-    return reader.template Read<_TableOfContents>();
++    _TableOfContents toc = reader.template Read<_TableOfContents>();
++    // Unity USD Toolkit: every section has to lie inside the file and have a
++    // terminated name.  Their ranges went unchecked to the prefetch (on Linux
++    // and macOS, posix_madvise over memory outside the mapping) and, when a
++    // layer is saved over itself, to the copy of sections this version does
++    // not know (new char[size]); an unterminated name sent the section lookup's
++    // strcmp past it.
++    const int64_t fileSize = reader.src.Size();
++    for (_Section const &sec: toc.sections) {
++        if (sec.name[_SectionNameMaxLength] != '\0') {
++            TF_RUNTIME_ERROR("Corrupt asset <%s>: a section name in the table "
++                             "of contents is not terminated",
++                             _assetPath.c_str());
++            return _TableOfContents();
++        }
++        if (sec.start < 0 || sec.size < 0 || sec.start > fileSize ||
++            sec.size > fileSize - sec.start) {
++            TF_RUNTIME_ERROR("Corrupt asset <%s>: section %s at offset "
++                             "%" PRId64 ", %" PRId64 " bytes, is outside the "
++                             "file (%" PRId64 " bytes)", _assetPath.c_str(),
++                             sec.name, sec.start, sec.size, fileSize);
++            return _TableOfContents();
++        }
++    }
++    return toc;
+ }
+ 
+ template <class Reader>
+@@ -3507,9 +3681,12 @@ CrateFile::_ReadFieldSets(Reader reader)
+         } else {
+             // Compressed fieldSets in 0.4.0.
+             auto numFieldSets = reader.template Read<uint64_t>();
++            // Unity USD Toolkit: checked before anything is allocated.
++            _CompressedIntsReader cr;
++            cr.Prepare<uint32_t>(reader, numFieldSets);
+             _fieldSets.resize(numFieldSets);
+             vector<uint32_t> tmp(numFieldSets);
+-            _ReadCompressedInts(reader, tmp.data(), numFieldSets);
++            cr.Decode(tmp.data(), numFieldSets);
+             for (size_t i = 0; i != numFieldSets; ++i) {
+                 _fieldSets[i].value = tmp[i];
+             }
+@@ -3535,22 +3712,33 @@ CrateFile::_ReadFields(Reader reader)
+         } else {
+             // Compressed fields in 0.4.0.
+             auto numFields = reader.template Read<uint64_t>();
++            // Unity USD Toolkit: checked before anything is allocated.
++            _CompressedIntsReader cr;
++            cr.Prepare<uint32_t>(reader, numFields);
+             _fields.resize(numFields);
+             vector<uint32_t> tmp(numFields);
+-            _ReadCompressedInts(reader, tmp.data(), tmp.size());
++            cr.Decode(tmp.data(), tmp.size());
+             for (size_t i = 0; i != numFields; ++i) {
+                 _fields[i].tokenIndex.value = tmp[i];
+             }
+ 
+             // Compressed value reps.
+             uint64_t repsSize = reader.template Read<uint64_t>();
++            reader.CheckCount(repsSize, 1, "the field values");
+             std::unique_ptr<char[]> compBuffer(new char[repsSize]);
+             reader.ReadContiguous(compBuffer.get(), repsSize);
+             vector<uint64_t> repsData;
+             repsData.resize(numFields);
+-            TfFastCompression::DecompressFromBuffer(
+-                compBuffer.get(), reinterpret_cast<char *>(repsData.data()),
+-                repsSize, repsData.size() * sizeof(repsData[0]));
++            // Unity USD Toolkit: the reps have to fill repsData; the rest of it
++            // was used as zero reps.
++            if (TfFastCompression::DecompressFromBuffer(
++                    compBuffer.get(), reinterpret_cast<char *>(repsData.data()),
++                    repsSize, repsData.size() * sizeof(repsData[0])) !=
++                repsData.size() * sizeof(repsData[0])) {
++                PXR_TF_THROW(SdfReadOutOfBoundsError, TfStringPrintf(
++                    "Corrupt asset <%s>: field values do not hold the %" PRIu64
++                    " fields", _assetPath.c_str(), numFields));
++            }
+ 
+             for (size_t i = 0; i != numFields; ++i) {
+                 _fields[i].valueRep.data = repsData[i];
+@@ -3576,14 +3764,18 @@ CrateFile::_ReadSpecs(Reader reader)
+         } else {
+             // Version 0.4.0 specs are compressed
+             auto numSpecs = reader.template Read<uint64_t>();
+-            _specs.resize(numSpecs);
+ 
+             // Create temporary space for decompressing.
+             _CompressedIntsReader cr;
++
++            // Unity USD Toolkit: the first array is checked before the specs
++            // are allocated.
++            cr.Prepare<uint32_t>(reader, numSpecs);
++            _specs.resize(numSpecs);
+             vector<uint32_t> tmp(numSpecs);
+ 
+             // pathIndexes.
+-            cr.Read(reader, tmp.data(), numSpecs);
++            cr.Decode(tmp.data(), numSpecs);
+             for (size_t i = 0; i != numSpecs; ++i) {
+                 _specs[i].pathIndex.value = tmp[i];
+             }
+@@ -3699,6 +3891,7 @@ CrateFile::_ReadTokens(Reader reader)
+         // to make tokens out of it.  This is a pessimization vs mmap, from
+         // which we can just construct from the chars directly.
+         auto tokensNumBytes = reader.template Read<uint64_t>();
++        reader.CheckCount(tokensNumBytes, 1, "the tokens");
+         chars.reset(new char[tokensNumBytes]);
+         charsEnd = chars.get() + tokensNumBytes;
+         reader.ReadContiguous(chars.get(), tokensNumBytes);
+@@ -3706,12 +3899,35 @@ CrateFile::_ReadTokens(Reader reader)
+         // Compressed token data.
+         uint64_t uncompressedSize = reader.template Read<uint64_t>();
+         uint64_t compressedSize = reader.template Read<uint64_t>();
++        // Unity USD Toolkit: the compressed bytes have to be in the file, and
++        // TfFastCompression (LZ4) expands them at most about 255 times.
++        reader.CheckCount(compressedSize, 1, "the tokens");
++        if (uncompressedSize / 256 > compressedSize) {
++            PXR_TF_THROW(SdfReadOutOfBoundsError, TfStringPrintf(
++                "Corrupt asset <%s>: %" PRIu64 " bytes of tokens claim to "
++                "decompress to %" PRIu64, _assetPath.c_str(), compressedSize,
++                uncompressedSize));
++        }
+         chars.reset(new char[uncompressedSize]);
+         charsEnd = chars.get() + uncompressedSize;
+         RawDataPtr compressed(new char[compressedSize]);
+         reader.ReadContiguous(compressed.get(), compressedSize);
+-        TfFastCompression::DecompressFromBuffer(
+-            compressed.get(), chars.get(), compressedSize, uncompressedSize);
++        // Unity USD Toolkit: what does not decompress was read uninitialized.
++        if (TfFastCompression::DecompressFromBuffer(
++                compressed.get(), chars.get(), compressedSize,
++                uncompressedSize) != uncompressedSize) {
++            PXR_TF_THROW(SdfReadOutOfBoundsError, TfStringPrintf(
++                "Corrupt asset <%s>: tokens do not decompress to the %" PRIu64
++                " bytes they claim", _assetPath.c_str(), uncompressedSize));
++        }
++    }
++
++    // Unity USD Toolkit: every token takes at least its terminating null, and
++    // _tokens is allocated for the count the file claims.
++    if (numTokens > static_cast<uint64_t>(charsEnd - chars.get())) {
++        PXR_TF_THROW(SdfReadOutOfBoundsError, TfStringPrintf(
++            "Corrupt asset <%s>: %" PRIu64 " tokens claimed in %td bytes",
++            _assetPath.c_str(), numTokens, charsEnd - chars.get()));
+     }
+ 
+     // Check/ensure that we're null terminated.
+@@ -3760,12 +3976,33 @@ CrateFile::_ReadPaths(Reader reader)
+     reader.Seek(pathsSection->start);
+ 
+     // Read # of paths, and fill the _paths vector with empty paths.
+-    _paths.resize(reader.template Read<uint64_t>());
+-    std::fill(_paths.begin(), _paths.end(), SdfPath());
++    const uint64_t numPathsTotal = reader.template Read<uint64_t>();
+ 
+-    WorkDispatcher dispatcher;
+     // VERSIONING: PathItemHeader changes size from 0.0.1 to 0.1.0.
+     Version fileVer(_boot.version);
++
++    // Unity USD Toolkit: the count is checked before _paths is allocated.
++    // Compressed paths encode every path but the empty one, and the first of
++    // their arrays has to hold the count it claims.
++    if (fileVer < Version(0,4,0)) {
++        reader.CheckCount(numPathsTotal, 1, "the paths");
++    } else {
++        const int64_t start = reader.src.Tell();
++        const uint64_t numEncoded = reader.template Read<uint64_t>();
++        if (numPathsTotal > numEncoded + 1) {
++            PXR_TF_THROW(SdfReadOutOfBoundsError, TfStringPrintf(
++                "Corrupt asset <%s>: %" PRIu64 " paths claimed, %" PRIu64
++                " encoded", _assetPath.c_str(), numPathsTotal, numEncoded));
++        }
++        _CompressedIntsReader cr;
++        cr.Prepare<uint32_t>(reader, numEncoded);
++        reader.Seek(start);
++    }
++
++    _paths.resize(numPathsTotal);
++    std::fill(_paths.begin(), _paths.end(), SdfPath());
++
++    WorkDispatcher dispatcher;
+     if (fileVer == Version(0,0,1)) {
+         _ReadPathsImpl<_PathItemHeader_0_0_1>(reader, dispatcher);
+     } else if (fileVer < Version(0,4,0)) {
+@@ -3860,9 +4097,11 @@ CrateFile::_ReadCompressedPaths(Reader reader,
+     
+     _CompressedIntsReader cr;
+ 
+-    // pathIndexes.
++    // pathIndexes.  Unity USD Toolkit: each array is checked before it is
++    // allocated.
++    cr.Prepare<uint32_t>(reader, numPaths);
+     pathIndexes.resize(numPaths);
+-    cr.Read(reader, pathIndexes.data(), numPaths);
++    cr.Decode(pathIndexes.data(), numPaths);
+ 
+     // Range check the pathIndexes, which index into _paths, and also ensure
+     // there are no duplicates in pathIndexes.  If there are this file is
+@@ -3887,8 +4126,9 @@ CrateFile::_ReadCompressedPaths(Reader reader,
+     } // SafetyOverSpeed
+     
+     // elementTokenIndexes.
++    cr.Prepare<int32_t>(reader, numPaths);
+     elementTokenIndexes.resize(numPaths);
+-    cr.Read(reader, elementTokenIndexes.data(), numPaths);
++    cr.Decode(elementTokenIndexes.data(), numPaths);
+ 
+     // Range check the elementTokenIndexes, which index (by absolute value) into
+     // _tokens.
+@@ -3905,8 +4145,41 @@ CrateFile::_ReadCompressedPaths(Reader reader,
+     } // SafetyOverSpeed
+ 
+     // jumps.
++    cr.Prepare<int32_t>(reader, numPaths);
+     jumps.resize(numPaths);
+-    cr.Read(reader, jumps.data(), numPaths);
++    cr.Decode(jumps.data(), numPaths);
++
++    // Unity USD Toolkit: walk the jumps as _BuildDecompressedPathsImpl will,
++    // without building anything, and require that they visit every encoded
++    // path at most once.  The writer encodes a tree; damaged jumps that lead
++    // two ways to one entry made the build spawn tasks without bound (memory
++    // grew until the process died) and write one SdfPath from several threads
++    // at once.
++    if (numPaths != 0) {
++        vector<bool> visited(numPaths);
++        vector<size_t> pending { 0 };
++        while (!pending.empty()) {
++            size_t curIndex = pending.back();
++            pending.pop_back();
++            bool hasChild = false, hasSibling = false;
++            do {
++                const size_t thisIndex = curIndex++;
++                if (thisIndex >= numPaths || visited[thisIndex]) {
++                    TF_RUNTIME_ERROR("Corrupt paths jumps table in crate file "
++                                     "(entry %zu %s)", thisIndex,
++                                     thisIndex >= numPaths ?
++                                     "out of range" : "reached twice");
++                    return;
++                }
++                visited[thisIndex] = true;
++                hasChild = (jumps[thisIndex] > 0) || (jumps[thisIndex] == -1);
++                hasSibling = (jumps[thisIndex] >= 0);
++                if (hasChild && hasSibling) {
++                    pending.push_back(thisIndex + jumps[thisIndex]);
++                }
++            } while (hasChild || hasSibling);
++        }
++    }
+ 
+     // Now build the paths.
+     _BuildDecompressedPathsImpl(pathIndexes, elementTokenIndexes, jumps, 0,
+diff --git a/pxr/usd/sdf/integerCoding.cpp b/pxr/usd/sdf/integerCoding.cpp
+index 0146f55..8557de2 100644
+--- a/pxr/usd/sdf/integerCoding.cpp
++++ b/pxr/usd/sdf/integerCoding.cpp
+@@ -322,6 +322,33 @@ _EncodeIntegers(Int const *begin, size_t numInts, char *output)
+     return vintsOut - output;
+ }
+ 
++// Unity USD Toolkit: the bytes the encoded form of numInts integers takes, as
++// their codes say, or 0 if the size bytes at data cannot hold it.  A damaged
++// crate file can declare far more integers than its data holds, and the decoder
++// then read codes and values past what was decompressed.
++template <class Int>
++size_t _GetEncodedSize(char const *data, size_t size, size_t numInts)
++{
++    using SmallInt = typename _SmallTypes<Int>::SmallInt;
++    using MediumInt = typename _SmallTypes<Int>::MediumInt;
++
++    const size_t numCodesBytes = (numInts * 2 + 7) / 8;
++    if (numInts == 0 || size < sizeof(Int) ||
++        size - sizeof(Int) < numCodesBytes) {
++        return 0;
++    }
++
++    static constexpr size_t widths[4] = {
++        0, sizeof(SmallInt), sizeof(MediumInt), sizeof(Int) };
++    unsigned char const *codes =
++        reinterpret_cast<unsigned char const *>(data) + sizeof(Int);
++    size_t encodedSize = sizeof(Int) + numCodesBytes;
++    for (size_t i = 0; i != numInts; ++i) {
++        encodedSize += widths[(codes[i / 4] >> (2 * (i % 4))) & 3];
++    }
++    return encodedSize <= size ? encodedSize : 0;
++}
++
+ template <class Int>
+ size_t _DecodeIntegers(char const *data, size_t numInts, Int *result)
+ {
+@@ -387,6 +414,38 @@ size_t _DecompressIntegers(char const *compressed, size_t compressedSize,
+     if (decompSz == 0)
+         return 0;
+ 
++    // Unity USD Toolkit: decode only what was decompressed.
++    if (_GetEncodedSize<Int>(workingSpace, decompSz, numInts) == 0)
++        return 0;
++
++    return _DecodeIntegers(workingSpace, numInts, ints);
++}
++
++// Unity USD Toolkit: DecompressToWorkingSpace and DecodeFromWorkingSpace, which
++// split _DecompressIntegers so that a reader can check the data holds numInts
++// integers before it allocates their destination.
++template <class Compression, class Int>
++size_t _DecompressToWorkingSpace(char const *compressed, size_t compressedSize,
++                                 size_t numInts, char *workingSpace)
++{
++    size_t decompSz = TfFastCompression::DecompressFromBuffer(
++        compressed, workingSpace, compressedSize,
++        Compression::GetDecompressionWorkingSpaceSize(numInts));
++
++    if (decompSz == 0 ||
++        _GetEncodedSize<Int>(workingSpace, decompSz, numInts) == 0)
++        return 0;
++
++    return decompSz;
++}
++
++template <class Int>
++size_t _DecodeFromWorkingSpace(char const *workingSpace, size_t decompSz,
++                               Int *ints, size_t numInts)
++{
++    if (_GetEncodedSize<Int>(workingSpace, decompSz, numInts) == 0)
++        return 0;
++
+     return _DecodeIntegers(workingSpace, numInts, ints);
+ }
+ 
+@@ -441,6 +500,33 @@ Sdf_IntegerCompression::DecompressFromBuffer(
+         compressed, compressedSize, ints, numInts, workingSpace);
+ }
+ 
++size_t
++Sdf_IntegerCompression::DecompressToWorkingSpace(
++    char const *compressed, size_t compressedSize, size_t numInts,
++    char *workingSpace)
++{
++    return _DecompressToWorkingSpace<Sdf_IntegerCompression, int32_t>(
++        compressed, compressedSize, numInts, workingSpace);
++}
++
++size_t
++Sdf_IntegerCompression::DecodeFromWorkingSpace(
++    char const *workingSpace, size_t decompressedSize,
++    int32_t *ints, size_t numInts)
++{
++    return _DecodeFromWorkingSpace(
++        workingSpace, decompressedSize, ints, numInts);
++}
++
++size_t
++Sdf_IntegerCompression::DecodeFromWorkingSpace(
++    char const *workingSpace, size_t decompressedSize,
++    uint32_t *ints, size_t numInts)
++{
++    return _DecodeFromWorkingSpace(
++        workingSpace, decompressedSize, ints, numInts);
++}
++
+ ////////////////////////////////////////////////////////////////////////
+ // 64 bit.
+ 
+@@ -489,5 +575,32 @@ Sdf_IntegerCompression64::DecompressFromBuffer(
+         compressed, compressedSize, ints, numInts, workingSpace);
+ }
+ 
++size_t
++Sdf_IntegerCompression64::DecompressToWorkingSpace(
++    char const *compressed, size_t compressedSize, size_t numInts,
++    char *workingSpace)
++{
++    return _DecompressToWorkingSpace<Sdf_IntegerCompression64, int64_t>(
++        compressed, compressedSize, numInts, workingSpace);
++}
++
++size_t
++Sdf_IntegerCompression64::DecodeFromWorkingSpace(
++    char const *workingSpace, size_t decompressedSize,
++    int64_t *ints, size_t numInts)
++{
++    return _DecodeFromWorkingSpace(
++        workingSpace, decompressedSize, ints, numInts);
++}
++
++size_t
++Sdf_IntegerCompression64::DecodeFromWorkingSpace(
++    char const *workingSpace, size_t decompressedSize,
++    uint64_t *ints, size_t numInts)
++{
++    return _DecodeFromWorkingSpace(
++        workingSpace, decompressedSize, ints, numInts);
++}
++
+ PXR_NAMESPACE_CLOSE_SCOPE
+ 
+diff --git a/pxr/usd/sdf/integerCoding.h b/pxr/usd/sdf/integerCoding.h
+index 148fb6d..9ef91d5 100644
+--- a/pxr/usd/sdf/integerCoding.h
++++ b/pxr/usd/sdf/integerCoding.h
+@@ -65,6 +65,30 @@ public:
+         char const *compressed, size_t compressedSize,
+         uint32_t *ints, size_t numInts,
+         char *workingSpace=nullptr);
++
++    // Unity USD Toolkit: decompress \p compressedSize bytes from \p compressed
++    // into \p workingSpace (GetDecompressionWorkingSpaceSize(numInts) bytes)
++    // without decoding them.  Return the decompressed size, or 0 if it does not
++    // hold \p numInts integers.  A damaged file can declare far more integers
++    // than its data holds; this lets a reader refuse it before it allocates
++    // anything \p numInts long.  DecodeFromWorkingSpace then decodes them.
++    SDF_API
++    static size_t DecompressToWorkingSpace(
++        char const *compressed, size_t compressedSize, size_t numInts,
++        char *workingSpace);
++
++    // Unity USD Toolkit: decode \p numInts 32-bit integers into \p ints from the
++    // \p decompressedSize bytes DecompressToWorkingSpace left in
++    // \p workingSpace.  Return \p numInts, or 0 if those bytes do not hold them.
++    SDF_API
++    static size_t DecodeFromWorkingSpace(
++        char const *workingSpace, size_t decompressedSize,
++        int32_t *ints, size_t numInts);
++
++    SDF_API
++    static size_t DecodeFromWorkingSpace(
++        char const *workingSpace, size_t decompressedSize,
++        uint32_t *ints, size_t numInts);
+ };
+ 
+ class Sdf_IntegerCompression64
+@@ -117,6 +141,25 @@ public:
+         char const *compressed, size_t compressedSize,
+         uint64_t *ints, size_t numInts,
+         char *workingSpace=nullptr);
++
++    // Unity USD Toolkit: as Sdf_IntegerCompression::DecompressToWorkingSpace,
++    // for 64-bit integers.
++    SDF_API
++    static size_t DecompressToWorkingSpace(
++        char const *compressed, size_t compressedSize, size_t numInts,
++        char *workingSpace);
++
++    // Unity USD Toolkit: as Sdf_IntegerCompression::DecodeFromWorkingSpace,
++    // for 64-bit integers.
++    SDF_API
++    static size_t DecodeFromWorkingSpace(
++        char const *workingSpace, size_t decompressedSize,
++        int64_t *ints, size_t numInts);
++
++    SDF_API
++    static size_t DecodeFromWorkingSpace(
++        char const *workingSpace, size_t decompressedSize,
++        uint64_t *ints, size_t numInts);
+ };
+ 
+ PXR_NAMESPACE_CLOSE_SCOPE

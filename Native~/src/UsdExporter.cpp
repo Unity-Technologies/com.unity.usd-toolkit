@@ -1,4 +1,5 @@
 #include "unity_usd_toolkit_native.h"
+#include "UsdPhysicsImport.h"
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -7,14 +8,19 @@
 #endif
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <array>
 #include <cctype>
 #include <cstdint>
 #include <cstring>
 #include <exception>
+#include <fstream>
+#include <map>
 #include <ios>
+#include <limits>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <sstream>
 #include <string>
@@ -32,6 +38,10 @@
 #include <pxr/base/gf/vec4f.h>
 #include <pxr/base/gf/matrix4d.h>
 #include <pxr/base/tf/diagnosticMgr.h>
+#if defined(__linux__)
+#include <tbb/tbb_stddef.h> // TBB_INTERFACE_VERSION only; nothing of TBB is linked from here
+#endif
+#include <pxr/base/tf/fileUtils.h>
 #include <pxr/base/tf/pathUtils.h>
 #include <pxr/base/tf/error.h>
 #include <pxr/base/tf/status.h>
@@ -44,6 +54,7 @@
 #include <pxr/usd/ar/resolvedPath.h>
 #include <pxr/usd/ar/resolver.h>
 #include <pxr/usd/sdf/assetPath.h>
+#include <pxr/usd/sdf/fileFormat.h>
 #include <pxr/usd/sdf/layer.h>
 #include <pxr/usd/sdf/layerUtils.h>
 #include <pxr/usd/sdf/path.h>
@@ -86,6 +97,7 @@
 #include <pxr/usd/usdLux/domeLight.h>
 #include <pxr/usd/usdLux/lightAPI.h>
 #include <pxr/usd/usdLux/rectLight.h>
+#include <pxr/usd/usdLux/shadowAPI.h>
 #include <pxr/usd/usdLux/shapingAPI.h>
 #include <pxr/usd/usdLux/sphereLight.h>
 #include <pxr/usd/usdMedia/spatialAudio.h>
@@ -96,19 +108,118 @@
 #include <pxr/usd/usdShade/materialBindingAPI.h>
 #include <pxr/usd/usdShade/output.h>
 #include <pxr/usd/usdShade/shader.h>
+#include <pxr/usd/usdSkel/animation.h>
+#include <pxr/usd/usdSkel/animMapper.h>
+#include <pxr/usd/usdSkel/animQuery.h>
+#include <pxr/usd/usdSkel/binding.h>
+#include <pxr/usd/usdSkel/bindingAPI.h>
+#include <pxr/usd/usdSkel/blendShape.h>
+#include <pxr/usd/usdSkel/cache.h>
+#include <pxr/usd/usdSkel/inbetweenShape.h>
+#include <pxr/usd/usdSkel/root.h>
+#include <pxr/usd/usdSkel/skeleton.h>
+#include <pxr/usd/usdSkel/skeletonQuery.h>
+#include <pxr/usd/usdSkel/skinningQuery.h>
+#include <pxr/usd/usdSkel/tokens.h>
+#include <pxr/usd/usdSkel/topology.h>
+#include <pxr/usd/usdSkel/utils.h>
 #include <pxr/usd/usdUtils/usdzPackage.h>
+// Stage API (API v13)
+#include <pxr/base/gf/half.h>
+#include <pxr/base/gf/matrix2d.h>
+#include <pxr/base/gf/matrix3d.h>
+#include <pxr/base/gf/quatd.h>
+#include <pxr/base/gf/quatf.h>
+#include <pxr/base/gf/quath.h>
+#include <pxr/base/gf/vec2i.h>
+#include <pxr/base/gf/vec3h.h>
+#include <pxr/base/gf/vec3i.h>
+#include <pxr/base/gf/vec4d.h>
+#include <pxr/base/gf/vec4h.h>
+#include <pxr/base/gf/vec4i.h>
+#include <pxr/base/tf/notice.h>
+#include <pxr/base/tf/weakBase.h>
+#include <pxr/usd/sdf/schema.h>
+#include <pxr/usd/sdf/timeCode.h>
+#include <pxr/usd/usd/editTarget.h>
+#include <pxr/usd/usd/inherits.h>
+#include <pxr/usd/usd/notice.h>
+#include <pxr/usd/usd/payloads.h>
+#include <pxr/usd/usd/references.h>
+#include <pxr/usd/usd/relationship.h>
+#include <pxr/usd/usd/specializes.h>
+#include <pxr/base/arch/export.h>
+
+PXR_NAMESPACE_OPEN_SCOPE
+// usdDraco's writer (pxr/usd/plugin/usdDraco/writer.h, which OpenUSD does not install), exported
+// from the OpenUSD library by Native~/patches/openusd-26.05-windows-draco.patch.
+ARCH_IMPORT bool UsdDraco_WriteDraco(const UsdGeomMesh& mesh,
+                                     const std::string& fileName,
+                                     int qp,
+                                     int qt,
+                                     int qn,
+                                     int cl,
+                                     int preservePolygons,
+                                     int preservePositionOrder,
+                                     int preserveHoles);
+PXR_NAMESPACE_CLOSE_SCOPE
 
 PXR_NAMESPACE_USING_DIRECTIVE
+
+// Collects what a stage recomposes or edits (API v13) for RUSD_QUERY_CHANGES: the prim of every
+// resynced and changed-info path of each UsdNotice::ObjectsChanged the stage sends.
+class RUsdChangeListener final : public TfWeakBase
+{
+public:
+    RUsdChangeListener(const UsdStageRefPtr& stage, std::set<SdfPath>* changed)
+        : _changed(changed)
+    {
+        _key = TfNotice::Register(TfCreateWeakPtr(this), &RUsdChangeListener::OnObjectsChanged,
+                                  UsdStageWeakPtr(stage));
+    }
+
+    ~RUsdChangeListener()
+    {
+        TfNotice::Revoke(_key);
+    }
+
+    void OnObjectsChanged(const UsdNotice::ObjectsChanged& notice, const UsdStageWeakPtr&)
+    {
+        for (const SdfPath& path : notice.GetResyncedPaths())
+        {
+            _changed->insert(path.GetPrimPath());
+        }
+
+        for (const SdfPath& path : notice.GetChangedInfoOnlyPaths())
+        {
+            _changed->insert(path.GetPrimPath());
+        }
+    }
+
+private:
+    std::set<SdfPath>* _changed;
+    TfNotice::Key _key;
+};
 
 struct RUsdContext
 {
     UsdStageRefPtr stage;
     SdfPath rootPath;
+    // Set when the output's format can be written but not edited in place (Alembic: usdAbc's
+    // layers refuse every edit): the stage is built in memory and exported here at the end.
+    std::string exportTo;
+    // API v13: `exportTo` is a Draco (.drc) file, which no file format writes: EndExport encodes
+    // the stage's meshes into it through usdDraco's writer instead (WriteDracoFile).
+    bool exportDraco = false;
     // Where generated materials go. Empty means <rootPath>/Looks (the original layout); a layer
     // written over another stage sets its own so it cannot collide with that stage's materials.
     SdfPath materialScopePath;
     std::string lastError;
     std::string diagnostics;
+    // OpenUSD posts diagnostics from TBB worker threads, and the delegate appends them while the
+    // importer adds its own warnings on the calling thread: every access to `diagnostics` while
+    // the delegate is installed takes this.
+    std::mutex diagnosticsMutex;
     std::unique_ptr<TfDiagnosticMgr::Delegate> diagnosticDelegate;
     int materialIndex = 0;
     size_t importWarningCount = 0;
@@ -135,9 +246,28 @@ struct RUsdContext
         // than Unity's packed metallic+smoothness. ALab's UsdPreviewSurface and OmniPBR's
         // metallic_texture both author it that way, with roughness in a file of its own.
         bool metallicIsPlain = false;
+        // The normal map's tangent frame is flipped along U / V: OmniPBR's flip_tangent_u
+        // (default false) and flip_tangent_v (default true). Isaac Sim reads an OmniPBR normal map
+        // with V flipped (DirectX-style green), so a host on Unity's OpenGL-style convention
+        // flips that channel (RUsd_GetImportMaterialNormalFlip).
+        bool normalFlipU = false;
+        bool normalFlipV = false;
         // A roughness map in a file of its own (API 10). Unity reads smoothness from the metallic
         // map's alpha, so the host folds 1 - roughness into that alpha while it has the pixels.
         std::string roughnessTexturePath;
+        // An albedo blended with a constant colour by a mask (API 13): the base colour is
+        // lerp(maskColor, albedo, mask), as Unreal-connector MDL writes it. The host bakes it.
+        std::string maskTexturePath;
+        float maskColor[3] = {0.0f, 0.0f, 0.0f};
+        // API 13. How the mask is used: -1 none, 0 lerp(maskColor, albedo, mask.r), 1 the
+        // per-channel form lerp(lerp(lerp(lerp(0, c0, m.r), c1, m.g), c2, m.b), albedo, m.a),
+        // 2 Unreal's BlendOverlay of the mask (read linear) over the albedo, per channel.
+        int maskMode = -1;
+        float channelColors[9] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+        // Roughness = lerp(roughnessMin, roughnessMax, ORM.g) when hasRoughnessRange.
+        bool hasRoughnessRange = false;
+        float roughnessMin = 0.0f;
+        float roughnessMax = 1.0f;
     };
 
     struct ImportedMesh
@@ -154,6 +284,48 @@ struct RUsdContext
         std::vector<RUsdSubmesh> submeshes; // per-material triangle ranges into `indices`
         int materialIndex = -1;             // default/whole-mesh material (first submesh)
         int visible = 1;
+
+        // The USD point each imported vertex was made from. Joint weights and blend-shape
+        // offsets are authored per point, so a skinned mesh records it through the vertex split;
+        // empty means vertex i is point i (always true when nothing split).
+        std::vector<int> vertexPoints;
+        size_t sourcePointCount = 0; // the USD points vertexPoints indexes
+
+        // Animated points (a point cache, API v13): every imported vertex at every sample of the
+        // points, through the same split and basis as `points`, and the normals likewise -- empty
+        // when the mesh keeps the normals it was imported with. vertexNormalElements is the
+        // authored normal each vertex took, recorded for a mesh with animated points and normals.
+        std::vector<double> pointCacheTimes;
+        std::vector<RUsdVec3> pointCachePoints;
+        std::vector<RUsdVec3> pointCacheNormals;
+        std::vector<int> vertexNormalElements;
+
+        // UsdSkel binding (API v13). skeletonIndex is -1 for a mesh that is not skinned.
+        struct BlendShapeFrame
+        {
+            float weight = 1.0f;
+            std::vector<RUsdVec3> deltaVertices; // one per imported vertex, Unity basis
+            std::vector<RUsdVec3> deltaNormals;  // empty when the shape authors no normal offsets
+        };
+        struct BlendShape
+        {
+            std::string name;
+            std::vector<BlendShapeFrame> frames; // inbetweens by ascending weight, then the shape at 1
+        };
+        struct Skin
+        {
+            int skeletonIndex = -1;
+            int influences = 0;                 // joint/weight pairs per vertex
+            std::vector<int> jointIndices;      // into the skeleton's joint order
+            std::vector<float> jointWeights;
+            RUsdMatrix4x4 geomBindTransform = {};
+            int dualQuaternion = 0;             // skel:skinningMethod is dualQuaternion
+            std::vector<BlendShape> blendShapes;
+            std::vector<float> blendShapeWeights;       // at importTime, one per blend shape
+            std::vector<double> blendShapeWeightTimes;
+            std::vector<float> blendShapeWeightSamples; // times x blend shapes
+        };
+        Skin skin;
     };
 
     // A transform node in the imported hierarchy (every Xformable prim: Xform, Mesh, ...).
@@ -173,6 +345,59 @@ struct RUsdContext
     std::vector<ImportedMaterial> importedMaterials;
     std::vector<ImportedMesh> importedMeshes;
     std::vector<ImportedNode> importedNodes;
+
+    // Time (API v13). Every static value the import reads -- points, primvars, transforms,
+    // visibility, implicit surfaces, lights, cameras -- is read at importTime; see
+    // ResolveImportTime. importAtDefaultTime is set from RUSD_OPEN_DEFAULT_TIME before the walk.
+    UsdTimeCode importTime = UsdTimeCode::Default();
+    bool importAtDefaultTime = false;
+    RUsdImportTimeInfo timeInfo = {};
+
+    // Animated transforms and visibility (API v13): one track per node and kind.
+    struct ImportedNodeTrack
+    {
+        int nodeIndex = -1;
+        int kind = 0;                // RUSD_TRACK_*
+        std::vector<double> times;
+        std::vector<float> values;   // 16 floats a sample for transforms, 1 for visibility
+    };
+    std::vector<ImportedNodeTrack> importedNodeTracks;
+
+    // Skeletons (API v13), in the order their SkelRoots were reached. Matrices are row-major
+    // floats in USD's row-vector convention, 16 per joint (and per sample for `samples`).
+    struct ImportedSkeleton
+    {
+        std::string path;
+        int nodeIndex = -1;          // the node the Skeleton prim became; -1 until the walk reaches it
+        std::vector<std::string> joints;
+        std::vector<int> parents;
+        std::vector<float> bindTransforms;  // skeleton space
+        std::vector<float> restTransforms;  // joint local
+        std::vector<float> poseTransforms;  // joint local, at importTime
+        std::vector<double> times;
+        std::vector<float> samples;         // joint local, times x joints
+    };
+    std::vector<ImportedSkeleton> importedSkeletons;
+    size_t animationValues = 0;  // floats held by tracks, skeleton samples and blend shapes
+
+    // Import budgets, as RUsd_OpenStageWithLimits set them; these defaults are the kMaxImport*
+    // constants below (static_assert there). With skipWhenExceeded the walk leaves out what does
+    // not fit, counted here and reported once at the end, instead of failing the import.
+    struct ImportLimits
+    {
+        size_t nodes = 2000000;
+        size_t meshes = 1000000;
+        size_t instancePlacements = 4000000;
+        size_t geometryElements = 256u * 1024u * 1024u;
+        size_t trackSamples = 1000000;
+        size_t animationValues = 64u * 1024u * 1024u;
+        size_t joints = 65536;
+        bool skipWhenExceeded = false;
+    } importLimits;
+    size_t skippedNodes = 0;
+    std::string firstSkippedNode;
+    size_t skippedMeshes = 0;
+    size_t skippedPlacements = 0;
 
     // Point instancers drawn from their arrays instead of expanded into prims (API v8). One
     // record per prototype mesh: the mesh is imported once, and `matrices` holds that mesh's
@@ -202,6 +427,8 @@ struct RUsdContext
     std::vector<ImportedLight> importedLights;
     std::vector<RUsdImportCamera> importedCameras;
     std::vector<ImportedAudio> importedAudio;
+    // API v13: what RUsd_ReadPhysics last returned; its pointers stay valid while this holds it.
+    rusd_physics::StorePtr physics;
 
     // Material cache key -> index into importedMaterials. The key is the material prim in its
     // prototype, so every instance of one part shares a single entry; displayColor stand-ins add
@@ -216,30 +443,49 @@ struct RUsdContext
     // Export: identical materials (by value) are written once and shared between meshes.
     std::unordered_map<std::string, UsdShadeMaterial> exportedMaterials;
 
+    // Export: RUSD_MATERIAL_FLAVOR_* written beside UsdPreviewSurface (API 13).
+    int materialFlavors = 0;
+
     // Authored asset path -> the path OpenUSD resolved it to, recorded while reading materials.
     // The authored path is all the managed side gets, and for a stage inside a .usdz package it
     // resolves to a file no file-system read can reach, so RUsd_ReadImportAsset resolves through
     // this table (per-layer correct) before falling back to anchoring on the root layer.
     std::unordered_map<std::string, std::string> assetResolutions;
+    // Texture path -> the colour space its file input authors ("sRGB", "raw", ...): the
+    // colorSpace metadata on the attribute that holds the asset, or a UsdUVTexture's
+    // sourceColorSpace. Absent when nothing is authored ("auto"). See RUsd_GetImportTextureColorSpace.
+    std::unordered_map<std::string, std::string> assetColorSpaces;
+    // Remote MDL modules (http/https sourceAsset) the import met and found no cached copy of,
+    // in the order met. See RUsd_GetImportRemoteRequest.
+    std::vector<std::string> remoteRequests;
 
     // RUsd_GetImportComposition's report, built on first request.
     std::string compositionReport;
     bool compositionReportBuilt = false;
+
+    // Stage API (API v13). The prims recomposed or edited since the last RUSD_QUERY_CHANGES, and
+    // what collects them; declared after `stage`, so the listener goes first.
+    std::set<SdfPath> changedPaths;
+    std::unique_ptr<RUsdChangeListener> changeListener;
+    // A value RUsd_GetAttributeValue read for a size query, held for the call that copies it.
+    std::string pendingValueKey;
+    VtValue pendingValue;
 };
 
 namespace
 {
 constexpr int kSuccess = 0;
 constexpr int kFailure = 1;
-constexpr int kApiVersion = 12;
+constexpr int kApiVersion = 13;
 thread_local std::string g_lastError;
 thread_local std::string g_lastDiagnostics;
 
 class RUsdDiagnosticDelegate final : public TfDiagnosticMgr::Delegate
 {
 public:
-    explicit RUsdDiagnosticDelegate(std::string* diagnostics)
+    RUsdDiagnosticDelegate(std::string* diagnostics, std::mutex* mutex)
         : _diagnostics(diagnostics)
+        , _mutex(mutex)
     {
     }
 
@@ -302,8 +548,11 @@ private:
         AppendLine(stream.str());
     }
 
+    // TfDiagnosticMgr calls delegates on whichever thread posted the diagnostic, several at once
+    // when a stage is read in parallel; an unguarded append corrupted the heap.
     void AppendLine(const std::string& line)
     {
+        std::lock_guard<std::mutex> lock(*_mutex);
         if (!_diagnostics->empty())
         {
             *_diagnostics += "\n";
@@ -313,6 +562,7 @@ private:
     }
 
     std::string* _diagnostics;
+    std::mutex* _mutex;
 };
 
 std::string SafeString(const char* value)
@@ -423,6 +673,7 @@ void SetError(RUsdContext* context, const std::string& error)
     if (context != nullptr)
     {
         context->lastError = error;
+        std::lock_guard<std::mutex> lock(context->diagnosticsMutex);
         g_lastDiagnostics = context->diagnostics;
     }
 }
@@ -443,6 +694,24 @@ constexpr size_t kMaxImportNodes = 2000000;
 constexpr size_t kMaxImportMeshes = 1000000;
 constexpr size_t kMaxImportInstancePlacements = 4000000;     // instances x prototype meshes
 constexpr size_t kMaxImportGeometryElements = 256u * 1024u * 1024u; // points + indices, all meshes
+
+// Animation budgets (API v13). Time samples are untrusted input too -- a line of usda can author
+// a million samples on one joint array -- but losing an animation is no reason to lose the stage,
+// so these drop the one track, skeleton animation or blend shape with a warning and carry on.
+constexpr size_t kMaxImportTrackSamples = 1000000;                // per track
+constexpr size_t kMaxImportAnimationValues = 64u * 1024u * 1024u; // floats, every track and shape
+constexpr size_t kMaxImportJoints = 65536;                        // per skeleton
+constexpr int kMaxImportInfluences = 255;                         // Unity's bones-per-vertex limit
+
+// The context's budgets start as these; RUsd_OpenStageWithLimits replaces them for one import.
+static_assert(RUsdContext::ImportLimits{}.nodes == kMaxImportNodes &&
+              RUsdContext::ImportLimits{}.meshes == kMaxImportMeshes &&
+              RUsdContext::ImportLimits{}.instancePlacements == kMaxImportInstancePlacements &&
+              RUsdContext::ImportLimits{}.geometryElements == kMaxImportGeometryElements &&
+              RUsdContext::ImportLimits{}.trackSamples == kMaxImportTrackSamples &&
+              RUsdContext::ImportLimits{}.animationValues == kMaxImportAnimationValues &&
+              RUsdContext::ImportLimits{}.joints == kMaxImportJoints,
+              "RUsdContext::ImportLimits defaults must be the kMaxImport* constants");
 
 // Destination-capacity check for the copy-out entry points. Compared in size_t: narrowing the
 // source size to int first let a mesh over INT_MAX indices report a tiny count, pass the check
@@ -465,6 +734,7 @@ void AppendImportWarning(RUsdContext* context, const std::string& message)
     }
 
     ++context->importWarningCount;
+    std::lock_guard<std::mutex> lock(context->diagnosticsMutex);
     context->diagnostics += "USD import: " + message + "\n";
     if (context->importWarningCount == kMaxImportWarnings)
     {
@@ -486,7 +756,8 @@ void EnableDiagnostics(RUsdContext* context)
         return;
     }
 
-    context->diagnosticDelegate.reset(new RUsdDiagnosticDelegate(&context->diagnostics));
+    context->diagnosticDelegate.reset(
+        new RUsdDiagnosticDelegate(&context->diagnostics, &context->diagnosticsMutex));
     TfDiagnosticMgr::GetInstance().AddDelegate(context->diagnosticDelegate.get());
 }
 
@@ -497,8 +768,10 @@ void DisableDiagnostics(RUsdContext* context)
         return;
     }
 
+    // RemoveDelegate waits for calls already in the delegate, so none can follow this.
     TfDiagnosticMgr::GetInstance().RemoveDelegate(context->diagnosticDelegate.get());
     context->diagnosticDelegate.reset();
+    std::lock_guard<std::mutex> lock(context->diagnosticsMutex);
     g_lastDiagnostics = context->diagnostics;
 }
 
@@ -944,6 +1217,57 @@ std::string AnchorOnAuthoringLayer(const UsdAttribute& source, const std::string
     return std::string();
 }
 
+// The colour space authored for the file an attribute supplies: a UsdUVTexture's
+// sourceColorSpace, else the colorSpace metadata on the attribute or, through connections, on the
+// interface input that holds the value (Isaac Sim's OmniPBR materials connect each shader input to
+// a Material input). Empty when nothing is authored, which USD reads as "auto".
+static std::string AuthoredColorSpace(const UsdAttribute& attribute, int depth = 0)
+{
+    if (!attribute || depth > 8)
+    {
+        return std::string();
+    }
+
+    UsdShadeShader shader(attribute.GetPrim());
+    if (shader)
+    {
+        UsdShadeInput space = shader.GetInput(TfToken("sourceColorSpace"));
+        TfToken token;
+        if (space && space.Get(&token) && !token.IsEmpty() && token != TfToken("auto"))
+        {
+            return token.GetString();
+        }
+    }
+
+    if (attribute.HasColorSpace())
+    {
+        const TfToken space = attribute.GetColorSpace();
+        if (!space.IsEmpty() && space != TfToken("auto"))
+        {
+            return space.GetString();
+        }
+    }
+
+    UsdShadeInput input(attribute);
+    if (input)
+    {
+        UsdShadeSourceInfoVector sources = input.GetConnectedSources();
+        for (const UsdShadeConnectionSourceInfo& source : sources)
+        {
+            UsdAttribute next = source.sourceType == UsdShadeAttributeType::Output
+                ? source.source.GetOutput(source.sourceName).GetAttr()
+                : source.source.GetInput(source.sourceName).GetAttr();
+            std::string found = AuthoredColorSpace(next, depth + 1);
+            if (!found.empty())
+            {
+                return found;
+            }
+        }
+    }
+
+    return std::string();
+}
+
 bool StoreAssetPath(RUsdContext* context, const SdfAssetPath& asset, char* buffer, size_t capacity,
                     const UsdAttribute& source = UsdAttribute())
 {
@@ -976,6 +1300,15 @@ bool StoreAssetPath(RUsdContext* context, const SdfAssetPath& asset, char* buffe
         {
             path = RebaseOnStageRoot(context, path, resolved);
             context->assetResolutions[path] = resolved;
+        }
+    }
+
+    if (context != nullptr && source)
+    {
+        std::string space = AuthoredColorSpace(source);
+        if (!space.empty())
+        {
+            context->assetColorSpaces[path] = space;
         }
     }
 
@@ -1209,7 +1542,7 @@ bool ReadPrimvarReaderColor(
         return false;
     }
 
-    // varname is a token in the current schema and was a string before USD 21.11; both occur.
+    // varname is a string in the current schema and was a token before USD 21.11; both occur.
     if (VtValueHoldsType(value, "TfToken"))
     {
         *varname = value.UncheckedGet<TfToken>().GetString();
@@ -1226,6 +1559,93 @@ bool ReadPrimvarReaderColor(
 
     GetUsdShadeInputColor(reader, TfToken("fallback"), fallback);
     return true;
+}
+
+// UsdPreviewSurface's specular workflow (useSpecularWorkflow = 1): the reflectance comes from
+// specularColor and `metallic` is ignored. Unity's Lit is set up for the metallic workflow, so the
+// pair is converted the way Khronos converts glTF's specular-glossiness to metallic-roughness
+// (KHR_materials_pbrSpecularGlossiness converter): metallic solved from the diffuse and specular
+// brightness, the base colour blended from both. Ignoring the workflow imported a specular metal
+// as a dielectric with its diffuse colour (bench sphere: CIEDE2000 45 against Isaac Sim). Only a
+// constant specularColor converts; a textured one keeps the metallic reading, with a warning.
+static void ConvertSpecularWorkflow(
+    RUsdContext* context,
+    const UsdShadeShader& shader,
+    const std::string& materialPath,
+    bool hasAlbedo,
+    bool hasMetallicTexture,
+    RUsdMaterial* result)
+{
+    UsdShadeInput workflow = shader.GetInput(TfToken("useSpecularWorkflow"));
+    int useSpecular = 0;
+    VtValue value;
+    if (!workflow || !workflow.Get(&value) || !value.IsHolding<int>())
+    {
+        return;
+    }
+    useSpecular = value.UncheckedGet<int>();
+    if (useSpecular != 1)
+    {
+        return;
+    }
+
+    UsdShadeInput specularInput = shader.GetInput(TfToken("specularColor"));
+    if (specularInput && specularInput.HasConnectedSource())
+    {
+        AppendImportWarning(context,
+            "material '" + materialPath + "' uses the specular workflow with a textured specularColor, "
+            "which Unity's metallic Lit cannot take; it is read as the metallic workflow.");
+        return;
+    }
+
+    GfVec3f specular(0.0f, 0.0f, 0.0f); // the UsdPreviewSurface default
+    if (specularInput && specularInput.Get(&value) && value.IsHolding<GfVec3f>())
+    {
+        specular = value.UncheckedGet<GfVec3f>();
+    }
+
+    const float dielectric = 0.04f;
+    const float epsilon = 1e-6f;
+    auto brightness = [](const GfVec3f& c)
+    {
+        return std::sqrt(0.299f * c[0] * c[0] + 0.587f * c[1] * c[1] + 0.114f * c[2] * c[2]);
+    };
+
+    const GfVec3f diffuse(result->r, result->g, result->b);
+    const float specularStrength = std::max(specular[0], std::max(specular[1], specular[2]));
+    const float oneMinusSpecular = 1.0f - specularStrength;
+    const float diffuseBrightness = brightness(diffuse);
+    const float specularBrightness = brightness(specular);
+
+    float metallic = 0.0f;
+    if (specularBrightness >= dielectric)
+    {
+        const float b = diffuseBrightness * oneMinusSpecular / (1.0f - dielectric) + specularBrightness - 2.0f * dielectric;
+        const float c = dielectric - specularBrightness;
+        const float d = std::max(b * b - 4.0f * dielectric * c, 0.0f);
+        metallic = std::min(std::max((-b + std::sqrt(d)) / (2.0f * dielectric), 0.0f), 1.0f);
+    }
+
+    if (!hasAlbedo)
+    {
+        const GfVec3f fromDiffuse = diffuse * (oneMinusSpecular / (1.0f - dielectric) / std::max(1.0f - metallic, epsilon));
+        const GfVec3f fromSpecular =
+            (specular - GfVec3f(dielectric * (1.0f - metallic))) / std::max(metallic, epsilon);
+        const float t = metallic * metallic;
+        GfVec3f base = fromDiffuse * (1.0f - t) + fromSpecular * t;
+        for (int i = 0; i < 3; ++i)
+        {
+            base[i] = std::min(std::max(base[i], 0.0f), 1.0f);
+        }
+        result->r = base[0];
+        result->g = base[1];
+        result->b = base[2];
+    }
+
+    if (!hasMetallicTexture)
+    {
+        result->metallic = metallic;
+    }
 }
 
 RUsdMaterial ExtractPreviewMaterial(
@@ -1264,6 +1684,11 @@ RUsdMaterial ExtractPreviewMaterial(
         return result;
     }
 
+    // An input the material leaves out takes UsdPreviewSurface's own fallback. Opacity 1,
+    // metallic 0 and roughness 0.5 are the defaults above already; diffuseColor's is 0.18 grey,
+    // where white stays for a mesh with no material at all.
+    result.r = result.g = result.b = 0.18f;
+
     // Scalar fallbacks (used when the matching input has no texture connection).
     GetUsdShadeInputColor(shader, TfToken("diffuseColor"), &result);
     GetUsdShadeInputFloat(shader, TfToken("opacity"), &result.a);
@@ -1289,6 +1714,19 @@ RUsdMaterial ExtractPreviewMaterial(
         hasAlbedo = ReadConnectedTextureFileReported(
             context, shader, TfToken("diffuseColor"), materialPath,
             result.albedoTexturePath, sizeof(result.albedoTexturePath));
+        if (!hasAlbedo)
+        {
+            // A UsdUVTexture that names no file (usd-wg's StandardShaderBall "neutral" material
+            // wires diffuseColor to one) still carries the colour the spec says to show in that
+            // case: its 'fallback' input. Read it when it is authored; otherwise the shader's own
+            // diffuseColor value above stands.
+            UsdShadeShader texture = GetConnectedShader(shader, TfToken("diffuseColor"));
+            TfToken textureId;
+            if (texture && texture.GetShaderId(&textureId) && textureId == TfToken("UsdUVTexture"))
+            {
+                GetUsdShadeInputColor(texture, TfToken("fallback"), &result);
+            }
+        }
     }
     ReadConnectedTextureFileReported(
         context, shader, TfToken("normal"), materialPath,
@@ -1323,6 +1761,8 @@ RUsdMaterial ExtractPreviewMaterial(
             extras->occlusionTexturePath = occlusionPath;
         }
     }
+
+    ConvertSpecularWorkflow(context, shader, materialPath, hasAlbedo, hasMetallic, &result);
 
     // emissiveColor: texture takes priority, otherwise read the constant color.
     bool hasEmissiveTex = ReadConnectedTextureFileReported(
@@ -1371,8 +1811,354 @@ RUsdMaterial DefaultImportMaterial()
 
 // An input's effective value, following connections up to material interface inputs. Returns
 // false when the value is produced by another shader node, which cannot be evaluated here.
+// ---- Remote MDL modules -----------------------------------------------------------------
+// NVIDIA's material library is referenced by URL (info:mdl:sourceAsset =
+// @https://omniverse-content-production.s3.../Base/Plastics/Rubber_Smooth.mdl@): each module is
+// one OmniPBR call with literal arguments and textures beside it. The resolver cannot open a URL,
+// so the import read nothing of it and the SO-101 lightbox's mat (Paper) and rubber (Rubber_Smooth)
+// came in default grey. The host downloads the module and its textures into a cache folder
+// (RUsd_SetRemoteAssetCache); a module found there is read as the OmniPBR it calls, its arguments
+// standing in for every input the stage does not author. Nothing is downloaded here, and the stage
+// is not edited: the arguments live in an overlay the MDL readers consult while one material is
+// extracted.
+
+static std::mutex g_remoteCacheMutex;
+static std::string g_remoteCache;
+
+struct RemoteMdlOverlay
+{
+    std::string module;                          // the module the call names ("OmniPBR")
+    std::map<std::string, VtValue> values;       // argument -> value
+    std::map<std::string, std::string> spaces;   // texture argument -> "sRGB" / "raw"
+};
+
+static thread_local const std::map<std::string, RemoteMdlOverlay>* t_remoteOverlays = nullptr;
+
+static const RemoteMdlOverlay* FindRemoteOverlay(const UsdShadeShader& shader)
+{
+    if (t_remoteOverlays == nullptr || !shader)
+    {
+        return nullptr;
+    }
+    auto found = t_remoteOverlays->find(shader.GetPath().GetString());
+    return found == t_remoteOverlays->end() ? nullptr : &found->second;
+}
+
+static bool IsRemoteUrl(const std::string& path)
+{
+    return path.rfind("https://", 0) == 0 || path.rfind("http://", 0) == 0;
+}
+
+// The cache file for a URL: <cache>/<host>/<path>, or empty when the URL climbs (".." segments)
+// or carries characters a file name cannot. The host writes downloads to the same place.
+static std::string RemoteCachePath(const std::string& url)
+{
+    std::string cache;
+    {
+        std::lock_guard<std::mutex> lock(g_remoteCacheMutex);
+        cache = g_remoteCache;
+    }
+    if (cache.empty())
+    {
+        return std::string();
+    }
+    const size_t scheme = url.find("://");
+    std::string rest = url.substr(scheme + 3);
+    const size_t query = rest.find_first_of("?#");
+    if (query != std::string::npos)
+    {
+        rest.resize(query);
+    }
+    for (const std::string& part : TfStringSplit(rest, "/"))
+    {
+        if (part == ".." || part == "." || part.find_first_of(":*?\"<>|\\") != std::string::npos)
+        {
+            return std::string();
+        }
+    }
+    return TfNormPath(TfAbsPath(cache) + "/" + rest);
+}
+
+static std::string TrimMdl(const std::string& text)
+{
+    size_t a = 0, b = text.size();
+    while (a < b && std::isspace(static_cast<unsigned char>(text[a]))) ++a;
+    while (b > a && std::isspace(static_cast<unsigned char>(text[b - 1]))) --b;
+    return text.substr(a, b - a);
+}
+
+// Splits "a: x, b: f(y, z)" at the commas that are not inside brackets or quotes.
+static std::vector<std::string> SplitMdlArguments(const std::string& text)
+{
+    std::vector<std::string> parts;
+    int depth = 0;
+    bool quoted = false;
+    size_t start = 0;
+    for (size_t i = 0; i < text.size(); ++i)
+    {
+        const char c = text[i];
+        if (c == '"')
+        {
+            quoted = !quoted;
+        }
+        else if (!quoted && (c == '(' || c == '['))
+        {
+            ++depth;
+        }
+        else if (!quoted && (c == ')' || c == ']'))
+        {
+            --depth;
+        }
+        else if (!quoted && c == ',' && depth == 0)
+        {
+            parts.push_back(text.substr(start, i - start));
+            start = i + 1;
+        }
+    }
+    parts.push_back(text.substr(start));
+    return parts;
+}
+
+static std::vector<float> RemoteMdlNumbers(const std::string& text)
+{
+    std::vector<float> numbers;
+    const char* p = text.c_str();
+    while (*p)
+    {
+        if (std::isdigit(static_cast<unsigned char>(*p)) || *p == '-' || *p == '+' || *p == '.')
+        {
+            char* end = nullptr;
+            const float value = std::strtof(p, &end);
+            if (end != p)
+            {
+                numbers.push_back(value);
+                p = end;
+                continue;
+            }
+        }
+        ++p;
+    }
+    return numbers;
+}
+
+// One argument expression as a USD value: color(r, g, b), float2(x, y), a number (with or
+// without an f suffix), true / false, texture_2d("file", ::tex::gamma_*). Anything else
+// (an enum, a call, an empty texture_2d()) is left out and the input keeps its default.
+static bool ParseMdlArgument(const std::string& expression, const std::string& folder, VtValue* value,
+                             std::string* space)
+{
+    const std::string e = TrimMdl(expression);
+    if (e.rfind("color(", 0) == 0)
+    {
+        std::vector<float> n = RemoteMdlNumbers(e.substr(5));
+        if (n.size() == 1)
+        {
+            n = {n[0], n[0], n[0]};
+        }
+        if (n.size() < 3)
+        {
+            return false;
+        }
+        *value = VtValue(GfVec3f(n[0], n[1], n[2]));
+        return true;
+    }
+    if (e.rfind("float2(", 0) == 0)
+    {
+        std::vector<float> n = RemoteMdlNumbers(e.substr(6));
+        if (n.size() == 1)
+        {
+            n = {n[0], n[0]};
+        }
+        if (n.size() < 2)
+        {
+            return false;
+        }
+        *value = VtValue(GfVec2f(n[0], n[1]));
+        return true;
+    }
+    if (e == "true" || e == "false")
+    {
+        *value = VtValue(e == "true");
+        return true;
+    }
+    if (e.rfind("texture_2d(", 0) == 0)
+    {
+        const size_t open = e.find('"');
+        const size_t close = open == std::string::npos ? std::string::npos : e.find('"', open + 1);
+        if (close == std::string::npos)
+        {
+            return false;
+        }
+        std::string file = e.substr(open + 1, close - open - 1);
+        if (file.empty() || IsRemoteUrl(file) || file.find("..") != std::string::npos)
+        {
+            return false;
+        }
+        if (file.rfind("./", 0) == 0)
+        {
+            file = file.substr(2);
+        }
+        *value = VtValue(SdfAssetPath(TfNormPath(folder + "/" + file)));
+        if (e.find("gamma_srgb") != std::string::npos)
+        {
+            *space = "sRGB";
+        }
+        else if (e.find("gamma_linear") != std::string::npos)
+        {
+            *space = "raw";
+        }
+        return true;
+    }
+    if (e.find('(') != std::string::npos || e.find("::") != std::string::npos)
+    {
+        return false;
+    }
+    std::vector<float> n = RemoteMdlNumbers(e);
+    if (n.size() != 1)
+    {
+        return false;
+    }
+    *value = VtValue(n[0]);
+    return true;
+}
+
+// Reads a cached remote module that is one call to a material this import knows (OmniPBR):
+// `export material Name(*) = OmniPBR(arg: value, ...)`. False when the file is missing, larger
+// than 1 MB, or not that shape.
+static bool ReadRemoteModule(const std::string& file, RemoteMdlOverlay* overlay)
+{
+    std::ifstream stream(file, std::ios::binary);
+    if (!stream)
+    {
+        return false;
+    }
+    std::stringstream contents;
+    contents << stream.rdbuf();
+    const std::string text = contents.str();
+    if (text.size() > 1024 * 1024)
+    {
+        return false;
+    }
+    const size_t material = text.find("export material ");
+    const size_t equals = material == std::string::npos ? std::string::npos : text.find('=', material);
+    if (equals == std::string::npos)
+    {
+        return false;
+    }
+    size_t call = equals + 1;
+    while (call < text.size() && std::isspace(static_cast<unsigned char>(text[call]))) ++call;
+    const size_t open = text.find('(', call);
+    if (open == std::string::npos)
+    {
+        return false;
+    }
+    std::string callee = TrimMdl(text.substr(call, open - call));
+    const size_t scope = callee.rfind("::");
+    if (scope != std::string::npos)
+    {
+        callee = callee.substr(scope + 2);
+    }
+    if (callee.rfind("OmniPBR", 0) != 0)
+    {
+        return false;
+    }
+    int depth = 0;
+    size_t close = std::string::npos;
+    for (size_t i = open; i < text.size(); ++i)
+    {
+        if (text[i] == '(') ++depth;
+        else if (text[i] == ')' && --depth == 0)
+        {
+            close = i;
+            break;
+        }
+    }
+    if (close == std::string::npos)
+    {
+        return false;
+    }
+    overlay->module = callee;
+    const std::string folder = TfGetPathName(file);
+    for (const std::string& argument : SplitMdlArguments(text.substr(open + 1, close - open - 1)))
+    {
+        const size_t colon = argument.find(':');
+        if (colon == std::string::npos || argument.compare(colon, 2, "::") == 0)
+        {
+            continue;
+        }
+        const std::string name = TrimMdl(argument.substr(0, colon));
+        VtValue value;
+        std::string space;
+        if (!name.empty() && ParseMdlArgument(argument.substr(colon + 1), folder, &value, &space))
+        {
+            overlay->values[name] = value;
+            if (!space.empty())
+            {
+                overlay->spaces[name] = space;
+            }
+        }
+    }
+    return true;
+}
+
+// Builds the overlay for one MDL shader whose module is a URL: from the cache when it is there,
+// otherwise the URL is recorded for the host to fetch.
+static void CollectRemoteOverlay(RUsdContext* context, const UsdShadeShader& shader,
+                                 std::map<std::string, RemoteMdlOverlay>* overlays)
+{
+    SdfAssetPath asset;
+    if (!shader || !shader.GetSourceAsset(&asset, TfToken("mdl")) || !IsRemoteUrl(asset.GetAssetPath()))
+    {
+        return;
+    }
+    const std::string url = asset.GetAssetPath();
+    const std::string file = RemoteCachePath(url);
+    RemoteMdlOverlay overlay;
+    if (!file.empty() && TfIsFile(file) && ReadRemoteModule(file, &overlay))
+    {
+        (*overlays)[shader.GetPath().GetString()] = overlay;
+        return;
+    }
+    if (context != nullptr && (file.empty() || !TfIsFile(file)) &&
+        std::find(context->remoteRequests.begin(), context->remoteRequests.end(), url) ==
+            context->remoteRequests.end())
+    {
+        context->remoteRequests.push_back(url);
+    }
+}
+
 bool GetMdlInputValue(const UsdShadeShader& shader, const char* name, VtValue* value)
 {
+    if (const RemoteMdlOverlay* overlay = FindRemoteOverlay(shader))
+    {
+        UsdShadeInput authored = shader.GetInput(TfToken(name));
+        VtValue own;
+        bool hasOwn = false;
+        if (authored)
+        {
+            for (const UsdAttribute& attribute : authored.GetValueProducingAttributes())
+            {
+                if (!UsdShadeOutput::IsOutput(attribute) && attribute.Get(&own) && !own.IsEmpty())
+                {
+                    hasOwn = true;
+                    break;
+                }
+            }
+        }
+        if (hasOwn)
+        {
+            *value = own;
+            return true;
+        }
+        auto found = overlay->values.find(name);
+        if (found != overlay->values.end())
+        {
+            *value = found->second;
+            return true;
+        }
+        return false;
+    }
+
     UsdShadeInput input = shader.GetInput(TfToken(name));
     if (!input)
     {
@@ -1516,8 +2302,22 @@ bool GetMdlTexture(
     }
 
     UsdShadeInput input = shader.GetInput(TfToken(name));
-    return StoreAssetPath(context, value.UncheckedGet<SdfAssetPath>(), buffer, capacity,
-                          input ? input.GetAttr() : UsdAttribute());
+    if (!StoreAssetPath(context, value.UncheckedGet<SdfAssetPath>(), buffer, capacity,
+                        input ? input.GetAttr() : UsdAttribute()))
+    {
+        return false;
+    }
+
+    const RemoteMdlOverlay* overlay = FindRemoteOverlay(shader);
+    if (overlay != nullptr && context != nullptr)
+    {
+        auto space = overlay->spaces.find(name);
+        if (space != overlay->spaces.end() && context->assetColorSpaces.find(buffer) == context->assetColorSpaces.end())
+        {
+            context->assetColorSpaces[buffer] = space->second;
+        }
+    }
+    return true;
 }
 
 void SetColor(RUsdMaterial* material, const GfVec3f& color)
@@ -1530,6 +2330,11 @@ void SetColor(RUsdMaterial* material, const GfVec3f& color)
 // The MDL module a shader runs: its sub-identifier ("OmniPBR"), else the module file's stem.
 std::string GetMdlShaderName(const UsdShadeShader& shader)
 {
+    if (const RemoteMdlOverlay* overlay = FindRemoteOverlay(shader))
+    {
+        return overlay->module;
+    }
+
     const TfToken mdl("mdl");
     TfToken subIdentifier;
     if (shader.GetSourceAssetSubIdentifier(&subIdentifier, mdl) && !subIdentifier.IsEmpty())
@@ -1559,6 +2364,10 @@ bool StartsWith(const std::string& value, const char* prefix)
     return value.rfind(prefix, 0) == 0;
 }
 
+// Nits per unit of Unity emission: Kit's UsdPreviewSurface.mdl scales emissiveColor by
+// pi * 1133.6 to reach nits, and emissiveColor matches Unity emission 1:1 on the look bench.
+constexpr float kNitsPerUnitEmission = 3.14159265f * 1133.6f;
+
 // OmniPBR and its variants (OmniPBR_ClearCoat, OmniPBR_Opacity, ...).
 void ReadOmniPbr(
     RUsdContext* context,
@@ -1582,7 +2391,11 @@ void ReadOmniPbr(
     m.roughness = 0.5f;
     GetMdlFloat(shader, "reflection_roughness_constant", &m.roughness);
 
-    GetMdlTexture(context, shader, "normalmap_texture", m.normalTexturePath, sizeof(m.normalTexturePath));
+    if (GetMdlTexture(context, shader, "normalmap_texture", m.normalTexturePath, sizeof(m.normalTexturePath)))
+    {
+        out->normalFlipU = GetMdlBool(shader, "flip_tangent_u", false);
+        out->normalFlipV = GetMdlBool(shader, "flip_tangent_v", true);
+    }
 
     // Unity's packed metallic+smoothness map has no equivalent of OmniPBR's separate (or ORM)
     // maps, so those stay at their constants rather than being misread.
@@ -1626,11 +2439,15 @@ void ReadOmniPbr(
     {
         GfVec3f emissive(1.0f, 0.1f, 0.1f);
         GetMdlColor(shader, "emissive_color", &emissive);
-        // emissive_intensity is in nits with a default of 40. Normalising by that default keeps
-        // an untouched emitter at its authored colour instead of blowing it out to white.
+        // emissive_intensity is in nits (default 40). Kit renders a UsdPreviewSurface emissiveColor
+        // of E as E * pi * 1133.6 nits (UsdPreviewSurface.mdl, emissiveScale: "the same value as the
+        // exposed pixel"), and that emissiveColor imports 1:1 into Unity's emission, so nits divide
+        // by the same constant. Normalising by the 40-nit default instead put Franka's 29,000-nit
+        // status light at 725x its colour and bleached the robot around it; it is 8.1x now, and the
+        // untouched 40-nit default is the near-invisible glow Kit shows for it.
         float intensity = 40.0f;
         GetMdlFloat(shader, "emissive_intensity", &intensity);
-        const float scale = std::max(0.0f, intensity / 40.0f);
+        const float scale = std::max(0.0f, intensity / kNitsPerUnitEmission);
         m.emissive[0] = emissive[0] * scale;
         m.emissive[1] = emissive[1] * scale;
         m.emissive[2] = emissive[2] * scale;
@@ -1713,11 +2530,17 @@ void ReadOmniSurface(RUsdContext* context, const UsdShadeShader& shader,
     }
 
     // Transmission has no real-time equivalent; partial alpha is the closest readable stand-in.
+    // The transmitted share of the light is not diffused, so the diffuse colour keeps only
+    // (1 - weight): see the MaterialX path.
     float transmission = 0.0f;
     GetMdlFloat(shader, "specular_transmission_weight", &transmission);
     if (transmission > 0.0f)
     {
-        m.a = std::min(m.a, 1.0f - 0.75f * std::min(transmission, 1.0f));
+        transmission = std::min(transmission, 1.0f);
+        m.r *= 1.0f - transmission;
+        m.g *= 1.0f - transmission;
+        m.b *= 1.0f - transmission;
+        m.a = std::min(m.a, 1.0f - 0.75f * transmission);
     }
 }
 
@@ -1728,11 +2551,35 @@ void ReadOmniGlass(RUsdContext* context, const UsdShadeShader& shader,
 
     GfVec3f color(1.0f, 1.0f, 1.0f);
     GetMdlColor(shader, "glass_color", &color);
-    SetColor(&m, color);
-    m.a = 0.25f;
+    // A blended Lit surface is a diffuse reflector lit from the front, while OmniGlass is a
+    // transmitter that only sends back its Fresnel reflection and (when frosted) a thin haze.
+    // Rendering glass_color as the diffuse colour made every pane a lit white sheet: on NVIDIA's
+    // Factory the cell fence (glass_color 0.94) measured 179 against Isaac's 107 on the same
+    // pixels, and the clear roof the same. Scaling the diffuse colour by kGlassDiffuse puts the
+    // pane at Isaac's level and leaves the specular (smoothness from frosting) to carry the look.
+    // 0.35 still read as a lit sheet next to Isaac's pane once the lights were taken out of the
+    // comparison; 0.1 leaves the pane to its reflection and transmission.
+    constexpr float kGlassDiffuse = 0.1f;
+    SetColor(&m, color * kGlassDiffuse);
     m.metallic = 0.0f;
-    m.roughness = 0.0f;
-    GetMdlFloat(shader, "frosting_roughness", &m.roughness);
+    float frosting = 0.0f;
+    GetMdlFloat(shader, "frosting_roughness", &frosting);
+    frosting = std::max(0.0f, frosting);
+    // Frosting blurs both the reflection and what shows through. The reflection blur maps onto
+    // roughness directly; 2.5x because Isaac's frosting 0.1 pane reads like a roughness 0.25
+    // mirror side by side (Factory cell fence, lights off, uniform dome).
+    m.roughness = std::min(1.0f, 2.5f * frosting);
+
+    // Opacity. A real-time blend has no rough refraction, so a frosted pane cannot blur what is
+    // behind it; the closest a blend gets is to show less of it. Clear glass (frosting 0) stays
+    // at 0.25. Frosting raises the opacity -- Factory's Glass_Tinted_Mid (0.1) rendered in Isaac
+    // as a milky, mosaic-like pane while the 0.25 blend was see-through -- up to 0.85. A
+    // thin-walled pane (a single surface, no volume to frost) stays clear.
+    // What shows through cannot be blurred by a blended surface (no rough refraction in URP or
+    // HDRP's Lit), so it is veiled instead: a uniform haze by alpha. Known limitation: Isaac's
+    // frosted pane blurs the view more with distance; this veil is the same at every depth.
+    const bool thinWalled = GetMdlBool(shader, "thin_walled", false);
+    m.a = thinWalled ? 0.25f : std::min(0.85f, 0.25f + 2.5f * frosting);
 
     // Parameter names from OmniGlass.mdl in the Kit kernel: glass_color_texture,
     // normal_map_texture, roughness_texture, reflection_color_texture, cutout_opacity_texture.
@@ -1793,12 +2640,477 @@ void ReadOmniGridExplorer(RUsdContext* context, const UsdShadeShader& shader,
     GetMdlVec2(shader, "texture_translate", m.uvOffset);
 }
 
+static std::string LowerAscii(std::string text)
+{
+    for (char& c : text)
+    {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    return text;
+}
+
+static bool EndsWithAny(const std::string& text, std::initializer_list<const char*> suffixes)
+{
+    for (const char* suffix : suffixes)
+    {
+        const size_t n = std::strlen(suffix);
+        if (text.size() >= n && text.compare(text.size() - n, n, suffix) == 0)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+// What an MDL module file says that USD does not: the default of every parameter the stage left
+// unauthored, and the textures its body reads as literals. The Unreal connector writes both --
+// RoughnessMin/RoughnessMax and MaskSelection often stay at their module defaults, and modules
+// such as M_AisleSign take no parameters at all and name their textures inside the body.
+struct MdlModuleSource
+{
+    std::map<std::string, std::string> defaults;   // parameter -> default expression, as written
+    std::vector<std::string> bodyTextures;         // absolute paths of texture_2d("...") literals in the body
+    std::string folder;                            // folder of the module file, for relative paths
+    // Texture parameters the body blends over the base colour with Unreal's BlendOverlay, which
+    // the connector writes out as a per-channel ">= 0.5 ?" select on the parameter's lookup
+    // (M_AisleSign: the aisle number and "BOXES G - I" over the sign's diffuse map).
+    std::set<std::string> overlayParameters;
+};
+
+static std::string TrimAscii(const std::string& text)
+{
+    size_t a = 0, b = text.size();
+    while (a < b && std::isspace(static_cast<unsigned char>(text[a]))) ++a;
+    while (b > a && std::isspace(static_cast<unsigned char>(text[b - 1]))) --b;
+    return text.substr(a, b - a);
+}
+
+// texture_2d("./Textures/x.png", ...) -> "./Textures/x.png", or empty.
+static std::string MdlTextureLiteral(const std::string& expression)
+{
+    const size_t at = expression.find("texture_2d(\"");
+    if (at == std::string::npos)
+    {
+        return std::string();
+    }
+    const size_t begin = at + 12;
+    const size_t end = expression.find('"', begin);
+    return end == std::string::npos ? std::string() : expression.substr(begin, end - begin);
+}
+
+static const MdlModuleSource* LoadMdlModuleSource(const UsdShadeShader& shader)
+{
+    static std::map<std::string, std::unique_ptr<MdlModuleSource>> cache;
+    SdfAssetPath asset;
+    if (!shader.GetSourceAsset(&asset, TfToken("mdl")))
+    {
+        return nullptr;
+    }
+    const std::string file = asset.GetResolvedPath();
+    if (file.empty() || ArIsPackageRelativePath(file))
+    {
+        return nullptr;
+    }
+    auto found = cache.find(file);
+    if (found != cache.end())
+    {
+        return found->second.get();
+    }
+
+    auto module = std::make_unique<MdlModuleSource>();
+    module->folder = TfGetPathName(file);
+    std::ifstream stream(file, std::ios::binary);
+    std::stringstream contents;
+    contents << stream.rdbuf();
+    const std::string text = contents.str();
+    if (text.size() > 4 * 1024 * 1024)
+    {
+        cache[file] = nullptr;
+        return nullptr;
+    }
+
+    const size_t material = text.find("export material ");
+    const size_t open = material == std::string::npos ? std::string::npos : text.find('(', material);
+    size_t close = std::string::npos;
+    if (open != std::string::npos)
+    {
+        int depth = 0;
+        size_t start = open + 1;
+        for (size_t i = open; i < text.size(); ++i)
+        {
+            const char c = text[i];
+            if (c == '(' || c == '[')
+            {
+                ++depth;
+            }
+            else if (c == ')' || c == ']')
+            {
+                --depth;
+            }
+            const bool last = depth == 0;
+            if ((c == ',' && depth == 1) || last)
+            {
+                // One parameter: "uniform? type name = expression [[annotations]]".
+                std::string param = text.substr(start, i - start);
+                const size_t annotations = param.find("[[");
+                if (annotations != std::string::npos)
+                {
+                    param = param.substr(0, annotations);
+                }
+                const size_t equals = param.find('=');
+                if (equals != std::string::npos)
+                {
+                    std::string left = TrimAscii(param.substr(0, equals));
+                    const size_t space = left.find_last_of(" \t\r\n");
+                    const std::string name = space == std::string::npos ? left : left.substr(space + 1);
+                    module->defaults[name] = TrimAscii(param.substr(equals + 1));
+                }
+                start = i + 1;
+            }
+            if (last)
+            {
+                close = i;
+                break;
+            }
+        }
+    }
+
+    const size_t body = close == std::string::npos ? 0 : close;
+    for (size_t at = text.find("texture_2d(\"", body); at != std::string::npos; at = text.find("texture_2d(\"", at + 1))
+    {
+        const std::string relative = MdlTextureLiteral(text.substr(at, 1024));
+        if (!relative.empty())
+        {
+            module->bodyTextures.push_back(TfNormPath(module->folder + "/" + relative));
+        }
+    }
+
+    // BlendOverlay: "float4 LocalN = tex::lookup_float4(Param, ...)" followed by a select on
+    // "(float3(LocalN.x,LocalN.y,LocalN.z).x >= 0.5) ? ..." for each channel.
+    for (const auto& entry : module->defaults)
+    {
+        if (MdlTextureLiteral(entry.second).empty())
+        {
+            continue;
+        }
+
+        const std::string lookup = "tex::lookup_float4(" + entry.first + ",";
+        for (size_t at = text.find(lookup, body); at != std::string::npos; at = text.find(lookup, at + 1))
+        {
+            const size_t equals = text.rfind('=', at);
+            const size_t lineStart = text.rfind('\n', at);
+            if (equals == std::string::npos || (lineStart != std::string::npos && equals < lineStart))
+            {
+                continue;
+            }
+
+            std::string left = TrimAscii(text.substr(lineStart == std::string::npos ? 0 : lineStart + 1,
+                                                     equals - (lineStart == std::string::npos ? 0 : lineStart + 1)));
+            const size_t space = left.find_last_of(" \t");
+            const std::string local = space == std::string::npos ? left : left.substr(space + 1);
+            if (local.empty())
+            {
+                continue;
+            }
+
+            const std::string select = local + ".x," + local + ".y," + local + ".z).x >= 0.5)";
+            if (text.find(select, at) != std::string::npos)
+            {
+                module->overlayParameters.insert(entry.first);
+                break;
+            }
+        }
+    }
+
+    const MdlModuleSource* result = module.get();
+    cache[file] = std::move(module);
+    return result;
+}
+
+// Numbers inside "float4(0.1,0.2,0.3,1.0)", "color(...)", "0.5".
+static std::vector<float> MdlNumbers(const std::string& expression)
+{
+    std::vector<float> values;
+    const char* p = expression.c_str();
+    while (*p)
+    {
+        if ((*p >= '0' && *p <= '9') || *p == '-' || *p == '.')
+        {
+            char* end = nullptr;
+            const float v = std::strtof(p, &end);
+            if (end != p)
+            {
+                values.push_back(v);
+                p = end;
+                continue;
+            }
+        }
+        ++p;
+    }
+    return values;
+}
+
+static bool UnrealColor(const UsdShadeShader& shader, const MdlModuleSource* module, const char* name, GfVec3f* out)
+{
+    if (GetMdlColor(shader, name, out))
+    {
+        return true;
+    }
+    if (module == nullptr)
+    {
+        return false;
+    }
+    auto found = module->defaults.find(name);
+    if (found == module->defaults.end())
+    {
+        return false;
+    }
+    // Skip the leading type token's digits ("float4"): numbers start after the first '('.
+    const size_t open = found->second.find('(');
+    const std::vector<float> v = MdlNumbers(open == std::string::npos ? found->second : found->second.substr(open));
+    if (v.size() < 3)
+    {
+        return false;
+    }
+    *out = GfVec3f(v[0], v[1], v[2]);
+    return true;
+}
+
+static bool UnrealFloat(const UsdShadeShader& shader, const MdlModuleSource* module, const char* name, float* out)
+{
+    if (GetMdlFloat(shader, name, out))
+    {
+        return true;
+    }
+    if (module == nullptr)
+    {
+        return false;
+    }
+    auto found = module->defaults.find(name);
+    if (found == module->defaults.end())
+    {
+        return false;
+    }
+    const std::vector<float> v = MdlNumbers(found->second);
+    if (v.size() != 1)
+    {
+        return false;
+    }
+    *out = v[0];
+    return true;
+}
+
+// Unreal-connector MDL (see ExtractMdlMaterial): picks the albedo, normal and ORM maps by
+// parameter name, then by the Unreal texture suffixes (_D, _N, _ORM), takes a tint only from a
+// parameter named *Tint (ColorAlbedo-style parameters are mask colours in these graphs, not
+// multipliers), and the constant Roughness/Metallic and U/V tiling where they exist. Returns
+// false when the shader carries no texture a connector material would have.
+bool ReadUnrealConnectorMdl(
+    RUsdContext* context,
+    const UsdShadeShader& shader,
+    const std::string& materialPath,
+    RUsdContext::ImportedMaterial* out)
+{
+    const MdlModuleSource* module = LoadMdlModuleSource(shader);
+
+    // Texture candidates: authored inputs, then module defaults the stage left unauthored, then
+    // literals in the module body. Each is a parameter name (empty for a literal) and a path.
+    struct Candidate { std::string name; std::string path; bool authored; };
+    std::vector<Candidate> candidates;
+    std::set<std::string> authoredNames;
+    for (const UsdShadeInput& input : shader.GetInputs())
+    {
+        VtValue value;
+        const std::string name = input.GetBaseName().GetString();
+        if (GetMdlInputValue(shader, name.c_str(), &value) && VtValueHoldsType(value, "SdfAssetPath"))
+        {
+            candidates.push_back({name, value.UncheckedGet<SdfAssetPath>().GetAssetPath(), true});
+            authoredNames.insert(name);
+        }
+    }
+    if (module != nullptr)
+    {
+        for (const auto& entry : module->defaults)
+        {
+            const std::string relative = MdlTextureLiteral(entry.second);
+            if (!relative.empty() && authoredNames.count(entry.first) == 0)
+            {
+                candidates.push_back({entry.first, TfNormPath(module->folder + "/" + relative), false});
+            }
+        }
+        for (const std::string& path : module->bodyTextures)
+        {
+            candidates.push_back({std::string(), path, false});
+        }
+    }
+
+    int albedo = -1, normal = -1, orm = -1, mask = -1;
+    int albedoByName = -1, normalByName = -1, ormByName = -1;
+    for (int i = 0; i < static_cast<int>(candidates.size()); ++i)
+    {
+        const std::string lname = LowerAscii(candidates[i].name);
+        const std::string stem = LowerAscii(TfStringGetBeforeSuffix(TfGetBaseName(candidates[i].path)));
+        if (albedoByName < 0 && (lname == "albedotexture" || lname == "basecolor_texture" || lname == "basecolortexture" ||
+                                 lname == "basecolor" || lname == "diffuse_texture" || lname == "texture_basecolor"))
+        {
+            albedoByName = i;
+        }
+        else if (normalByName < 0 && lname.find("normal") != std::string::npos)
+        {
+            normalByName = i;
+        }
+        else if (ormByName < 0 && (lname.find("mergemap") != std::string::npos || lname.find("orm") != std::string::npos ||
+                                   lname.find("multimap") != std::string::npos))
+        {
+            ormByName = i;
+        }
+        else if (mask < 0 && (lname.find("mask") != std::string::npos || (lname.empty() && EndsWithAny(stem, {"_m"}))))
+        {
+            mask = i;
+        }
+        if (albedo < 0 && EndsWithAny(stem, {"_d", "_basecolor", "_albedo", "_diffuse"}))
+        {
+            albedo = i;
+        }
+        else if (normal < 0 && EndsWithAny(stem, {"_n", "_normal"}))
+        {
+            normal = i;
+        }
+        else if (orm < 0 && EndsWithAny(stem, {"_orm"}))
+        {
+            orm = i;
+        }
+    }
+    if (albedoByName >= 0) albedo = albedoByName;
+    if (normalByName >= 0) normal = normalByName;
+    if (ormByName >= 0) orm = ormByName;
+    if (albedo < 0 && normal < 0 && orm < 0)
+    {
+        return false;
+    }
+
+    auto store = [&](int index, char* buffer, size_t capacity) -> bool
+    {
+        if (index < 0)
+        {
+            return false;
+        }
+        const Candidate& c = candidates[static_cast<size_t>(index)];
+        if (c.authored)
+        {
+            return GetMdlTexture(context, shader, c.name.c_str(), buffer, capacity);
+        }
+        return StoreAssetPath(context, SdfAssetPath(c.path, c.path), buffer, capacity);
+    };
+
+    RUsdMaterial& m = out->material;
+    GfVec3f tint(1.0f, 1.0f, 1.0f);
+    for (const UsdShadeInput& input : shader.GetInputs())
+    {
+        const std::string lname = LowerAscii(input.GetBaseName().GetString());
+        if (lname.size() >= 4 && lname.compare(lname.size() - 4, 4, "tint") == 0 &&
+            lname.find("plastic") == std::string::npos)
+        {
+            GetMdlColor(shader, input.GetBaseName().GetString().c_str(), &tint);
+            break;
+        }
+    }
+    SetColor(&m, albedo < 0 ? GfVec3f(0.5f, 0.5f, 0.5f) : tint);
+    store(albedo, m.albedoTexturePath, sizeof(m.albedoTexturePath));
+    store(normal, m.normalTexturePath, sizeof(m.normalTexturePath));
+    if (store(orm, m.metallicTexturePath, sizeof(m.metallicTexturePath)))
+    {
+        out->metallicIsOrm = true;
+    }
+    m.metallic = 0.0f;
+    UnrealFloat(shader, module, "Metallic", &m.metallic);
+    m.roughness = 0.5f;
+    UnrealFloat(shader, module, "Roughness", &m.roughness);
+    float u = 1.0f, v = 1.0f;
+    const bool hasU = UnrealFloat(shader, module, "U_Tiling", &u);
+    const bool hasV = UnrealFloat(shader, module, "V_Tiling", &v);
+    if (hasU || hasV)
+    {
+        m.uvScale[0] = u;
+        m.uvScale[1] = v;
+    }
+
+    // The colour mask: a single colour where the mask is 0 (ColorAlbedo, MI_Floor_01), or three
+    // colours painted by the mask's red, green and blue with the albedo in alpha (Body, Handle,
+    // Cap: MI_PushcartA_01, barrels and crates).
+    char maskPath[1024] = {0};
+    if (albedo >= 0 && store(mask, maskPath, sizeof(maskPath)))
+    {
+        GfVec3f body, handle, cap, single;
+        if (UnrealColor(shader, module, "Body", &body))
+        {
+            UnrealColor(shader, module, "Handle", &handle);
+            UnrealColor(shader, module, "Cap", &cap);
+            out->maskMode = 1;
+            out->maskTexturePath = maskPath;
+            const GfVec3f colours[3] = {body, handle, cap};
+            for (int i = 0; i < 3; ++i)
+            {
+                out->channelColors[i * 3] = colours[i][0];
+                out->channelColors[i * 3 + 1] = colours[i][1];
+                out->channelColors[i * 3 + 2] = colours[i][2];
+            }
+        }
+        else if (UnrealColor(shader, module, "ColorAlbedo", &single))
+        {
+            out->maskMode = 0;
+            out->maskTexturePath = maskPath;
+            out->maskColor[0] = single[0];
+            out->maskColor[1] = single[1];
+            out->maskColor[2] = single[2];
+        }
+    }
+
+    // An overlay texture (BlendOverlay over the albedo, mode 2): the host bakes
+    // t >= 0.5 ? 1 - 2(1 - t)(1 - albedo) : 2 t albedo per channel into the albedo.
+    if (out->maskMode < 0 && albedo >= 0 && module != nullptr && !module->overlayParameters.empty())
+    {
+        for (int i = 0; i < static_cast<int>(candidates.size()); ++i)
+        {
+            if (candidates[static_cast<size_t>(i)].name.empty() ||
+                module->overlayParameters.count(candidates[static_cast<size_t>(i)].name) == 0)
+            {
+                continue;
+            }
+
+            char overlayPath[1024] = {0};
+            if (store(i, overlayPath, sizeof(overlayPath)))
+            {
+                out->maskMode = 2;
+                out->maskTexturePath = overlayPath;
+            }
+
+            break;
+        }
+    }
+
+    float rmin = 0.0f, rmax = 1.0f;
+    if (out->metallicIsOrm && UnrealFloat(shader, module, "RoughnessMin", &rmin) &&
+        UnrealFloat(shader, module, "RoughnessMax", &rmax))
+    {
+        out->hasRoughnessRange = true;
+        out->roughnessMin = rmin;
+        out->roughnessMax = rmax;
+    }
+
+    AppendImportWarning(context,
+        "material '" + materialPath + "' uses Unreal-connector MDL module '" + GetMdlShaderName(shader) +
+        "'; its maps, mask colours and roughness range are read by name, and the rest of its graph is not evaluated.");
+    return true;
+}
+
 // Returns false when the MDL module is not one this reader understands.
 bool ExtractMdlMaterial(
     RUsdContext* context,
     const UsdShadeShader& shader,
     const std::string& materialPath,
-    RUsdContext::ImportedMaterial* out)
+    RUsdContext::ImportedMaterial* out,
+    bool allowPartial = true)
 {
     const std::string name = GetMdlShaderName(shader);
     if (StartsWith(name, "OmniPBR"))
@@ -1825,7 +3137,26 @@ bool ExtractMdlMaterial(
         return true;
     }
 
-    // Unknown module: take a base colour if it carries one under a common name.
+    // Materials exported by the Omniverse Unreal Engine connector: each Unreal material instance
+    // becomes its own MDL module built on OmniUe4Base, and its inputs are the Unreal parameter
+    // names (AlbedoTexture, BaseColor_Texture, MainNormalInput, MergeMapInput, ...). No two
+    // modules share a signature, so nothing above matched them and NVIDIA's Simple_Warehouse
+    // (5,914 materials) imported untextured. The parameters follow the connector's conventions
+    // closely enough to read by name and by texture suffix.
+    if (ReadUnrealConnectorMdl(context, shader, materialPath, out))
+    {
+        return true;
+    }
+
+    // Unknown module: take a base colour if it carries one under a common name. ExtractMaterial
+    // asks for this only when the material has nothing better (no supported MaterialX or
+    // UsdPreviewSurface network), since the renderer draws the whole module and a full preview
+    // network is closer to that than one colour.
+    if (!allowPartial)
+    {
+        return false;
+    }
+
     GfVec3f color;
     for (const char* input : {"diffuse_color_constant", "base_color", "diffuse_color", "color"})
     {
@@ -1863,18 +3194,20 @@ struct MtlxSurfaceInputs
     const char* opacity;
     const char* transmission;
     const char* transmissionColor;
+    const char* specularWeight;
 };
 
 const MtlxSurfaceInputs* FindMtlxSurfaceInputs(const std::string& id)
 {
     static const MtlxSurfaceInputs standardSurface = {
         "base_color", "base", "metalness", "specular_roughness", "normal",
-        "emission_color", "emission", "opacity", "transmission", "transmission_color"};
+        "emission_color", "emission", "opacity", "transmission", "transmission_color", "specular"};
     static const MtlxSurfaceInputs openPbr = {
         "base_color", "base_weight", "base_metalness", "specular_roughness", "geometry_normal",
-        "emission_color", "emission_luminance", "geometry_opacity", "transmission_weight", "transmission_color"};
+        "emission_color", "emission_luminance", "geometry_opacity", "transmission_weight", "transmission_color",
+        "specular_weight"};
     static const MtlxSurfaceInputs previewSurface = {
-        "diffuseColor", "", "metallic", "roughness", "normal", "emissiveColor", "", "opacity", "", ""};
+        "diffuseColor", "", "metallic", "roughness", "normal", "emissiveColor", "", "opacity", "", "", ""};
 
     if (StartsWith(id, "ND_standard_surface_"))
     {
@@ -2087,7 +3420,25 @@ void ExtractMtlxMaterial(
 
     GetMtlxFloat(shader, shaderId, inputs.metallic, &m.metallic);
     GetMtlxFloat(shader, shaderId, inputs.roughness, &m.roughness);
-    ReadMtlxTexture(context, shader, inputs.normal, m.normalTexturePath, sizeof(m.normalTexturePath));
+
+    // A dielectric with its specular layer weighted off has no reflection at all, whatever its
+    // roughness says (the Standard Shader Ball's neutral: specular_weight 0, roughness 0, which
+    // Isaac Sim renders matte). Unity's Lit has no specular weight, so the closest is a fully
+    // rough surface rather than the mirror roughness 0 would give.
+    float specularWeight = 1.0f;
+    if (GetMtlxFloat(shader, shaderId, inputs.specularWeight, &specularWeight) && specularWeight <= 0.0f &&
+        m.metallic <= 0.0f)
+    {
+        m.roughness = 1.0f;
+    }
+    // A MaterialX normal image is a vector3: MaterialX colour-manages only colour types, so with
+    // no colorspace authored it is data, not "auto". Recorded as raw so the host does not read it
+    // as sRGB the way an unauthored 8-bit OmniPBR or UsdUVTexture normal map is read.
+    if (ReadMtlxTexture(context, shader, inputs.normal, m.normalTexturePath, sizeof(m.normalTexturePath)) &&
+        context != nullptr && context->assetColorSpaces.find(m.normalTexturePath) == context->assetColorSpaces.end())
+    {
+        context->assetColorSpaces[m.normalTexturePath] = "raw";
+    }
 
     GfVec3f opacity(1.0f, 1.0f, 1.0f);
     if (GetMtlxColor(shader, shaderId, inputs.opacity, &opacity))
@@ -2096,17 +3447,18 @@ void ExtractMtlxMaterial(
     }
 
     // Transmission (glass: OpenChessSet's pawn tops) has no real-time equivalent. Left out, a
-    // fully transmissive surface with base_color 1 imported as an opaque white ball. The surface
-    // takes the transmission colour in proportion to the weight and becomes partly transparent,
-    // the same stand-in the OmniSurface path uses.
+    // fully transmissive surface with base_color 1 imported as an opaque white ball. It becomes
+    // partly transparent, and its diffuse colour keeps only the (1 - weight) share standard_surface
+    // gives the diffuse lobe: the transmitted light is not scattered back. The stand-in used to
+    // paint the transmission colour on as diffuse instead, and under the Reference Look's bright uniform
+    // dome every clear glass still read as a white ball; Isaac Sim, refracting the board below,
+    // draws them dark. Alpha blending cannot tint what is behind, so the colour is not kept.
     float transmission = 0.0f;
     if (!hasAlbedo && GetMtlxFloat(shader, shaderId, inputs.transmission, &transmission) && transmission > 0.0f)
     {
         transmission = std::min(transmission, 1.0f);
-        GfVec3f tint(1.0f, 1.0f, 1.0f);
-        GetMtlxColor(shader, shaderId, inputs.transmissionColor, &tint);
         const GfVec3f surface(m.r, m.g, m.b);
-        SetColor(&m, surface * (1.0f - transmission) + tint * transmission);
+        SetColor(&m, surface * (1.0f - transmission));
         m.a = std::min(m.a, 1.0f - 0.75f * transmission);
     }
 
@@ -2124,16 +3476,76 @@ void ExtractMtlxMaterial(
     }
 
     // Unity's metallic slot takes one packed metallic(.r) + smoothness(.a) map. MaterialX keeps
-    // metalness and roughness as separate greyscale images, and putting one of those in that slot
-    // would read its alpha as smoothness, so they are left out and the constants above apply.
-    char unused[1024] = {0};
-    if (ReadMtlxTexture(nullptr, shader, inputs.metallic, unused, sizeof(unused)) ||
-        ReadMtlxTexture(nullptr, shader, inputs.roughness, unused, sizeof(unused)))
+    // metalness and roughness as separate greyscale images, the layout OmniPBR's
+    // metallic_texture + reflectionroughness_texture has: they are reported as a plain metallic
+    // map and a roughness map, and the host packs them while it holds the pixels (API 10), the
+    // constants above standing in for whichever is not a texture. They used to be dropped with a
+    // warning, which left OpenChessSet's gold crowns and borders flat cream and its marble one
+    // uniform 0.5 smoothness.
+    if (ReadMtlxTexture(context, shader, inputs.metallic, m.metallicTexturePath, sizeof(m.metallicTexturePath)))
     {
-        AppendImportWarning(context,
-            "material '" + materialPath + "' (MaterialX " + shaderId.GetString() +
-            ") has metalness/roughness textures, which Unity's packed metallic map cannot take "
-            "unconverted; constant values are used for them.");
+        out->metallicIsPlain = true;
+    }
+
+    // A specular layer weighted off made the surface fully rough above; a roughness map would
+    // undo that, so it is only taken while the layer reflects.
+    char roughnessPath[1024] = {0};
+    if (!(specularWeight <= 0.0f && m.metallic <= 0.0f && !out->metallicIsPlain) &&
+        ReadMtlxTexture(context, shader, inputs.roughness, roughnessPath, sizeof(roughnessPath)))
+    {
+        out->roughnessTexturePath = roughnessPath;
+    }
+}
+
+// The packed metallic(.r) + smoothness(.a) map this exporter writes into a UsdPreviewSurface:
+// `metallic` reads .r and `roughness` reads .a of one file (ExtractPreviewMaterial's packing
+// test, plus the channels). Writes that file into `buffer`; false for any other layout.
+bool ReadPreviewPackedMetallicMap(
+    RUsdContext* context,
+    const UsdShadeShader& preview,
+    char* buffer,
+    size_t capacity)
+{
+    auto sourceOutput = [&preview](const char* name)
+    {
+        UsdShadeInput input = preview.GetInput(TfToken(name));
+        UsdShadeSourceInfoVector sources = input ? input.GetConnectedSources() : UsdShadeSourceInfoVector();
+        return sources.empty() ? TfToken() : sources[0].sourceName;
+    };
+    if (sourceOutput("metallic") != TfToken("r") || sourceOutput("roughness") != TfToken("a"))
+    {
+        return false;
+    }
+
+    char metallicPath[1024] = {0};
+    char roughnessPath[1024] = {0};
+    if (!ReadConnectedTextureFile(preview, TfToken("metallic"), metallicPath, sizeof(metallicPath)) ||
+        !ReadConnectedTextureFile(preview, TfToken("roughness"), roughnessPath, sizeof(roughnessPath)) ||
+        std::strcmp(metallicPath, roughnessPath) != 0)
+    {
+        return false;
+    }
+
+    return ReadConnectedTexture(context, preview, TfToken("metallic"), buffer, capacity, nullptr) ==
+        TextureReadStatus::Ok;
+}
+
+// An OmniPBR or MaterialX flavour exported beside a UsdPreviewSurface (MaterialFlavors) cannot
+// carry Unity's packed metallic/smoothness map, which neither has an input for, so that map
+// lives only in the UsdPreviewSurface. Reading the MDL or MaterialX network first, as Isaac Sim
+// renders it, dropped it on the way back in. When the network read has no metallic or roughness
+// map of its own and `preview` has this exporter's packed map, that one map is taken from it.
+// Every value the network sets, which is what Isaac Sim renders, stays as read; a network with
+// any other UsdPreviewSurface beside it imports exactly as before.
+void TakePreviewPackedMetallicMap(
+    RUsdContext* context,
+    const UsdShadeShader& preview,
+    RUsdContext::ImportedMaterial* out)
+{
+    if (preview && out->material.metallicTexturePath[0] == '\0' && out->roughnessTexturePath.empty())
+    {
+        ReadPreviewPackedMetallicMap(context, preview, out->material.metallicTexturePath,
+                                     sizeof(out->material.metallicTexturePath));
     }
 }
 
@@ -2147,40 +3559,88 @@ bool ExtractMaterial(
     out->material = DefaultImportMaterial();
     const std::string materialPath = material.GetPath().GetString();
 
-    // UsdPreviewSurface wins when a material carries both, as it does for every other renderer.
+    // The render contexts in Isaac Sim's order (Omniverse RTX, measured on Isaac Sim 6.2): an
+    // MDL network wins, then MaterialX, then the universal UsdPreviewSurface. A material that
+    // carries more than one renders from the first, so the import reads the same one: the
+    // Standard Shader Ball's `neutral` has a UsdPreviewSurface with an 18% grey texture and a
+    // MaterialX OpenPBR with no base colour, and Isaac Sim draws it white (OpenPBR's default).
+    // A known MDL module and a supported MaterialX surface are read in full; an unknown MDL
+    // module yields only a base colour, so it is used only when nothing else is there.
     UsdShadeShader universal = material.ComputeSurfaceSource();
     TfToken shaderId;
-    if (universal && universal.GetShaderId(&shaderId) && shaderId == TfToken("UsdPreviewSurface"))
-    {
-        out->material = ExtractPreviewMaterial(context, material, out);
-        ExtractOpacityInfo(context, material, &out->opacityTexturePath, &out->opacityThreshold);
-        return true;
-    }
+    const bool hasPreview =
+        universal && universal.GetShaderId(&shaderId) && shaderId == TfToken("UsdPreviewSurface");
 
-    // This falls back to the universal output when there is no mdl one; that shader was
-    // already rejected above.
+    // ComputeSurfaceSource falls back to the universal output when a context has none of its own.
     UsdShadeShader mdl = material.ComputeSurfaceSource(TfTokenVector{TfToken("mdl")});
     if (mdl && universal && mdl.GetPath() == universal.GetPath())
     {
         mdl = UsdShadeShader();
     }
 
-    if (mdl && ExtractMdlMaterial(context, mdl, materialPath, out))
+    // A module named by URL is read from the host's download cache, if it is there.
+    std::map<std::string, RemoteMdlOverlay> overlays;
+    CollectRemoteOverlay(context, mdl, &overlays);
+    struct OverlayScope
+    {
+        const std::map<std::string, RemoteMdlOverlay>* previous;
+        explicit OverlayScope(const std::map<std::string, RemoteMdlOverlay>* current) : previous(t_remoteOverlays)
+        {
+            t_remoteOverlays = current;
+        }
+        ~OverlayScope() { t_remoteOverlays = previous; }
+    } overlayScope(overlays.empty() ? t_remoteOverlays : &overlays);
+
+    if (mdl && ExtractMdlMaterial(context, mdl, materialPath, out, false))
+    {
+        if (StartsWith(GetMdlShaderName(mdl), "OmniPBR"))
+        {
+            TakePreviewPackedMetallicMap(context, hasPreview ? universal : UsdShadeShader(), out);
+        }
+
+        return true;
+    }
+
+    out->material = DefaultImportMaterial();
+    UsdShadeShader mtlx = material.ComputeSurfaceSource(TfTokenVector{TfToken("mtlx")});
+    TfToken mtlxId;
+    const MtlxSurfaceInputs* mtlxInputs = nullptr;
+    if (mtlx && !(universal && mtlx.GetPath() == universal.GetPath()) && mtlx.GetShaderId(&mtlxId))
+    {
+        mtlxInputs = FindMtlxSurfaceInputs(mtlxId.GetString());
+        if (mtlxInputs != nullptr)
+        {
+            ExtractMtlxMaterial(context, mtlx, mtlxId, *mtlxInputs, materialPath, out);
+
+            // The MaterialX flavour is a standard_surface with metalness and roughness as
+            // constants. One whose metalness or roughness is a texture was not written that
+            // way, and ExtractMtlxMaterial has already said those maps are not used.
+            char unused[1024] = {0};
+            if (mtlxId == TfToken("ND_standard_surface_surfaceshader") &&
+                !ReadMtlxTexture(nullptr, mtlx, mtlxInputs->metallic, unused, sizeof(unused)) &&
+                !ReadMtlxTexture(nullptr, mtlx, mtlxInputs->roughness, unused, sizeof(unused)))
+            {
+                TakePreviewPackedMetallicMap(context, hasPreview ? universal : UsdShadeShader(), out);
+            }
+
+            return true;
+        }
+    }
+
+    if (hasPreview)
+    {
+        out->material = ExtractPreviewMaterial(context, material, out);
+        ExtractOpacityInfo(context, material, &out->opacityTexturePath, &out->opacityThreshold);
+        return true;
+    }
+
+    if (mdl && ExtractMdlMaterial(context, mdl, materialPath, out, true))
     {
         return true;
     }
 
-    // As with mdl, this falls back to the universal output, which was already rejected above.
-    UsdShadeShader mtlx = material.ComputeSurfaceSource(TfTokenVector{TfToken("mtlx")});
-    TfToken mtlxId;
-    if (mtlx && !(universal && mtlx.GetPath() == universal.GetPath()) && mtlx.GetShaderId(&mtlxId))
+    if (mtlx && !(universal && mtlx.GetPath() == universal.GetPath()) && !mtlxId.IsEmpty())
     {
-        if (const MtlxSurfaceInputs* inputs = FindMtlxSurfaceInputs(mtlxId.GetString()))
-        {
-            ExtractMtlxMaterial(context, mtlx, mtlxId, *inputs, materialPath, out);
-            return true;
-        }
-
         AppendImportWarning(context,
             "material '" + materialPath + "' uses MaterialX surface '" + mtlxId.GetString() +
             "', which is not supported; the mesh's displayColor, else the default material, is used.");
@@ -2261,7 +3721,7 @@ int AddDisplayColorMaterial(
     return entry.index;
 }
 
-bool ReadVec3Array(const UsdAttribute& attribute, VtArray<GfVec3f>* out);
+bool ReadVec3Array(const UsdAttribute& attribute, VtArray<GfVec3f>* out, UsdTimeCode time = UsdTimeCode::Default());
 
 // The mean of a colour primvar on `prim` (inherited from ancestors, as primvars are). Like
 // displayColor below, per-vertex or per-face values are averaged: the import ABI has no
@@ -2513,12 +3973,12 @@ int BuildImportedSubmeshes(
         triangleIndices += 3 * static_cast<int64_t>(std::max(0, faceVertexCounts[static_cast<size_t>(f)] - 2));
     }
 
-    if (triangleIndices > static_cast<int64_t>(kMaxImportGeometryElements))
+    if (triangleIndices > static_cast<int64_t>(context->importLimits.geometryElements))
     {
         AppendImportWarning(context,
             "mesh '" + meshPrim.GetPath().GetString() + "' triangulates to " +
             std::to_string(triangleIndices) + " indices, over the import limit of " +
-            std::to_string(kMaxImportGeometryElements) + "; mesh skipped.");
+            std::to_string(context->importLimits.geometryElements) + "; mesh skipped.");
         return -1;
     }
 
@@ -2603,7 +4063,7 @@ int BuildImportedSubmeshes(
         }
 
         VtIntArray subsetFaces;
-        subset.GetIndicesAttr().Get(&subsetFaces);
+        subset.GetIndicesAttr().Get(&subsetFaces, context->importTime);
         for (int faceIndex : subsetFaces)
         {
             if (faceIndex >= 0 && faceIndex < numFaces)
@@ -2679,9 +4139,12 @@ int BuildImportedSubmeshes(
 // so the importer resolves each face-corner to a value index and splits vertices when needed.
 
 // Reads a float2-ish array without VtValue::IsHolding<T>(): typeid does not match across the
-// plugin/monolithic-OpenUSD boundary (hidden visibility), so the registry type name decides
-// which UncheckedGet is safe. See BUILD_NOTES.md.
-bool ReadVec2Array(const UsdAttribute& attribute, VtArray<GfVec2f>* out)
+// plugin/monolithic-OpenUSD boundary (hidden visibility), so the held value's registered type
+// name decides which UncheckedGet is safe. See BUILD_NOTES.md. It has to be the value's: the
+// attribute's declared type name is only what the layer claims, and a layer whose value is of
+// another type (a crafted usdc, a damaged Alembic file read through usdAbc) had UncheckedGet
+// reinterpret that value's storage as the declared type.
+bool ReadVec2Array(const UsdAttribute& attribute, VtArray<GfVec2f>* out, UsdTimeCode time = UsdTimeCode::Default())
 {
     if (!attribute || out == nullptr)
     {
@@ -2689,17 +4152,16 @@ bool ReadVec2Array(const UsdAttribute& attribute, VtArray<GfVec2f>* out)
     }
 
     VtValue value;
-    if (!attribute.Get(&value) || value.IsEmpty())
+    if (!attribute.Get(&value, time) || value.IsEmpty())
     {
         return false;
     }
 
-    const std::string typeName = attribute.GetTypeName().GetAsToken().GetString();
-    if (typeName == "texCoord2f[]" || typeName == "float2[]")
+    if (VtValueHoldsType(value, "VtArray<GfVec2f>"))
     {
         *out = value.UncheckedGet<VtArray<GfVec2f>>();
     }
-    else if (typeName == "texCoord2d[]" || typeName == "double2[]")
+    else if (VtValueHoldsType(value, "VtArray<GfVec2d>"))
     {
         const VtArray<GfVec2d>& source = value.UncheckedGet<VtArray<GfVec2d>>();
         out->resize(source.size());
@@ -2708,7 +4170,7 @@ bool ReadVec2Array(const UsdAttribute& attribute, VtArray<GfVec2f>* out)
             (*out)[i] = GfVec2f(static_cast<float>(source[i][0]), static_cast<float>(source[i][1]));
         }
     }
-    else if (typeName == "texCoord2h[]" || typeName == "half2[]")
+    else if (VtValueHoldsType(value, "VtArray<GfVec2h>"))
     {
         const VtArray<GfVec2h>& source = value.UncheckedGet<VtArray<GfVec2h>>();
         out->resize(source.size());
@@ -2725,7 +4187,7 @@ bool ReadVec2Array(const UsdAttribute& attribute, VtArray<GfVec2f>* out)
     return !out->empty();
 }
 
-bool ReadVec3Array(const UsdAttribute& attribute, VtArray<GfVec3f>* out)
+bool ReadVec3Array(const UsdAttribute& attribute, VtArray<GfVec3f>* out, UsdTimeCode time)
 {
     if (!attribute || out == nullptr)
     {
@@ -2733,19 +4195,18 @@ bool ReadVec3Array(const UsdAttribute& attribute, VtArray<GfVec3f>* out)
     }
 
     VtValue value;
-    if (!attribute.Get(&value) || value.IsEmpty())
+    if (!attribute.Get(&value, time) || value.IsEmpty())
     {
         return false;
     }
 
-    const std::string typeName = attribute.GetTypeName().GetAsToken().GetString();
-    if (typeName == "normal3f[]" || typeName == "vector3f[]" || typeName == "point3f[]" ||
-        typeName == "float3[]" || typeName == "color3f[]")
+    // The held value's type, as in ReadVec2Array: every float3 role (point, normal, vector,
+    // color) holds VtArray<GfVec3f>, and the double ones VtArray<GfVec3d>.
+    if (VtValueHoldsType(value, "VtArray<GfVec3f>"))
     {
         *out = value.UncheckedGet<VtArray<GfVec3f>>();
     }
-    else if (typeName == "normal3d[]" || typeName == "vector3d[]" || typeName == "point3d[]" ||
-             typeName == "double3[]")
+    else if (VtValueHoldsType(value, "VtArray<GfVec3d>"))
     {
         const VtArray<GfVec3d>& source = value.UncheckedGet<VtArray<GfVec3d>>();
         out->resize(source.size());
@@ -2850,27 +4311,28 @@ bool IsUvPrimvarType(const UsdGeomPrimvar& primvar)
         typeName == "float2[]" || typeName == "double2[]" || typeName == "half2[]";
 }
 
-void ReadAttrLayout(const UsdGeomPrimvar& primvar, int valueCount, ImportAttrLayout* layout)
+void ReadAttrLayout(const UsdGeomPrimvar& primvar, int valueCount, ImportAttrLayout* layout,
+                    UsdTimeCode time = UsdTimeCode::Default())
 {
     layout->interpolation = primvar.GetInterpolation();
     layout->indices.clear();
     if (primvar.IsIndexed())
     {
-        primvar.GetIndices(&layout->indices);
+        primvar.GetIndices(&layout->indices, time);
     }
 
     layout->valueCount = valueCount;
     layout->valid = valueCount > 0;
 }
 
-bool LoadUvSource(const UsdGeomPrimvar& primvar, ImportUvSource* source)
+bool LoadUvSource(const UsdGeomPrimvar& primvar, ImportUvSource* source, UsdTimeCode time)
 {
-    if (!primvar || !IsUvPrimvarType(primvar) || !ReadVec2Array(primvar.GetAttr(), &source->values))
+    if (!primvar || !IsUvPrimvarType(primvar) || !ReadVec2Array(primvar.GetAttr(), &source->values, time))
     {
         return false;
     }
 
-    ReadAttrLayout(primvar, static_cast<int>(source->values.size()), &source->layout);
+    ReadAttrLayout(primvar, static_cast<int>(source->values.size()), &source->layout, time);
     return source->layout.valid;
 }
 
@@ -2906,7 +4368,7 @@ const std::vector<std::vector<TfToken>>& UvSetAliasTokens()
     return tokens;
 }
 
-void ResolveUvSources(const UsdGeomMesh& mesh, ImportUvSource sources[RUSD_MAX_UV_SETS])
+void ResolveUvSources(const UsdGeomMesh& mesh, ImportUvSource sources[RUSD_MAX_UV_SETS], UsdTimeCode time)
 {
     UsdGeomPrimvarsAPI primvars(mesh.GetPrim());
 
@@ -2916,7 +4378,7 @@ void ResolveUvSources(const UsdGeomMesh& mesh, ImportUvSource sources[RUSD_MAX_U
     {
         for (const TfToken& name : aliases[static_cast<size_t>(set)])
         {
-            if (LoadUvSource(primvars.GetPrimvar(name), &sources[set]))
+            if (LoadUvSource(primvars.GetPrimvar(name), &sources[set], time))
             {
                 claimed.push_back(name.GetString());
                 break;
@@ -2958,7 +4420,7 @@ void ResolveUvSources(const UsdGeomMesh& mesh, ImportUvSource sources[RUSD_MAX_U
 
         for (int set = 0; set < RUSD_MAX_UV_SETS; ++set)
         {
-            if (!sources[set].layout.valid && LoadUvSource(primvar, &sources[set]))
+            if (!sources[set].layout.valid && LoadUvSource(primvar, &sources[set], time))
             {
                 claimed.push_back(name);
                 break;
@@ -2967,9 +4429,9 @@ void ResolveUvSources(const UsdGeomMesh& mesh, ImportUvSource sources[RUSD_MAX_U
     }
 }
 
-void ResolveNormalSource(const UsdGeomMesh& mesh, ImportNormalSource* source)
+void ResolveNormalSource(const UsdGeomMesh& mesh, ImportNormalSource* source, UsdTimeCode time)
 {
-    if (ReadVec3Array(mesh.GetNormalsAttr(), &source->values))
+    if (ReadVec3Array(mesh.GetNormalsAttr(), &source->values, time))
     {
         source->layout.interpolation = mesh.GetNormalsInterpolation();
         source->layout.indices.clear();
@@ -2982,9 +4444,9 @@ void ResolveNormalSource(const UsdGeomMesh& mesh, ImportNormalSource* source)
     // importer used to ignore entirely (mesh then fell back to RecalculateNormals).
     static const TfToken normalsToken("normals");
     UsdGeomPrimvar primvar = UsdGeomPrimvarsAPI(mesh.GetPrim()).GetPrimvar(normalsToken);
-    if (primvar && ReadVec3Array(primvar.GetAttr(), &source->values))
+    if (primvar && ReadVec3Array(primvar.GetAttr(), &source->values, time))
     {
-        ReadAttrLayout(primvar, static_cast<int>(source->values.size()), &source->layout);
+        ReadAttrLayout(primvar, static_cast<int>(source->values.size()), &source->layout, time);
     }
 }
 
@@ -3258,7 +4720,7 @@ std::vector<GfVec3f> ComputeSmoothPointNormals(
     return normals;
 }
 
-DisplayColor ReadDisplayColor(const UsdPrim& prim)
+DisplayColor ReadDisplayColor(const UsdPrim& prim, UsdTimeCode time)
 {
     DisplayColor result;
     UsdGeomPrimvarsAPI primvars(prim);
@@ -3266,7 +4728,7 @@ DisplayColor ReadDisplayColor(const UsdPrim& prim)
     // With inheritance: a colour authored once on a parent Xform applies to every mesh below it.
     UsdGeomPrimvar color = primvars.FindPrimvarWithInheritance(UsdGeomTokens->primvarsDisplayColor);
     VtArray<GfVec3f> colors;
-    if (color && ReadVec3Array(color.GetAttr(), &colors))
+    if (color && ReadVec3Array(color.GetAttr(), &colors, time))
     {
         GfVec3f sum(0.0f, 0.0f, 0.0f);
         for (const GfVec3f& value : colors)
@@ -3289,8 +4751,7 @@ DisplayColor ReadDisplayColor(const UsdPrim& prim)
     UsdGeomPrimvar opacity =
         primvars.FindPrimvarWithInheritance(UsdGeomTokens->primvarsDisplayOpacity);
     VtValue value;
-    if (opacity && opacity.GetAttr().Get(&value) &&
-        opacity.GetAttr().GetTypeName().GetAsToken().GetString() == "float[]")
+    if (opacity && opacity.GetAttr().Get(&value, time) && VtValueHoldsType(value, "VtArray<float>"))
     {
         const VtArray<float>& opacities = value.UncheckedGet<VtArray<float>>();
         if (!opacities.empty())
@@ -3313,23 +4774,27 @@ bool BuildImportedMesh(
     RUsdContext* context,
     const UsdGeomMesh& mesh,
     UsdGeomXformCache* xformCache,
-    RUsdContext::ImportedMesh* importedMesh)
+    RUsdContext::ImportedMesh* importedMesh,
+    bool recordVertexPoints)
 {
     if (context == nullptr || !mesh || xformCache == nullptr || importedMesh == nullptr)
     {
         return false;
     }
 
+    const UsdTimeCode time = context->importTime;
     VtArray<GfVec3f> points;
-    if (!mesh.GetPointsAttr().Get(&points) || points.empty())
+    if (!mesh.GetPointsAttr().Get(&points, time) || points.empty())
     {
         return false;
     }
 
+    importedMesh->sourcePointCount = points.size();
+
     VtIntArray faceVertexCounts;
     VtIntArray faceVertexIndices;
-    if (!mesh.GetFaceVertexCountsAttr().Get(&faceVertexCounts) ||
-        !mesh.GetFaceVertexIndicesAttr().Get(&faceVertexIndices) ||
+    if (!mesh.GetFaceVertexCountsAttr().Get(&faceVertexCounts, time) ||
+        !mesh.GetFaceVertexIndicesAttr().Get(&faceVertexIndices, time) ||
         faceVertexCounts.empty() ||
         faceVertexIndices.empty())
     {
@@ -3338,13 +4803,29 @@ bool BuildImportedMesh(
 
     // Everything below allocates per corner (split tables, normals, UVs) before triangulation
     // counts its output, so an oversized corner list is refused here, before any of it.
-    if (faceVertexIndices.size() > kMaxImportGeometryElements)
+    if (faceVertexIndices.size() > context->importLimits.geometryElements)
     {
         AppendImportWarning(context,
             "mesh '" + mesh.GetPath().GetString() + "' has " +
             std::to_string(faceVertexIndices.size()) + " face-vertex indices, over the import limit of " +
-            std::to_string(kMaxImportGeometryElements) + "; mesh skipped.");
+            std::to_string(context->importLimits.geometryElements) + "; mesh skipped.");
         return false;
+    }
+
+    // Every corner has to name one of the mesh's points. The unsplit path hands
+    // faceVertexIndices over as the triangle table itself, so an index past the points (or a
+    // negative one) reached the host's mesh as it stood; the split path quietly drew such a
+    // corner at point 0. Both now refuse the mesh, as inconsistent face counts are refused.
+    for (const int point : faceVertexIndices)
+    {
+        if (point < 0 || static_cast<size_t>(point) >= points.size())
+        {
+            AppendImportWarning(context,
+                "mesh '" + mesh.GetPath().GetString() + "' has a face-vertex index (" +
+                std::to_string(point) + ") outside its " + std::to_string(points.size()) +
+                " points; mesh skipped.");
+            return false;
+        }
     }
 
     // Points/normals are kept in mesh-local space; the prim's transform is reconstructed
@@ -3356,7 +4837,7 @@ bool BuildImportedMesh(
     // Face winding. Only consulted when normals have to be computed; authored normals are used
     // as they stand.
     TfToken orientation = UsdGeomTokens->rightHanded;
-    mesh.GetOrientationAttr().Get(&orientation);
+    mesh.GetOrientationAttr().Get(&orientation, time);
     const bool leftHanded = orientation == UsdGeomTokens->leftHanded;
 
     // Subdivision is not performed: the control cage is imported, which is coarser than what
@@ -3377,10 +4858,10 @@ bool BuildImportedMesh(
     const int cornerCount = static_cast<int>(faceVertexIndices.size());
 
     ImportUvSource uvSources[RUSD_MAX_UV_SETS];
-    ResolveUvSources(mesh, uvSources);
+    ResolveUvSources(mesh, uvSources, time);
 
     ImportNormalSource normalSource;
-    ResolveNormalSource(mesh, &normalSource);
+    ResolveNormalSource(mesh, &normalSource, time);
 
     bool needsSplit = normalSource.layout.NeedsSplit();
     for (int set = 0; set < RUSD_MAX_UV_SETS; ++set)
@@ -3410,11 +4891,16 @@ bool BuildImportedMesh(
             {
                 importedMesh->normals.push_back(
                     ToUnityVector(normalSource.values[static_cast<size_t>(point)]));
+                if (recordVertexPoints)
+                {
+                    importedMesh->vertexNormalElements.push_back(point);
+                }
             }
         }
         else if (normalSource.layout.valid)
         {
             std::vector<RUsdVec3> normals;
+            std::vector<int> elements;
             normals.reserve(static_cast<size_t>(pointCount));
             for (int point = 0; point < pointCount; ++point)
             {
@@ -3422,13 +4908,19 @@ bool BuildImportedMesh(
                 if (element < 0)
                 {
                     normals.clear();
+                    elements.clear();
                     break;
                 }
 
                 normals.push_back(ToUnityVector(normalSource.values[static_cast<size_t>(element)]));
+                elements.push_back(element);
             }
 
             importedMesh->normals = std::move(normals);
+            if (recordVertexPoints)
+            {
+                importedMesh->vertexNormalElements = std::move(elements);
+            }
         }
         else
         {
@@ -3560,10 +5052,19 @@ bool BuildImportedMesh(
             }
 
             importedMesh->points.push_back(ToUnityVector(points[static_cast<size_t>(point)]));
+            if (recordVertexPoints)
+            {
+                importedMesh->vertexPoints.push_back(point);
+            }
+
             if (normalSource.layout.valid)
             {
                 importedMesh->normals.push_back(
                     ToUnityVector(normalSource.values[static_cast<size_t>(key[1])]));
+                if (recordVertexPoints)
+                {
+                    importedMesh->vertexNormalElements.push_back(key[1]);
+                }
             }
             else if (!smoothNormals.empty())
             {
@@ -3586,9 +5087,9 @@ bool BuildImportedMesh(
 
     importedMesh->materialIndex = BuildImportedSubmeshes(
         context, mesh.GetPrim(), faceVertexCounts, cornerVertices, cornerCount, leftHanded,
-        ReadDisplayColor(mesh.GetPrim()), &importedMesh->indices, &importedMesh->submeshes);
+        ReadDisplayColor(mesh.GetPrim(), time), &importedMesh->indices, &importedMesh->submeshes);
 
-    importedMesh->visible = UsdGeomImageable(mesh.GetPrim()).ComputeVisibility() == UsdGeomTokens->invisible ? 0 : 1;
+    importedMesh->visible = UsdGeomImageable(mesh.GetPrim()).ComputeVisibility(time) == UsdGeomTokens->invisible ? 0 : 1;
     return !importedMesh->indices.empty();
 }
 
@@ -3608,6 +5109,227 @@ std::string ExportMaterialKey(const RUsdMaterial& m)
 
     return key.str();
 }
+
+bool HasUvTransform(const RUsdMaterial& source)
+{
+    return source.uvScale[0] != 1.0f || source.uvScale[1] != 1.0f ||
+        source.uvOffset[0] != 0.0f || source.uvOffset[1] != 0.0f;
+}
+
+// OmniPBR, Omniverse's default MDL material, beside the UsdPreviewSurface (API 13): Kit and
+// Isaac Sim render it natively and its inputs are the ones a user edits there. The input names
+// are the ones ReadOmniPbr reads back, so an exported OmniPBR imports to the same values. The
+// importer reads it in preference to the UsdPreviewSurface, as Isaac Sim renders it. Unity's
+// packed metallic(.r) + smoothness(.a) map has no OmniPBR input -- metallic_texture is greyscale
+// and roughness a map of its own -- so metallic and roughness stay constants here, the map stays
+// in the UsdPreviewSurface only, and ExtractMaterial takes it from there on import.
+void WriteOmniPbrFlavor(
+    RUsdContext* context,
+    const SdfPath& materialPath,
+    const UsdShadeMaterial& usdMaterial,
+    const RUsdMaterial& source)
+{
+    UsdShadeShader omni = UsdShadeShader::Define(
+        context->stage, materialPath.AppendChild(TfToken("OmniPBR")));
+    omni.SetSourceAsset(SdfAssetPath("OmniPBR.mdl"), TfToken("mdl"));
+    omni.SetSourceAssetSubIdentifier(TfToken("OmniPBR"), TfToken("mdl"));
+
+    auto input = [&omni](const char* name, const SdfValueTypeName& type)
+    {
+        return omni.CreateInput(TfToken(name), type);
+    };
+    auto texture = [&input](const char* name, const char* path, const char* colorSpace)
+    {
+        UsdShadeInput file = input(name, SdfValueTypeNames->Asset);
+        file.Set(SdfAssetPath(path));
+        file.GetAttr().SetColorSpace(TfToken(colorSpace));
+    };
+
+    const GfVec3f color(source.r, source.g, source.b);
+    if (source.albedoTexturePath[0] != '\0')
+    {
+        // OmniPBR multiplies diffuse_texture by diffuse_tint, as Unity multiplies its base map by
+        // the base colour; the constant is the untextured colour only.
+        texture("diffuse_texture", source.albedoTexturePath, "sRGB");
+        input("diffuse_color_constant", SdfValueTypeNames->Color3f).Set(GfVec3f(1.0f));
+        input("diffuse_tint", SdfValueTypeNames->Color3f).Set(color);
+    }
+    else
+    {
+        input("diffuse_color_constant", SdfValueTypeNames->Color3f).Set(color);
+    }
+
+    input("metallic_constant", SdfValueTypeNames->Float).Set(source.metallic);
+    input("reflection_roughness_constant", SdfValueTypeNames->Float).Set(source.roughness);
+
+    if (source.normalTexturePath[0] != '\0')
+    {
+        texture("normalmap_texture", source.normalTexturePath, "raw");
+        // Unity's normal maps are OpenGL-style (green up); OmniPBR flips V unless told not to,
+        // which turned every exported bump inside out in Isaac Sim.
+        input("flip_tangent_v", SdfValueTypeNames->Bool).Set(false);
+    }
+
+    // The inverse of ReadOmniPbr: emissive_intensity in nits, kNitsPerUnitEmission per unit of
+    // UsdPreviewSurface emissiveColor (what Unity's emission imports from and exports to).
+    const float peak = std::max({source.emissive[0], source.emissive[1], source.emissive[2]});
+    const bool hasEmissiveTexture = source.emissiveTexturePath[0] != '\0';
+    if (peak > 0.0f || hasEmissiveTexture)
+    {
+        input("enable_emission", SdfValueTypeNames->Bool).Set(true);
+        const float scale = peak > 0.0f ? peak : 1.0f;
+        const GfVec3f emissive = peak > 0.0f
+            ? GfVec3f(source.emissive[0], source.emissive[1], source.emissive[2]) / scale
+            : GfVec3f(1.0f);
+        input("emissive_color", SdfValueTypeNames->Color3f).Set(emissive);
+        input("emissive_intensity", SdfValueTypeNames->Float).Set(scale * kNitsPerUnitEmission);
+        if (hasEmissiveTexture)
+        {
+            texture("emissive_color_texture", source.emissiveTexturePath, "sRGB");
+        }
+    }
+
+    if (source.a < 1.0f)
+    {
+        input("enable_opacity", SdfValueTypeNames->Bool).Set(true);
+        input("opacity_constant", SdfValueTypeNames->Float).Set(source.a);
+    }
+
+    if (HasUvTransform(source))
+    {
+        input("texture_scale", SdfValueTypeNames->Float2).Set(GfVec2f(source.uvScale[0], source.uvScale[1]));
+        input("texture_translate", SdfValueTypeNames->Float2).Set(GfVec2f(source.uvOffset[0], source.uvOffset[1]));
+    }
+
+    // Kit connects all three MDL terminals to the one material output.
+    UsdShadeOutput out = omni.CreateOutput(TfToken("out"), SdfValueTypeNames->Token);
+    const TfToken mdl("mdl");
+    usdMaterial.CreateSurfaceOutput(mdl).ConnectToSource(out);
+    usdMaterial.CreateDisplacementOutput(mdl).ConnectToSource(out);
+    usdMaterial.CreateVolumeOutput(mdl).ConnectToSource(out);
+}
+
+// A MaterialX standard_surface beside the UsdPreviewSurface (API 13), under the mtlx render
+// context that Hydra Storm, Omniverse and MaterialX-aware renderers pick. Node definitions are
+// MaterialX 1.39's, as shipped in the payload's usdMtlx library. Textures are sampled through
+// texcoord * scale + offset, which is UsdTransform2d's order and Unity's tiling/offset.
+// Metalness and roughness stay constants, for the same reason as OmniPBR, and because the
+// importer's MaterialX path reads them that way; the packed map stays in the UsdPreviewSurface
+// and ExtractMaterial takes it from there on import.
+void WriteMaterialXFlavor(
+    RUsdContext* context,
+    const SdfPath& materialPath,
+    const UsdShadeMaterial& usdMaterial,
+    const RUsdMaterial& source)
+{
+    auto node = [&context, &materialPath](const char* name, const char* id)
+    {
+        UsdShadeShader shader = UsdShadeShader::Define(
+            context->stage, materialPath.AppendChild(TfToken(name)));
+        shader.CreateIdAttr().Set(TfToken(id));
+        return shader;
+    };
+
+    UsdShadeShader surface = node("mtlx_surface", "ND_standard_surface_surfaceshader");
+
+    UsdShadeOutput uv;
+    auto texcoord = [&]()
+    {
+        if (uv)
+        {
+            return uv;
+        }
+
+        UsdShadeShader reader = node("mtlx_texcoord", "ND_texcoord_vector2");
+        uv = reader.CreateOutput(TfToken("out"), SdfValueTypeNames->Float2);
+        if (HasUvTransform(source))
+        {
+            UsdShadeShader scale = node("mtlx_uv_scale", "ND_multiply_vector2");
+            scale.CreateInput(TfToken("in1"), SdfValueTypeNames->Float2).ConnectToSource(uv);
+            scale.CreateInput(TfToken("in2"), SdfValueTypeNames->Float2)
+                .Set(GfVec2f(source.uvScale[0], source.uvScale[1]));
+            UsdShadeShader offset = node("mtlx_uv_offset", "ND_add_vector2");
+            offset.CreateInput(TfToken("in1"), SdfValueTypeNames->Float2)
+                .ConnectToSource(scale.CreateOutput(TfToken("out"), SdfValueTypeNames->Float2));
+            offset.CreateInput(TfToken("in2"), SdfValueTypeNames->Float2)
+                .Set(GfVec2f(source.uvOffset[0], source.uvOffset[1]));
+            uv = offset.CreateOutput(TfToken("out"), SdfValueTypeNames->Float2);
+        }
+
+        return uv;
+    };
+
+    auto image = [&](const char* name, const char* id, const char* path, const char* colorSpace,
+                     const SdfValueTypeName& type)
+    {
+        UsdShadeShader shader = node(name, id);
+        UsdShadeInput file = shader.CreateInput(TfToken("file"), SdfValueTypeNames->Asset);
+        file.Set(SdfAssetPath(path));
+        file.GetAttr().SetColorSpace(TfToken(colorSpace));
+        shader.CreateInput(TfToken("texcoord"), SdfValueTypeNames->Float2).ConnectToSource(texcoord());
+        return shader.CreateOutput(TfToken("out"), type);
+    };
+
+    const GfVec3f color(source.r, source.g, source.b);
+    if (source.albedoTexturePath[0] != '\0')
+    {
+        // Unity's base colour multiplies the map, which standard_surface can only express
+        // through a multiply node; base stays 1.
+        UsdShadeOutput albedo = image("mtlx_base_color", "ND_image_color3",
+            source.albedoTexturePath, "srgb_texture", SdfValueTypeNames->Color3f);
+        if (color != GfVec3f(1.0f))
+        {
+            UsdShadeShader tint = node("mtlx_base_tint", "ND_multiply_color3");
+            tint.CreateInput(TfToken("in1"), SdfValueTypeNames->Color3f).ConnectToSource(albedo);
+            tint.CreateInput(TfToken("in2"), SdfValueTypeNames->Color3f).Set(color);
+            albedo = tint.CreateOutput(TfToken("out"), SdfValueTypeNames->Color3f);
+        }
+
+        surface.CreateInput(TfToken("base_color"), SdfValueTypeNames->Color3f).ConnectToSource(albedo);
+    }
+    else
+    {
+        surface.CreateInput(TfToken("base_color"), SdfValueTypeNames->Color3f).Set(color);
+    }
+
+    surface.CreateInput(TfToken("base"), SdfValueTypeNames->Float).Set(1.0f);
+    surface.CreateInput(TfToken("metalness"), SdfValueTypeNames->Float).Set(source.metallic);
+    surface.CreateInput(TfToken("specular_roughness"), SdfValueTypeNames->Float).Set(source.roughness);
+
+    if (source.normalTexturePath[0] != '\0')
+    {
+        UsdShadeOutput raw = image("mtlx_normal_image", "ND_image_vector3",
+            source.normalTexturePath, "raw", SdfValueTypeNames->Float3);
+        UsdShadeShader normalMap = node("mtlx_normalmap", "ND_normalmap_float");
+        normalMap.CreateInput(TfToken("in"), SdfValueTypeNames->Float3).ConnectToSource(raw);
+        surface.CreateInput(TfToken("normal"), SdfValueTypeNames->Float3)
+            .ConnectToSource(normalMap.CreateOutput(TfToken("out"), SdfValueTypeNames->Float3));
+    }
+
+    const GfVec3f emissive(source.emissive[0], source.emissive[1], source.emissive[2]);
+    if (source.emissiveTexturePath[0] != '\0')
+    {
+        UsdShadeOutput map = image("mtlx_emission_image", "ND_image_color3",
+            source.emissiveTexturePath, "srgb_texture", SdfValueTypeNames->Color3f);
+        surface.CreateInput(TfToken("emission_color"), SdfValueTypeNames->Color3f).ConnectToSource(map);
+        const float peak = std::max({emissive[0], emissive[1], emissive[2]});
+        surface.CreateInput(TfToken("emission"), SdfValueTypeNames->Float).Set(peak > 0.0f ? peak : 1.0f);
+    }
+    else if (emissive != GfVec3f(0.0f))
+    {
+        surface.CreateInput(TfToken("emission_color"), SdfValueTypeNames->Color3f).Set(emissive);
+        surface.CreateInput(TfToken("emission"), SdfValueTypeNames->Float).Set(1.0f);
+    }
+
+    if (source.a < 1.0f)
+    {
+        surface.CreateInput(TfToken("opacity"), SdfValueTypeNames->Color3f).Set(GfVec3f(source.a));
+    }
+
+    usdMaterial.CreateSurfaceOutput(TfToken("mtlx"))
+        .ConnectToSource(surface.CreateOutput(TfToken("out"), SdfValueTypeNames->Token));
+}
+
 
 UsdShadeMaterial CreateMaterial(
     RUsdContext* context,
@@ -3656,7 +5378,8 @@ UsdShadeMaterial CreateMaterial(
         UsdShadeShader stReader = UsdShadeShader::Define(
             context->stage, materialPath.AppendChild(TfToken("stReader")));
         stReader.CreateIdAttr().Set(TfToken("UsdPrimvarReader_float2"));
-        stReader.CreateInput(TfToken("varname"), SdfValueTypeNames->Token).Set(TfToken("st"));
+        // varname is a string since USD 21.11; a token fails OpenUSD 26's validator.
+        stReader.CreateInput(TfToken("varname"), SdfValueTypeNames->String).Set(std::string("st"));
         stOutput = stReader.CreateOutput(TfToken("result"), SdfValueTypeNames->Float2);
 
         // When the UV tiling/offset is not (1,1,0,0), route st through a UsdTransform2d.
@@ -3770,6 +5493,16 @@ UsdShadeMaterial CreateMaterial(
         TfToken("surface"),
         SdfValueTypeNames->Token);
     usdMaterial.CreateSurfaceOutput().ConnectToSource(shaderSurfaceOutput);
+
+    if ((context->materialFlavors & RUSD_MATERIAL_FLAVOR_OMNIPBR) != 0)
+    {
+        WriteOmniPbrFlavor(context, materialPath, usdMaterial, source);
+    }
+
+    if ((context->materialFlavors & RUSD_MATERIAL_FLAVOR_MATERIALX) != 0)
+    {
+        WriteMaterialXFlavor(context, materialPath, usdMaterial, source);
+    }
 
     context->exportedMaterials.emplace(materialKey, usdMaterial);
     return usdMaterial;
@@ -4132,28 +5865,28 @@ std::vector<std::array<float, 5>> CapsuleRows(float radius, float halfHeight)
 
 // Builds the canonical +Z-axis shape, then turns it onto the authored axis. Both turns are cyclic
 // permutations of the coordinates, which are rotations, so the winding survives.
-bool GenerateImplicitSurface(const UsdPrim& prim, ProceduralMesh* m)
+bool GenerateImplicitSurface(const UsdPrim& prim, ProceduralMesh* m, UsdTimeCode time)
 {
     TfToken axis = UsdGeomTokens->z;
     if (prim.IsA<UsdGeomCube>())
     {
         double size = 2.0;
-        UsdGeomCube(prim).GetSizeAttr().Get(&size);
+        UsdGeomCube(prim).GetSizeAttr().Get(&size, time);
         AddCube(m, size);
     }
     else if (prim.IsA<UsdGeomSphere>())
     {
         double radius = 1.0;
-        UsdGeomSphere(prim).GetRadiusAttr().Get(&radius);
+        UsdGeomSphere(prim).GetRadiusAttr().Get(&radius, time);
         AddRevolution(m, CapsuleRows(static_cast<float>(radius), 0.0f));
     }
     else if (prim.IsA<UsdGeomCylinder>())
     {
         UsdGeomCylinder cylinder(prim);
         double radius = 1.0, height = 2.0;
-        cylinder.GetRadiusAttr().Get(&radius);
-        cylinder.GetHeightAttr().Get(&height);
-        cylinder.GetAxisAttr().Get(&axis);
+        cylinder.GetRadiusAttr().Get(&radius, time);
+        cylinder.GetHeightAttr().Get(&height, time);
+        cylinder.GetAxisAttr().Get(&axis, time);
         const float r = static_cast<float>(radius), h = static_cast<float>(height) * 0.5f;
         AddRevolution(m, {{r, h, 1, 0, 1}, {r, -h, 1, 0, 0}});
         AddDisk(m, r, h, true);
@@ -4163,9 +5896,9 @@ bool GenerateImplicitSurface(const UsdPrim& prim, ProceduralMesh* m)
     {
         UsdGeomCone cone(prim);
         double radius = 1.0, height = 2.0;
-        cone.GetRadiusAttr().Get(&radius);
-        cone.GetHeightAttr().Get(&height);
-        cone.GetAxisAttr().Get(&axis);
+        cone.GetRadiusAttr().Get(&radius, time);
+        cone.GetHeightAttr().Get(&height, time);
+        cone.GetAxisAttr().Get(&axis, time);
         const float r = static_cast<float>(radius), h = static_cast<float>(height);
         // Side normal leans up by the slope: radial h, axial r.
         AddRevolution(m, {{0.0f, h * 0.5f, h, r, 1}, {r, -h * 0.5f, h, r, 0}});
@@ -4175,18 +5908,18 @@ bool GenerateImplicitSurface(const UsdPrim& prim, ProceduralMesh* m)
     {
         UsdGeomCapsule capsule(prim);
         double radius = 0.5, height = 1.0;
-        capsule.GetRadiusAttr().Get(&radius);
-        capsule.GetHeightAttr().Get(&height);
-        capsule.GetAxisAttr().Get(&axis);
+        capsule.GetRadiusAttr().Get(&radius, time);
+        capsule.GetHeightAttr().Get(&height, time);
+        capsule.GetAxisAttr().Get(&axis, time);
         AddRevolution(m, CapsuleRows(static_cast<float>(radius), static_cast<float>(height) * 0.5f));
     }
     else if (prim.IsA<UsdGeomPlane>())
     {
         UsdGeomPlane plane(prim);
         double width = 2.0, length = 2.0;
-        plane.GetWidthAttr().Get(&width);
-        plane.GetLengthAttr().Get(&length);
-        plane.GetAxisAttr().Get(&axis);
+        plane.GetWidthAttr().Get(&width, time);
+        plane.GetLengthAttr().Get(&length, time);
+        plane.GetAxisAttr().Get(&axis, time);
         const float w = static_cast<float>(width) * 0.5f, l = static_cast<float>(length) * 0.5f;
         const GfVec3f n(0, 0, 1);
         const int a = m->Add(GfVec3f(-w, -l, 0), n, GfVec2f(0, 0));
@@ -4224,7 +5957,7 @@ bool GenerateImplicitSurface(const UsdPrim& prim, ProceduralMesh* m)
 bool BuildImportedImplicitSurface(RUsdContext* context, const UsdPrim& prim, RUsdContext::ImportedMesh* out)
 {
     ProceduralMesh m;
-    if (!GenerateImplicitSurface(prim, &m))
+    if (!GenerateImplicitSurface(prim, &m, context->importTime))
     {
         return false;
     }
@@ -4241,8 +5974,8 @@ bool BuildImportedImplicitSurface(RUsdContext* context, const UsdPrim& prim, RUs
     out->materialIndex = BuildImportedSubmeshes(
         context, prim, m.faceCounts, m.corners.data(), static_cast<int>(m.corners.size()),
         /*leftHanded=*/false,   // built here, always in USD's default winding
-        ReadDisplayColor(prim), &out->indices, &out->submeshes);
-    out->visible = UsdGeomImageable(prim).ComputeVisibility() == UsdGeomTokens->invisible ? 0 : 1;
+        ReadDisplayColor(prim, context->importTime), &out->indices, &out->submeshes);
+    out->visible = UsdGeomImageable(prim).ComputeVisibility(context->importTime) == UsdGeomTokens->invisible ? 0 : 1;
     return !out->indices.empty();
 }
 
@@ -4250,7 +5983,8 @@ bool BuildImportedImplicitSurface(RUsdContext* context, const UsdPrim& prim, RUs
 
 struct ImportWalk
 {
-    ImportWalk(RUsdContext* c, const Usd_PrimFlagsPredicate& p) : context(c), predicate(p) {}
+    ImportWalk(RUsdContext* c, const Usd_PrimFlagsPredicate& p)
+        : context(c), predicate(p), xformCache(c->importTime) {}
 
     RUsdContext* context;
     Usd_PrimFlagsPredicate predicate;
@@ -4262,6 +5996,21 @@ struct ImportWalk
     std::vector<SdfPath> expandingInstancers;
     size_t geometryElements = 0;
     size_t instancePlacements = 0;
+
+    // UsdSkel (API v13): filled when the walk enters a SkelRoot, read by the Skeleton and
+    // skinned-mesh prims below it.
+    UsdSkelCache skelCache;
+    struct SkinTarget
+    {
+        UsdSkelSkinningQuery query;
+        UsdSkelAnimQuery animation;
+        int skeletonIndex = -1;
+    };
+    std::unordered_map<SdfPath, SkinTarget, SdfPath::Hash> skinningTargets;
+    std::unordered_map<SdfPath, int, SdfPath::Hash> skeletonIndices; // -1: refused
+
+    // How many prims above the current one animate their visibility (see ImportSubtree).
+    int animatedVisibilityScopes = 0;
 };
 
 [[noreturn]] void ThrowImportBudget(const char* what, size_t limit)
@@ -4270,20 +6019,742 @@ struct ImportWalk
         std::to_string(limit) + " " + what + "; it was not imported");
 }
 
-void CountGeometry(ImportWalk* walk, const RUsdContext::ImportedMesh& mesh)
+// Claims a mesh against the import's mesh and geometry budgets. Over either, the import fails,
+// or, when it skips past its limits, the mesh is left out (false) and counted.
+bool CountGeometry(ImportWalk* walk, const RUsdContext::ImportedMesh& mesh)
 {
-    if (walk->context->importedMeshes.size() >= kMaxImportMeshes)
-    {
-        ThrowImportBudget("meshes", kMaxImportMeshes);
-    }
-
+    RUsdContext* context = walk->context;
+    const RUsdContext::ImportLimits& limits = context->importLimits;
     const size_t elements = mesh.points.size() + mesh.indices.size();
-    if (elements > kMaxImportGeometryElements - walk->geometryElements)
+    const bool tooMany = context->importedMeshes.size() >= limits.meshes;
+    const bool tooLarge = elements > limits.geometryElements - walk->geometryElements;
+    if (tooMany || tooLarge)
     {
-        ThrowImportBudget("points and triangle indices", kMaxImportGeometryElements);
+        if (!limits.skipWhenExceeded)
+        {
+            if (tooMany)
+            {
+                ThrowImportBudget("meshes", limits.meshes);
+            }
+
+            ThrowImportBudget("points and triangle indices", limits.geometryElements);
+        }
+
+        ++context->skippedMeshes;
+        return false;
     }
 
     walk->geometryElements += elements;
+    return true;
+}
+
+// ---- Time, animation and skinning (API v13) -----------------------------------------------
+
+// Claims `values` floats of the animation budget for `what`, or says why not and refuses.
+bool ReserveAnimation(RUsdContext* context, const std::string& what, size_t samples, size_t values,
+                      const char* consequence)
+{
+    const RUsdContext::ImportLimits& limits = context->importLimits;
+    if (samples > limits.trackSamples)
+    {
+        AppendImportWarning(context, what + " has " + std::to_string(samples) +
+            " time samples, over the import limit of " + std::to_string(limits.trackSamples) +
+            "; " + consequence + ".");
+        return false;
+    }
+
+    if (values > limits.animationValues - context->animationValues)
+    {
+        AppendImportWarning(context, what + " would take the stage past the import limit of " +
+            std::to_string(limits.animationValues) + " animation values; " + consequence + ".");
+        return false;
+    }
+
+    context->animationValues += values;
+    return true;
+}
+
+void AppendMatrix(std::vector<float>* out, const GfMatrix4d& matrix)
+{
+    for (int row = 0; row < 4; ++row)
+    {
+        for (int column = 0; column < 4; ++column)
+        {
+            out->push_back(static_cast<float>(matrix[row][column]));
+        }
+    }
+}
+
+// A node's own animated transform and visibility, sampled where the stage authors samples.
+void EmitNodeTracks(ImportWalk* walk, const UsdPrim& prim, int nodeIndex)
+{
+    RUsdContext* context = walk->context;
+
+    // The walk's cache already holds this prim's xformOps; asking the schema instead rebuilds them
+    // for every node, which cost 4% on a 3,384-mesh stage with no animation at all.
+    const UsdGeomXformable xformable(prim);
+    std::vector<double> times;
+    if (xformable && walk->xformCache.TransformMightBeTimeVarying(prim) && xformable.GetTimeSamples(&times) &&
+        times.size() > 1 &&
+        ReserveAnimation(context, "the transform of '" + prim.GetPath().GetString() + "'", times.size(),
+                         times.size() * 16, "it imports at the read time"))
+    {
+        RUsdContext::ImportedNodeTrack track;
+        track.nodeIndex = nodeIndex;
+        track.kind = RUSD_TRACK_TRANSFORM;
+        track.times = times;
+        track.values.reserve(times.size() * 16);
+        for (double time : times)
+        {
+            GfMatrix4d local(1.0);
+            bool resetsXformStack = false;
+            xformable.GetLocalTransformation(&local, &resetsXformStack, UsdTimeCode(time));
+            AppendMatrix(&track.values, local);
+        }
+
+        context->importedNodeTracks.push_back(std::move(track));
+    }
+
+    const UsdAttribute visibility = UsdGeomImageable(prim).GetVisibilityAttr();
+    times.clear();
+    if (visibility && visibility.ValueMightBeTimeVarying() && visibility.GetTimeSamples(&times) &&
+        times.size() > 1 &&
+        ReserveAnimation(context, "the visibility of '" + prim.GetPath().GetString() + "'", times.size(),
+                         times.size(), "it imports at the read time"))
+    {
+        RUsdContext::ImportedNodeTrack track;
+        track.nodeIndex = nodeIndex;
+        track.kind = RUSD_TRACK_VISIBILITY;
+        track.times = times;
+        track.values.reserve(times.size());
+        for (double time : times)
+        {
+            TfToken value;
+            visibility.Get(&value, UsdTimeCode(time));
+            track.values.push_back(value == UsdGeomTokens->invisible ? 0.0f : 1.0f);
+        }
+
+        context->importedNodeTracks.push_back(std::move(track));
+    }
+}
+
+// Records a skeleton the first time a SkelRoot binds it; returns its index, or -1 when it cannot
+// skin anything (its meshes then import as they are authored). The node index is filled in when
+// the walk reaches the Skeleton prim itself.
+int EmitSkeleton(ImportWalk* walk, const UsdSkelSkeletonQuery& query)
+{
+    RUsdContext* context = walk->context;
+    const SdfPath path = query.GetSkeleton().GetPrim().GetPath();
+    const auto known = walk->skeletonIndices.find(path);
+    if (known != walk->skeletonIndices.end())
+    {
+        return known->second;
+    }
+
+    walk->skeletonIndices[path] = -1; // refused once, not once per binding
+    const std::string name = path.GetString();
+    const VtTokenArray joints = query.GetJointOrder();
+    if (joints.empty())
+    {
+        return -1;
+    }
+
+    if (joints.size() > context->importLimits.joints)
+    {
+        AppendImportWarning(context, "skeleton '" + name + "' has " + std::to_string(joints.size()) +
+            " joints, over the import limit of " + std::to_string(context->importLimits.joints) +
+            "; its meshes import unskinned.");
+        return -1;
+    }
+
+    VtMatrix4dArray bind;
+    if (!query.HasBindPose() || !query.GetJointWorldBindTransforms(&bind) || bind.size() != joints.size())
+    {
+        AppendImportWarning(context, "skeleton '" + name +
+            "' has no usable bindTransforms; its meshes import unskinned.");
+        return -1;
+    }
+
+    // Without authored restTransforms the rest pose is the bind pose, made joint-local.
+    VtMatrix4dArray rest;
+    if (!query.HasRestPose() ||
+        !query.ComputeJointLocalTransforms(&rest, UsdTimeCode::Default(), /*atRest=*/true) ||
+        rest.size() != joints.size())
+    {
+        std::vector<GfMatrix4d> local(bind.size());
+        if (!UsdSkelComputeJointLocalTransforms(query.GetTopology(), TfSpan<const GfMatrix4d>(bind.cdata(), bind.size()),
+                                                TfSpan<GfMatrix4d>(local)))
+        {
+            AppendImportWarning(context, "skeleton '" + name +
+                "' has no usable rest pose; its meshes import unskinned.");
+            return -1;
+        }
+
+        rest.assign(local.begin(), local.end());
+    }
+
+    VtMatrix4dArray pose;
+    if (!query.ComputeJointLocalTransforms(&pose, context->importTime) || pose.size() != joints.size())
+    {
+        pose = rest;
+    }
+
+    RUsdContext::ImportedSkeleton skeleton;
+    skeleton.path = name;
+    for (const TfToken& joint : joints)
+    {
+        skeleton.joints.push_back(joint.GetString());
+    }
+
+    const VtIntArray& parents = query.GetTopology().GetParentIndices();
+    skeleton.parents.assign(parents.begin(), parents.end());
+    for (size_t joint = 0; joint < joints.size(); ++joint)
+    {
+        AppendMatrix(&skeleton.bindTransforms, bind[joint]);
+        AppendMatrix(&skeleton.restTransforms, rest[joint]);
+        AppendMatrix(&skeleton.poseTransforms, pose[joint]);
+    }
+
+    const UsdSkelAnimQuery& animation = query.GetAnimQuery();
+    std::vector<double> times;
+    if (animation && animation.GetJointTransformTimeSamples(&times) && times.size() > 1 &&
+        ReserveAnimation(context, "the animation of skeleton '" + name + "'", times.size(),
+                         times.size() * joints.size() * 16, "it imports in its read-time pose"))
+    {
+        skeleton.samples.reserve(times.size() * joints.size() * 16);
+        VtMatrix4dArray local;
+        for (double time : times)
+        {
+            if (!query.ComputeJointLocalTransforms(&local, UsdTimeCode(time)) || local.size() != joints.size())
+            {
+                AppendImportWarning(context, "the animation of skeleton '" + name +
+                    "' could not be read; it imports in its read-time pose.");
+                skeleton.samples.clear();
+                times.clear();
+                break;
+            }
+
+            for (const GfMatrix4d& matrix : local)
+            {
+                AppendMatrix(&skeleton.samples, matrix);
+            }
+        }
+
+        skeleton.times = times;
+    }
+
+    const int index = static_cast<int>(context->importedSkeletons.size());
+    context->importedSkeletons.push_back(std::move(skeleton));
+    walk->skeletonIndices[path] = index;
+    return index;
+}
+
+// Binds what a SkelRoot skins. The walk is pre-order, so this runs before the Skeleton and mesh
+// prims below the root are reached.
+void PopulateSkelRoot(ImportWalk* walk, const UsdPrim& prim)
+{
+    const UsdSkelRoot root(prim);
+    std::vector<UsdSkelBinding> bindings;
+    if (!walk->skelCache.Populate(root, walk->predicate) ||
+        !walk->skelCache.ComputeSkelBindings(root, &bindings, walk->predicate))
+    {
+        AppendImportWarning(walk->context, "SkelRoot '" + prim.GetPath().GetString() +
+            "' could not be read; its meshes import unskinned.");
+        return;
+    }
+
+    for (const UsdSkelBinding& binding : bindings)
+    {
+        const UsdSkelSkeletonQuery query = walk->skelCache.GetSkelQuery(binding.GetSkeleton());
+        if (!query)
+        {
+            AppendImportWarning(walk->context, "skeleton '" + binding.GetSkeleton().GetPath().GetString() +
+                "' is invalid; its meshes import unskinned.");
+            continue;
+        }
+
+        const int skeletonIndex = EmitSkeleton(walk, query);
+        if (skeletonIndex < 0)
+        {
+            continue;
+        }
+
+        for (const UsdSkelSkinningQuery& target : binding.GetSkinningTargets())
+        {
+            ImportWalk::SkinTarget entry;
+            entry.query = target;
+            entry.animation = query.GetAnimQuery();
+            entry.skeletonIndex = skeletonIndex;
+            walk->skinningTargets.emplace(target.GetPrim().GetPath(), entry);
+        }
+    }
+}
+
+void LinkSkeletonNode(ImportWalk* walk, const UsdPrim& prim, int nodeIndex)
+{
+    const auto found = walk->skeletonIndices.find(prim.GetPath());
+    if (found != walk->skeletonIndices.end() && found->second >= 0)
+    {
+        RUsdContext::ImportedSkeleton& skeleton =
+            walk->context->importedSkeletons[static_cast<size_t>(found->second)];
+        if (skeleton.nodeIndex < 0)
+        {
+            skeleton.nodeIndex = nodeIndex;
+        }
+    }
+}
+
+// Blend shapes of a skinned mesh as dense per-vertex frames, plus their weights from the
+// skeleton's animation. Shapes keep the mesh's skel:blendShapes order even when one cannot be
+// read (it then has no frames), so weight i always belongs to shape i.
+void BuildMeshBlendShapes(ImportWalk* walk, const UsdPrim& prim, const ImportWalk::SkinTarget& target,
+                          RUsdContext::ImportedMesh* mesh)
+{
+    RUsdContext* context = walk->context;
+    const std::string meshName = prim.GetPath().GetString();
+    const UsdSkelBindingAPI binding(prim);
+    VtTokenArray names;
+    SdfPathVector targets;
+    binding.GetBlendShapesAttr().Get(&names);
+    binding.GetBlendShapeTargetsRel().GetTargets(&targets);
+    if (names.empty())
+    {
+        return;
+    }
+
+    if (names.size() != targets.size())
+    {
+        AppendImportWarning(context, "mesh '" + meshName +
+            "' authors different numbers of skel:blendShapes and skel:blendShapeTargets; its blend shapes are ignored.");
+        return;
+    }
+
+    const size_t pointCount = mesh->sourcePointCount;
+    const size_t vertexCount = mesh->points.size();
+    auto pointOf = [mesh](size_t vertex)
+    {
+        return mesh->vertexPoints.empty() ? vertex : static_cast<size_t>(mesh->vertexPoints[vertex]);
+    };
+
+    struct PendingFrame
+    {
+        float weight = 1.0f;
+        VtVec3fArray offsets;
+        VtVec3fArray normalOffsets;
+    };
+
+    for (size_t shapeIndex = 0; shapeIndex < names.size(); ++shapeIndex)
+    {
+        RUsdContext::ImportedMesh::BlendShape shape;
+        shape.name = names[shapeIndex].GetString();
+        const std::string what = "blend shape '" + shape.name + "' of mesh '" + meshName + "'";
+        const UsdSkelBlendShape source(prim.GetStage()->GetPrimAtPath(targets[shapeIndex]));
+        if (!source)
+        {
+            AppendImportWarning(context, what + " targets no BlendShape prim; it is ignored.");
+            mesh->skin.blendShapes.push_back(std::move(shape));
+            continue;
+        }
+
+        std::vector<PendingFrame> frames;
+        for (const UsdSkelInbetweenShape& inbetween : source.GetInbetweens())
+        {
+            PendingFrame frame;
+            if (!inbetween.GetWeight(&frame.weight))
+            {
+                continue;
+            }
+
+            if (!(frame.weight > 0.0f && frame.weight < 1.0f))
+            {
+                AppendImportWarning(context, what + " has an inbetween at weight " +
+                    std::to_string(frame.weight) + "; Unity places frames between 0 and 1 only, so it is ignored.");
+                continue;
+            }
+
+            inbetween.GetOffsets(&frame.offsets);
+            inbetween.GetNormalOffsets(&frame.normalOffsets);
+            frames.push_back(std::move(frame));
+        }
+
+        std::sort(frames.begin(), frames.end(),
+                  [](const PendingFrame& a, const PendingFrame& b) { return a.weight < b.weight; });
+        PendingFrame full;
+        source.GetOffsetsAttr().Get(&full.offsets);
+        source.GetNormalOffsetsAttr().Get(&full.normalOffsets);
+        frames.push_back(std::move(full));
+
+        VtIntArray pointIndices;
+        source.GetPointIndicesAttr().Get(&pointIndices);
+        const size_t authored = pointIndices.empty() ? pointCount : pointIndices.size();
+
+        size_t values = 0;
+        for (const PendingFrame& frame : frames)
+        {
+            values += vertexCount * 3 * (frame.normalOffsets.size() == authored ? 2 : 1);
+        }
+
+        if (!ReserveAnimation(context, what, 0, values, "it is ignored"))
+        {
+            mesh->skin.blendShapes.push_back(std::move(shape));
+            continue;
+        }
+
+        for (const PendingFrame& pending : frames)
+        {
+            if (pending.offsets.size() != authored)
+            {
+                AppendImportWarning(context, what + " has " + std::to_string(pending.offsets.size()) +
+                    " offsets for " + std::to_string(authored) + " points; that frame is ignored.");
+                continue;
+            }
+
+            const bool hasNormals = pending.normalOffsets.size() == authored;
+            std::vector<GfVec3f> pointDelta(pointCount, GfVec3f(0.0f));
+            std::vector<GfVec3f> pointNormalDelta(hasNormals ? pointCount : 0, GfVec3f(0.0f));
+            for (size_t i = 0; i < authored; ++i)
+            {
+                const int point = pointIndices.empty() ? static_cast<int>(i) : pointIndices[i];
+                if (point < 0 || static_cast<size_t>(point) >= pointCount)
+                {
+                    continue;
+                }
+
+                pointDelta[static_cast<size_t>(point)] = pending.offsets[i];
+                if (hasNormals)
+                {
+                    pointNormalDelta[static_cast<size_t>(point)] = pending.normalOffsets[i];
+                }
+            }
+
+            RUsdContext::ImportedMesh::BlendShapeFrame frame;
+            frame.weight = pending.weight;
+            frame.deltaVertices.reserve(vertexCount);
+            for (size_t vertex = 0; vertex < vertexCount; ++vertex)
+            {
+                frame.deltaVertices.push_back(ToUnityVector(pointDelta[pointOf(vertex)]));
+            }
+
+            if (hasNormals)
+            {
+                frame.deltaNormals.reserve(vertexCount);
+                for (size_t vertex = 0; vertex < vertexCount; ++vertex)
+                {
+                    frame.deltaNormals.push_back(ToUnityVector(pointNormalDelta[pointOf(vertex)]));
+                }
+            }
+
+            shape.frames.push_back(std::move(frame));
+        }
+
+        mesh->skin.blendShapes.push_back(std::move(shape));
+    }
+
+    // Weights come from the skeleton's animation, in its blendShapes order; the skinning query's
+    // mapper moves them into the mesh's order.
+    RUsdContext::ImportedMesh::Skin& skin = mesh->skin;
+    skin.blendShapeWeights.assign(names.size(), 0.0f);
+    const UsdSkelAnimQuery& animation = target.animation;
+    if (!animation)
+    {
+        return;
+    }
+
+    const UsdSkelAnimMapperRefPtr& mapper = target.query.GetBlendShapeMapper();
+    auto remap = [&](const VtFloatArray& animationWeights, std::vector<float>* out)
+    {
+        VtFloatArray meshWeights = animationWeights;
+        if (mapper && !mapper->Remap(animationWeights, &meshWeights))
+        {
+            return false;
+        }
+
+        if (meshWeights.size() != names.size())
+        {
+            return false;
+        }
+
+        out->insert(out->end(), meshWeights.begin(), meshWeights.end());
+        return true;
+    };
+
+    VtFloatArray weights;
+    std::vector<float> atReadTime;
+    if (animation.ComputeBlendShapeWeights(&weights, context->importTime) && remap(weights, &atReadTime))
+    {
+        skin.blendShapeWeights = atReadTime;
+    }
+
+    std::vector<double> times;
+    if (animation.GetBlendShapeWeightTimeSamples(&times) && times.size() > 1 &&
+        ReserveAnimation(context, "the blend-shape weights of mesh '" + meshName + "'", times.size(),
+                         times.size() * names.size(), "it imports with its read-time weights"))
+    {
+        for (double time : times)
+        {
+            if (!animation.ComputeBlendShapeWeights(&weights, UsdTimeCode(time)) ||
+                !remap(weights, &skin.blendShapeWeightSamples))
+            {
+                AppendImportWarning(context, "the blend-shape weights of mesh '" + meshName +
+                    "' could not be read; it imports with its read-time weights.");
+                skin.blendShapeWeightSamples.clear();
+                times.clear();
+                break;
+            }
+        }
+
+        skin.blendShapeWeightTimes = times;
+    }
+}
+
+// Joint weights and the bind transform of a skinned mesh, carried through the vertex split onto
+// the imported vertices, with joint indices moved into the skeleton's order.
+void BuildMeshSkin(ImportWalk* walk, const UsdPrim& prim, const ImportWalk::SkinTarget& target,
+                   RUsdContext::ImportedMesh* mesh)
+{
+    RUsdContext* context = walk->context;
+    const UsdSkelSkinningQuery& query = target.query;
+    const RUsdContext::ImportedSkeleton& skeleton =
+        context->importedSkeletons[static_cast<size_t>(target.skeletonIndex)];
+    const std::string name = prim.GetPath().GetString();
+    const size_t pointCount = mesh->sourcePointCount;
+    const size_t vertexCount = mesh->points.size();
+
+    RUsdContext::ImportedMesh::Skin& skin = mesh->skin;
+    skin = RUsdContext::ImportedMesh::Skin();
+    skin.skeletonIndex = target.skeletonIndex;
+    skin.geomBindTransform = FromGfMatrix(query.GetGeomBindTransform(context->importTime));
+
+    // Unity's SkinnedMeshRenderer blends linearly; the host decides how to honour this.
+    skin.dualQuaternion = query.GetSkinningMethod() == UsdSkelTokens->dualQuaternion ? 1 : 0;
+
+    if (query.HasJointInfluences())
+    {
+        const int influences = query.GetNumInfluencesPerComponent();
+        VtIntArray indices;
+        VtFloatArray weights;
+        if (influences <= 0 || influences > kMaxImportInfluences)
+        {
+            AppendImportWarning(context, "mesh '" + name + "' has " + std::to_string(influences) +
+                " joint influences per point, outside Unity's 1 to " + std::to_string(kMaxImportInfluences) +
+                "; it imports unskinned.");
+            skin = RUsdContext::ImportedMesh::Skin();
+            return;
+        }
+
+        const size_t perPoint = static_cast<size_t>(influences);
+        if (!query.ComputeVaryingJointInfluences(pointCount, &indices, &weights, context->importTime) ||
+            indices.size() != pointCount * perPoint || weights.size() != indices.size())
+        {
+            AppendImportWarning(context, "mesh '" + name +
+                "' has joint influences that could not be read; it imports unskinned.");
+            skin = RUsdContext::ImportedMesh::Skin();
+            return;
+        }
+
+        // A mesh can author its own joint order (skel:joints); its indices then count in that order.
+        std::vector<int> toSkeleton;
+        VtTokenArray meshJoints;
+        if (query.GetJointOrder(&meshJoints))
+        {
+            std::unordered_map<std::string, int> skeletonJoint;
+            for (size_t joint = 0; joint < skeleton.joints.size(); ++joint)
+            {
+                skeletonJoint.emplace(skeleton.joints[joint], static_cast<int>(joint));
+            }
+
+            for (const TfToken& joint : meshJoints)
+            {
+                const auto found = skeletonJoint.find(joint.GetString());
+                toSkeleton.push_back(found == skeletonJoint.end() ? -1 : found->second);
+            }
+        }
+
+        const int jointCount = static_cast<int>(skeleton.joints.size());
+        size_t ignored = 0;
+        size_t unweighted = 0;
+        skin.influences = influences;
+        skin.jointIndices.assign(vertexCount * perPoint, 0);
+        skin.jointWeights.assign(vertexCount * perPoint, 0.0f);
+        for (size_t vertex = 0; vertex < vertexCount; ++vertex)
+        {
+            const size_t point = mesh->vertexPoints.empty() ? vertex : static_cast<size_t>(mesh->vertexPoints[vertex]);
+            float sum = 0.0f;
+            for (size_t i = 0; i < perPoint; ++i)
+            {
+                int joint = indices[point * perPoint + i];
+                const float weight = weights[point * perPoint + i];
+                if (!toSkeleton.empty())
+                {
+                    joint = joint >= 0 && static_cast<size_t>(joint) < toSkeleton.size() ? toSkeleton[static_cast<size_t>(joint)] : -1;
+                }
+
+                if (joint < 0 || joint >= jointCount || !(weight > 0.0f))
+                {
+                    ignored += weight > 0.0f ? 1 : 0;
+                    continue;
+                }
+
+                skin.jointIndices[vertex * perPoint + i] = joint;
+                skin.jointWeights[vertex * perPoint + i] = weight;
+                sum += weight;
+            }
+
+            if (sum > 0.0f)
+            {
+                for (size_t i = 0; i < perPoint; ++i)
+                {
+                    skin.jointWeights[vertex * perPoint + i] /= sum;
+                }
+            }
+            else
+            {
+                ++unweighted;
+            }
+        }
+
+        if (ignored > 0)
+        {
+            AppendImportWarning(context, "mesh '" + name + "' has " + std::to_string(ignored) +
+                " joint influences on joints its skeleton does not have; they are ignored.");
+        }
+
+        if (unweighted > 0)
+        {
+            AppendImportWarning(context, "mesh '" + name + "' has " + std::to_string(unweighted) +
+                " vertices with no joint weight; Unity draws them at the skeleton's origin.");
+        }
+    }
+
+    if (query.HasBlendShapes())
+    {
+        BuildMeshBlendShapes(walk, prim, target, mesh);
+    }
+}
+
+// Whether a mesh's normals -- the schema attribute, or the normals primvar some exporters write
+// instead -- might change over time.
+bool NormalsMightBeTimeVarying(const UsdGeomMesh& mesh)
+{
+    if (mesh.GetNormalsAttr().HasAuthoredValue())
+    {
+        return mesh.GetNormalsAttr().ValueMightBeTimeVarying();
+    }
+
+    static const TfToken normalsToken("normals");
+    const UsdGeomPrimvar primvar = UsdGeomPrimvarsAPI(mesh.GetPrim()).GetPrimvar(normalsToken);
+    return primvar && (primvar.GetAttr().ValueMightBeTimeVarying() ||
+                       (primvar.GetIndicesAttr() && primvar.GetIndicesAttr().ValueMightBeTimeVarying()));
+}
+
+// Time-sampled points (a point cache: simulations, Alembic conversions, baked deformers) as every
+// sample's points on the imported vertices. Normals go with them: recomputed for each sample when
+// the mesh authors none, as the import computed them for the read time; read for each sample when
+// authored ones animate too; left to the mesh when authored ones hold still. The topology has to
+// hold still and every sample has to have every point; otherwise the mesh stays at the read time,
+// with a warning saying why.
+void BuildMeshPointCache(ImportWalk* walk, const UsdGeomMesh& mesh, RUsdContext::ImportedMesh* imported)
+{
+    RUsdContext* context = walk->context;
+    const std::string name = mesh.GetPath().GetString();
+    const UsdAttribute pointsAttr = mesh.GetPointsAttr();
+    std::vector<double> times;
+    if (!pointsAttr.GetTimeSamples(&times) || times.size() < 2)
+    {
+        return;
+    }
+
+    if (mesh.GetFaceVertexCountsAttr().ValueMightBeTimeVarying() ||
+        mesh.GetFaceVertexIndicesAttr().ValueMightBeTimeVarying())
+    {
+        AppendImportWarning(context, "mesh '" + name +
+            "' changes its topology over time; it imports as the frame at the read time.");
+        return;
+    }
+
+    const size_t vertexCount = imported->points.size();
+    ImportNormalSource readTimeNormals;
+    ResolveNormalSource(mesh, &readTimeNormals, context->importTime);
+    const bool authoredNormals = readTimeNormals.layout.valid;
+    bool sampledNormals = !authoredNormals ||
+        (NormalsMightBeTimeVarying(mesh) && imported->vertexNormalElements.size() == vertexCount);
+    if (!ReserveAnimation(context, "the points of mesh '" + name + "'", times.size(),
+                          times.size() * vertexCount * 3 * (sampledNormals ? 2 : 1),
+                          "it imports as the frame at the read time"))
+    {
+        return;
+    }
+
+    VtIntArray faceVertexCounts;
+    VtIntArray faceVertexIndices;
+    mesh.GetFaceVertexCountsAttr().Get(&faceVertexCounts, context->importTime);
+    mesh.GetFaceVertexIndicesAttr().Get(&faceVertexIndices, context->importTime);
+    TfToken orientation = UsdGeomTokens->rightHanded;
+    mesh.GetOrientationAttr().Get(&orientation);
+    const bool leftHanded = orientation == UsdGeomTokens->leftHanded;
+    auto pointOf = [imported](size_t vertex)
+    {
+        return imported->vertexPoints.empty() ? vertex : static_cast<size_t>(imported->vertexPoints[vertex]);
+    };
+
+    std::vector<RUsdVec3> points;
+    std::vector<RUsdVec3> normals;
+    points.reserve(times.size() * vertexCount);
+    normals.reserve(sampledNormals ? times.size() * vertexCount : 0);
+    for (double time : times)
+    {
+        VtArray<GfVec3f> sample;
+        if (!pointsAttr.Get(&sample, UsdTimeCode(time)) || sample.size() != imported->sourcePointCount)
+        {
+            AppendImportWarning(context, "mesh '" + name + "' has " + std::to_string(sample.size()) +
+                " points at time " + TfStringify(time) + " where it has " +
+                std::to_string(imported->sourcePointCount) + " at the read time; it imports as the frame at the read time.");
+            return;
+        }
+
+        for (size_t vertex = 0; vertex < vertexCount; ++vertex)
+        {
+            points.push_back(ToUnityVector(sample[pointOf(vertex)]));
+        }
+
+        if (!sampledNormals)
+        {
+            continue;
+        }
+
+        if (authoredNormals)
+        {
+            ImportNormalSource source;
+            ResolveNormalSource(mesh, &source, UsdTimeCode(time));
+            if (!source.layout.valid || source.values.size() != readTimeNormals.values.size())
+            {
+                AppendImportWarning(context, "the normals of mesh '" + name +
+                    "' change their layout over time; its points animate with the normals of the read time.");
+                sampledNormals = false;
+                normals.clear();
+                continue;
+            }
+
+            for (size_t vertex = 0; vertex < vertexCount; ++vertex)
+            {
+                normals.push_back(ToUnityVector(
+                    source.values[static_cast<size_t>(imported->vertexNormalElements[vertex])]));
+            }
+        }
+        else
+        {
+            const std::vector<GfVec3f> smooth =
+                ComputeSmoothPointNormals(sample, faceVertexCounts, faceVertexIndices, leftHanded);
+            for (size_t vertex = 0; vertex < vertexCount; ++vertex)
+            {
+                normals.push_back(ToUnityVector(smooth[pointOf(vertex)]));
+            }
+        }
+    }
+
+    imported->pointCacheTimes = times;
+    imported->pointCachePoints = std::move(points);
+    imported->pointCacheNormals = std::move(normals);
 }
 
 // `inheritedPurpose` and `parentVisible` carry down what purpose and visibility resolve to above
@@ -4293,7 +6764,9 @@ void CountGeometry(ImportWalk* walk, const RUsdContext::ImportedMesh& mesh)
 void ImportSubtree(ImportWalk* walk, const UsdPrim& prim, const std::string& outPath, int depth,
                    const UsdGeomImageable::PurposeInfo& inheritedPurpose, int parentVisible);
 
-void EmitNode(ImportWalk* walk, const UsdPrim& prim, const std::string& outPath, const GfMatrix4d& local, int visible)
+// False when the node budget is spent and the import skips past its limits: the node, and
+// everything the walk would reach after it, is left out.
+bool EmitNode(ImportWalk* walk, const UsdPrim& prim, const std::string& outPath, const GfMatrix4d& local, int visible)
 {
     RUsdContext::ImportedNode node;
     node.path = outPath;
@@ -4302,12 +6775,24 @@ void EmitNode(ImportWalk* walk, const UsdPrim& prim, const std::string& outPath,
     // A copy inside a point-instancer instance is not that prim; it carries no composition of
     // its own to report.
     node.compositionFlags = outPath == prim.GetPath().GetString() ? ComputeCompositionFlags(prim) : 0;
-    if (walk->context->importedNodes.size() >= kMaxImportNodes)
+    RUsdContext* context = walk->context;
+    if (context->importedNodes.size() >= context->importLimits.nodes)
     {
-        ThrowImportBudget("nodes", kMaxImportNodes);
+        if (!context->importLimits.skipWhenExceeded)
+        {
+            ThrowImportBudget("nodes", context->importLimits.nodes);
+        }
+
+        if (context->skippedNodes++ == 0)
+        {
+            context->firstSkippedNode = outPath;
+        }
+
+        return false;
     }
 
-    walk->context->importedNodes.push_back(node);
+    context->importedNodes.push_back(node);
+    return true;
 }
 
 // Geometry for one prim (Mesh or implicit surface), built once per source prim and copied for
@@ -4321,21 +6806,57 @@ void EmitGeometry(ImportWalk* walk, const UsdPrim& prim, const std::string& outP
     {
         if (built->second >= 0)
         {
-            CountGeometry(walk, context->importedMeshes[static_cast<size_t>(built->second)]);
+            if (!CountGeometry(walk, context->importedMeshes[static_cast<size_t>(built->second)]))
+            {
+                return;
+            }
+
             RUsdContext::ImportedMesh copy = context->importedMeshes[static_cast<size_t>(built->second)];
             copy.primPath = outPath;
             copy.sourcePath = sourcePath;
+            // A copy is drawn from the original's arrays; the animated points stay with it.
+            copy.pointCacheTimes.clear();
+            copy.pointCachePoints.clear();
+            copy.pointCacheNormals.clear();
             context->importedMeshes.push_back(std::move(copy));
         }
 
         return;
     }
 
+    const auto skinTarget = walk->skinningTargets.find(prim.GetPath());
+    const bool skinned = skinTarget != walk->skinningTargets.end();
+
     RUsdContext::ImportedMesh mesh;
     bool ok = false;
     if (prim.IsA<UsdGeomMesh>())
     {
-        ok = BuildImportedMesh(context, UsdGeomMesh(prim), &walk->xformCache, &mesh);
+        const UsdGeomMesh geomMesh(prim);
+        const bool animatedPoints = geomMesh.GetPointsAttr().ValueMightBeTimeVarying();
+        ok = BuildImportedMesh(context, geomMesh, &walk->xformCache, &mesh, skinned || animatedPoints);
+        if (ok && skinned)
+        {
+            BuildMeshSkin(walk, prim, skinTarget->second, &mesh);
+        }
+
+        if (ok && animatedPoints)
+        {
+            if (skinned)
+            {
+                AppendImportWarning(context, "mesh '" + sourcePath +
+                    "' is skinned and has animated points; its points import as the frame at the read time.");
+            }
+            else if (outPath != sourcePath)
+            {
+                AppendImportWarning(context, "mesh '" + sourcePath +
+                    "' has animated points inside a point-instancer prototype, which is drawn from one mesh for "
+                    "every instance; it imports as the frame at the read time.");
+            }
+            else
+            {
+                BuildMeshPointCache(walk, geomMesh, &mesh);
+            }
+        }
     }
     else if (prim.IsA<UsdGeomGprim>())
     {
@@ -4352,7 +6873,12 @@ void EmitGeometry(ImportWalk* walk, const UsdPrim& prim, const std::string& outP
         return;
     }
 
-    CountGeometry(walk, mesh);
+    if (!CountGeometry(walk, mesh))
+    {
+        walk->builtMeshes[sourcePath] = -1; // and its instance copies with it
+        return;
+    }
+
     mesh.primPath = outPath;
     mesh.sourcePath = sourcePath;
     walk->builtMeshes[sourcePath] = static_cast<int>(context->importedMeshes.size());
@@ -4377,7 +6903,7 @@ void ExpandPointInstancer(ImportWalk* walk, const UsdPrim& prim, const std::stri
     // below leaves it out (it concatenates the transforms *beneath* the ancestor), so it is
     // included here, as USD does by default. Excluding it on both sides dropped the root's
     // placement from every instance (a prototype authored at y = 0.5 drew at y = 0).
-    UsdTimeCode time = UsdTimeCode::Default();
+    UsdTimeCode time = walk->context->importTime;
     VtArray<GfMatrix4d> transforms;
     if (!instancer.GetProtoIndicesAttr().Get(&protoIndices, time) ||
         !instancer.ComputeInstanceTransformsAtTime(&transforms, time, time,
@@ -4398,7 +6924,7 @@ void ExpandPointInstancer(ImportWalk* walk, const UsdPrim& prim, const std::stri
     }
 
     const std::vector<bool> mask = instancer.ComputeMaskAtTime(time);
-    const int visible = UsdGeomImageable(prim).ComputeVisibility() == UsdGeomTokens->invisible ? 0 : 1;
+    const int visible = UsdGeomImageable(prim).ComputeVisibility(walk->context->importTime) == UsdGeomTokens->invisible ? 0 : 1;
     const size_t count = std::min(transforms.size(), protoIndices.size());
 
     // Which instances belong to each prototype. Gathered first so every prototype is imported
@@ -4460,11 +6986,39 @@ void ExpandPointInstancer(ImportWalk* walk, const UsdPrim& prim, const std::stri
         const size_t firstMesh = walk->context->importedMeshes.size();
         const std::string protoPath =
             outPath + "/prototype_" + std::to_string(k) + "_" + prototype.GetName().GetString();
-        EmitNode(walk, prim, protoPath, GfMatrix4d(1.0), 0);
+        if (!EmitNode(walk, prim, protoPath, GfMatrix4d(1.0), 0))
+        {
+            return; // the node budget is spent; nothing more of the instancer fits
+        }
+
         walk->expandingInstancers.push_back(prim.GetPath());
         ImportSubtree(walk, prototype, protoPath + "/" + prototype.GetName().GetString(), depth + 1,
                       UsdGeomImageable::PurposeInfo(), 1);
         walk->expandingInstancers.pop_back();
+
+        // A skinned prototype mesh is drawn posed by its prototype's own copy of the skeleton. One
+        // bound to a skeleton outside this copy -- above the instancer, or in a prototype another
+        // instancer imported first -- has no pose of its own here, so it is drawn as authored.
+        for (size_t m = firstMesh; m < walk->context->importedMeshes.size(); ++m)
+        {
+            RUsdContext::ImportedMesh& mesh = walk->context->importedMeshes[m];
+            const int skeletonIndex = mesh.skin.skeletonIndex;
+            if (skeletonIndex < 0)
+            {
+                continue;
+            }
+
+            const int skeletonNode = walk->context->importedSkeletons[static_cast<size_t>(skeletonIndex)].nodeIndex;
+            const bool inside = skeletonNode >= 0 &&
+                TfStringStartsWith(walk->context->importedNodes[static_cast<size_t>(skeletonNode)].path, protoPath + "/");
+            if (!inside)
+            {
+                AppendImportWarning(walk->context, "mesh '" + mesh.sourcePath + "' in prototype '" +
+                    prototypePath.GetString() + "' of point instancer '" + prim.GetPath().GetString() +
+                    "' is bound to a skeleton outside that prototype's import; its instances are drawn unskinned.");
+                mesh.skin = RUsdContext::ImportedMesh::Skin();
+            }
+        }
 
         // Every mesh the prototype contributed, placed for each of its instances. The mesh's own
         // position inside the prototype is folded in here, because the instance transform is
@@ -4482,10 +7036,17 @@ void ExpandPointInstancer(ImportWalk* walk, const UsdPrim& prim, const std::stri
             }
 
             const size_t placements = byPrototype[k].size();
-            if (placements > kMaxImportInstancePlacements - walk->instancePlacements)
+            const RUsdContext::ImportLimits& limits = walk->context->importLimits;
+            if (placements > limits.instancePlacements - walk->instancePlacements)
             {
-                ThrowImportBudget("point-instancer placements (instances times prototype meshes)",
-                    kMaxImportInstancePlacements);
+                if (!limits.skipWhenExceeded)
+                {
+                    ThrowImportBudget("point-instancer placements (instances times prototype meshes)",
+                        limits.instancePlacements);
+                }
+
+                walk->context->skippedPlacements += placements;
+                continue;
             }
 
             walk->instancePlacements += placements;
@@ -4523,12 +7084,12 @@ void ExpandPointInstancer(ImportWalk* walk, const UsdPrim& prim, const std::stri
 // transforms. They are read here into tables keyed by node index; the host adds the components.
 
 template <typename T>
-T GetAttrOr(const UsdAttribute& attribute, T fallback)
+T GetAttrOr(const UsdAttribute& attribute, T fallback, UsdTimeCode time)
 {
     T value = fallback;
     if (attribute)
     {
-        attribute.Get(&value);
+        attribute.Get(&value, time);
     }
     return value;
 }
@@ -4547,6 +7108,7 @@ std::string ReadAssetAttr(RUsdContext* context, const UsdAttribute& attribute)
 void EmitSceneComponents(ImportWalk* walk, const UsdPrim& prim, int nodeIndex)
 {
     RUsdContext* context = walk->context;
+    const UsdTimeCode time = context->importTime;
 
     if (prim.HasAPI<UsdLuxLightAPI>())
     {
@@ -4555,48 +7117,48 @@ void EmitSceneComponents(ImportWalk* walk, const UsdPrim& prim, int nodeIndex)
         light.nodeIndex = nodeIndex;
 
         UsdLuxLightAPI api(prim);
-        const GfVec3f color = GetAttrOr(api.GetColorAttr(), GfVec3f(1.0f));
+        const GfVec3f color = GetAttrOr(api.GetColorAttr(), GfVec3f(1.0f), time);
         GfVec3f tint(1.0f);
-        if (GetAttrOr(api.GetEnableColorTemperatureAttr(), false))
+        if (GetAttrOr(api.GetEnableColorTemperatureAttr(), false, time))
         {
-            tint = UsdLuxBlackbodyTemperatureAsRgb(GetAttrOr(api.GetColorTemperatureAttr(), 6500.0f));
+            tint = UsdLuxBlackbodyTemperatureAsRgb(GetAttrOr(api.GetColorTemperatureAttr(), 6500.0f, time));
         }
         light.color[0] = color[0] * tint[0];
         light.color[1] = color[1] * tint[1];
         light.color[2] = color[2] * tint[2];
-        light.intensity = GetAttrOr(api.GetIntensityAttr(), 1.0f) *
-            std::pow(2.0f, GetAttrOr(api.GetExposureAttr(), 0.0f));
-        light.normalize = GetAttrOr(api.GetNormalizeAttr(), false) ? 1 : 0;
+        light.intensity = GetAttrOr(api.GetIntensityAttr(), 1.0f, time) *
+            std::pow(2.0f, GetAttrOr(api.GetExposureAttr(), 0.0f, time));
+        light.normalize = GetAttrOr(api.GetNormalizeAttr(), false, time) ? 1 : 0;
 
         if (prim.IsA<UsdLuxDistantLight>())
         {
             light.type = RUSD_LIGHT_DISTANT;
-            light.angle = GetAttrOr(UsdLuxDistantLight(prim).GetAngleAttr(), 0.53f);
+            light.angle = GetAttrOr(UsdLuxDistantLight(prim).GetAngleAttr(), 0.53f, time);
         }
         else if (prim.IsA<UsdLuxSphereLight>())
         {
             light.type = RUSD_LIGHT_SPHERE;
-            light.radius = GetAttrOr(UsdLuxSphereLight(prim).GetRadiusAttr(), 0.5f);
+            light.radius = GetAttrOr(UsdLuxSphereLight(prim).GetRadiusAttr(), 0.5f, time);
         }
         else if (prim.IsA<UsdLuxRectLight>())
         {
             UsdLuxRectLight rect(prim);
             light.type = RUSD_LIGHT_RECT;
-            light.width = GetAttrOr(rect.GetWidthAttr(), 1.0f);
-            light.height = GetAttrOr(rect.GetHeightAttr(), 1.0f);
+            light.width = GetAttrOr(rect.GetWidthAttr(), 1.0f, time);
+            light.height = GetAttrOr(rect.GetHeightAttr(), 1.0f, time);
             entry.texturePath = ReadAssetAttr(context, rect.GetTextureFileAttr());
         }
         else if (prim.IsA<UsdLuxDiskLight>())
         {
             light.type = RUSD_LIGHT_DISK;
-            light.radius = GetAttrOr(UsdLuxDiskLight(prim).GetRadiusAttr(), 0.5f);
+            light.radius = GetAttrOr(UsdLuxDiskLight(prim).GetRadiusAttr(), 0.5f, time);
         }
         else if (prim.IsA<UsdLuxCylinderLight>())
         {
             UsdLuxCylinderLight cylinder(prim);
             light.type = RUSD_LIGHT_CYLINDER;
-            light.radius = GetAttrOr(cylinder.GetRadiusAttr(), 0.5f);
-            light.length = GetAttrOr(cylinder.GetLengthAttr(), 1.0f);
+            light.radius = GetAttrOr(cylinder.GetRadiusAttr(), 0.5f, time);
+            light.length = GetAttrOr(cylinder.GetLengthAttr(), 1.0f, time);
         }
         else if (prim.IsA<UsdLuxDomeLight>())
         {
@@ -4615,8 +7177,8 @@ void EmitSceneComponents(ImportWalk* walk, const UsdPrim& prim, int nodeIndex)
         if (prim.HasAPI<UsdLuxShapingAPI>())
         {
             UsdLuxShapingAPI shaping(prim);
-            light.coneAngle = GetAttrOr(shaping.GetShapingConeAngleAttr(), 90.0f);
-            light.coneSoftness = GetAttrOr(shaping.GetShapingConeSoftnessAttr(), 0.0f);
+            light.coneAngle = GetAttrOr(shaping.GetShapingConeAngleAttr(), 90.0f, time);
+            light.coneSoftness = GetAttrOr(shaping.GetShapingConeSoftnessAttr(), 0.0f, time);
             if (light.coneAngle >= 90.0f)
             {
                 light.coneAngle = 0.0f;  // a 90 degree cone is the unshaped default
@@ -4633,14 +7195,14 @@ void EmitSceneComponents(ImportWalk* walk, const UsdPrim& prim, int nodeIndex)
         UsdGeomCamera camera(prim);
         RUsdImportCamera entry = {};
         entry.nodeIndex = nodeIndex;
-        entry.projection = GetAttrOr(camera.GetProjectionAttr(), UsdGeomTokens->perspective) ==
+        entry.projection = GetAttrOr(camera.GetProjectionAttr(), UsdGeomTokens->perspective, time) ==
                 UsdGeomTokens->orthographic
             ? RUSD_CAMERA_ORTHOGRAPHIC
             : RUSD_CAMERA_PERSPECTIVE;
-        entry.focalLength = GetAttrOr(camera.GetFocalLengthAttr(), 50.0f);
-        entry.horizontalAperture = GetAttrOr(camera.GetHorizontalApertureAttr(), 20.955f);
-        entry.verticalAperture = GetAttrOr(camera.GetVerticalApertureAttr(), 15.2908f);
-        const GfVec2f clipping = GetAttrOr(camera.GetClippingRangeAttr(), GfVec2f(1.0f, 1000000.0f));
+        entry.focalLength = GetAttrOr(camera.GetFocalLengthAttr(), 50.0f, time);
+        entry.horizontalAperture = GetAttrOr(camera.GetHorizontalApertureAttr(), 20.955f, time);
+        entry.verticalAperture = GetAttrOr(camera.GetVerticalApertureAttr(), 15.2908f, time);
+        const GfVec2f clipping = GetAttrOr(camera.GetClippingRangeAttr(), GfVec2f(1.0f, 1000000.0f), time);
         entry.nearClip = clipping[0];
         entry.farClip = clipping[1];
         context->importedCameras.push_back(entry);
@@ -4651,17 +7213,68 @@ void EmitSceneComponents(ImportWalk* walk, const UsdPrim& prim, int nodeIndex)
         RUsdContext::ImportedAudio entry = {};
         entry.audio.nodeIndex = nodeIndex;
         entry.audio.auralMode =
-            GetAttrOr(audio.GetAuralModeAttr(), TfToken("spatial")) == TfToken("nonSpatial")
+            GetAttrOr(audio.GetAuralModeAttr(), TfToken("spatial"), time) == TfToken("nonSpatial")
             ? RUSD_AUDIO_NONSPATIAL
             : RUSD_AUDIO_SPATIAL;
-        const std::string playback = GetAttrOr(audio.GetPlaybackModeAttr(), TfToken("onceFromStart")).GetString();
+        const std::string playback = GetAttrOr(audio.GetPlaybackModeAttr(), TfToken("onceFromStart"), time).GetString();
         entry.audio.loop = playback.rfind("loop", 0) == 0 ? 1 : 0;
-        entry.audio.gain = static_cast<float>(GetAttrOr(audio.GetGainAttr(), 1.0));
-        entry.audio.startTime = GetAttrOr(audio.GetStartTimeAttr(), SdfTimeCode(0.0)).GetValue();
-        entry.audio.endTime = GetAttrOr(audio.GetEndTimeAttr(), SdfTimeCode(0.0)).GetValue();
+        entry.audio.gain = static_cast<float>(GetAttrOr(audio.GetGainAttr(), 1.0, time));
+        entry.audio.startTime = GetAttrOr(audio.GetStartTimeAttr(), SdfTimeCode(0.0), time).GetValue();
+        entry.audio.endTime = GetAttrOr(audio.GetEndTimeAttr(), SdfTimeCode(0.0), time).GetValue();
         entry.filePath = ReadAssetAttr(context, audio.GetFilePathAttr());
         context->importedAudio.push_back(entry);
     }
+}
+
+// What a prim passes down the walk: the purpose and visibility its ancestors and its own opinions
+// give it, updated in place. False when its purpose keeps it, and everything below, out of the
+// import. ImportSubtree applies it to every prim it enters; RUsd_ReadSubtrees replays it down a
+// subtree's ancestors, so the subtree arrives as the full walk would have read it.
+static bool InheritState(ImportWalk* walk, const UsdPrim& prim, UsdGeomImageable::PurposeInfo* purposeInfo,
+                         int* visible, bool* animatesVisibility)
+{
+    *animatesVisibility = false;
+
+    // proxy and guide geometry is for viewports and tools, not the render: ALab carries a proxy
+    // copy of most assets and imported 24.6% of its triangles twice. Purpose inherits, so the
+    // whole subtree goes.
+    if (prim.IsA<UsdGeomImageable>())
+    {
+        const UsdGeomImageable imageable(prim);
+        *purposeInfo = imageable.ComputePurposeInfo(*purposeInfo);
+        // A Skeleton is not geometry: its purpose only says whether a viewport draws its bones.
+        // DCC exporters often author it `guide` (the Elephant with Monochord sample does), and
+        // dropping it left its node unlinked, so the meshes that skin to it imported unskinned in
+        // their bind shape (arms down) instead of the pose Isaac Sim shows. It has no prim
+        // children to carry the purpose further.
+        if ((purposeInfo->purpose == UsdGeomTokens->proxy || purposeInfo->purpose == UsdGeomTokens->guide) &&
+            !prim.IsA<UsdSkelSkeleton>())
+        {
+            return false;
+        }
+
+        // Visibility inherits the same way: invisible anywhere above wins, and otherwise the
+        // prim's own opinion decides. At and below a prim whose visibility is animated that is
+        // left to the host's hierarchy instead -- an inactive parent hides its children, which is
+        // USD's inheritance -- so every prim there reports its own opinion and keeps its geometry:
+        // what the animation reveals later has to be there to show.
+        const UsdAttribute visibilityAttr = imageable.GetVisibilityAttr();
+        *animatesVisibility = visibilityAttr.ValueMightBeTimeVarying();
+        const bool ownOpinionOnly = *animatesVisibility || walk->animatedVisibilityScopes > 0;
+        if (*visible != 0 || ownOpinionOnly)
+        {
+            TfToken own;
+            const bool ownInvisible = visibilityAttr.Get(&own, walk->context->importTime) &&
+                own == UsdGeomTokens->invisible;
+            *visible = ownInvisible ? 0 : (ownOpinionOnly ? 1 : *visible);
+        }
+    }
+    else if (walk->animatedVisibilityScopes > 0)
+    {
+        *visible = 1; // no opinion of its own: the hierarchy above decides
+    }
+
+    return true;
 }
 
 // Emits `prim` and everything below it. `outPath` is where it lands in the node and mesh tables:
@@ -4675,30 +7288,34 @@ void ImportSubtree(ImportWalk* walk, const UsdPrim& prim, const std::string& out
         return;
     }
 
-    // proxy and guide geometry is for viewports and tools, not the render: ALab carries a proxy
-    // copy of most assets and imported 24.6% of its triangles twice. Purpose inherits, so the
-    // whole subtree goes.
+    // Once the node budget is spent (and the import skips past it), nothing after fits either.
+    if (walk->context->skippedNodes > 0)
+    {
+        return;
+    }
+
     UsdGeomImageable::PurposeInfo purposeInfo = inheritedPurpose;
     int visible = parentVisible;
-    if (prim.IsA<UsdGeomImageable>())
+    bool animatesVisibility = false;
+    if (!InheritState(walk, prim, &purposeInfo, &visible, &animatesVisibility))
     {
-        const UsdGeomImageable imageable(prim);
-        purposeInfo = imageable.ComputePurposeInfo(inheritedPurpose);
-        if (purposeInfo.purpose == UsdGeomTokens->proxy || purposeInfo.purpose == UsdGeomTokens->guide)
-        {
-            return;
-        }
+        return;
+    }
 
-        // Visibility inherits the same way: invisible anywhere above wins, and otherwise the
-        // prim's own opinion decides.
-        if (visible != 0)
-        {
-            TfToken own;
-            if (imageable.GetVisibilityAttr().Get(&own) && own == UsdGeomTokens->invisible)
-            {
-                visible = 0;
-            }
-        }
+    struct VisibilityScope
+    {
+        int* scopes;
+        bool entered;
+        ~VisibilityScope() { if (entered) --*scopes; }
+    } visibilityScope{&walk->animatedVisibilityScopes, animatesVisibility};
+    if (animatesVisibility)
+    {
+        ++walk->animatedVisibilityScopes;
+    }
+
+    if (prim.IsA<UsdSkelRoot>())
+    {
+        PopulateSkelRoot(walk, prim);
     }
 
     // Record every transformable prim (Xform, Mesh, ...) so the Unity side can rebuild the
@@ -4707,8 +7324,26 @@ void ImportSubtree(ImportWalk* walk, const UsdPrim& prim, const std::string& out
     {
         bool resetsXformStack = false;
         GfMatrix4d local = walk->xformCache.GetLocalTransformation(prim, &resetsXformStack);
-        EmitNode(walk, prim, outPath, local, visible);
-        EmitSceneComponents(walk, prim, static_cast<int>(walk->context->importedNodes.size()) - 1);
+        if (!EmitNode(walk, prim, outPath, local, visible))
+        {
+            return;
+        }
+
+        const int nodeIndex = static_cast<int>(walk->context->importedNodes.size()) - 1;
+        EmitSceneComponents(walk, prim, nodeIndex);
+        if (outPath == prim.GetPath().GetString())
+        {
+            // Copies inside a point-instancer instance share the prototype's samples; they are
+            // not animated nodes of their own.
+            EmitNodeTracks(walk, prim, nodeIndex);
+        }
+
+        // A Skeleton inside a point-instancer prototype is the one its prototype's meshes skin to:
+        // the prototype is imported once, hidden, and drawn per instance from its posed meshes.
+        if (prim.IsA<UsdSkelSkeleton>())
+        {
+            LinkSkeletonNode(walk, prim, nodeIndex);
+        }
     }
     else if (!prim.IsA<UsdTyped>() && !prim.IsPseudoRoot() && !IsShadingOnlyPrim(prim))
     {
@@ -4718,16 +7353,24 @@ void ImportSubtree(ImportWalk* walk, const UsdPrim& prim, const std::string& out
         // have no transform of their own, so they become identity nodes; a known
         // non-transformable type (Material, Shader, GeomSubset, ...) stays out as before.
         // A typeless prim has no visibility of its own, so it takes what it inherited.
-        EmitNode(walk, prim, outPath, GfMatrix4d(1.0), visible);
+        if (!EmitNode(walk, prim, outPath, GfMatrix4d(1.0), visible))
+        {
+            return;
+        }
     }
 
     // Invisible geometry is not read: Hydra does not populate it, and the importer used to
     // read, split and triangulate it only to mark the renderer disabled -- 1,274 of Factory's
     // 13,843 meshes, 102 of Moore Lane's. The node stays, with its visibility, so the
     // hierarchy is unchanged; only the mesh behind it is absent.
-    if (prim.IsLoaded() && visible != 0)
+    if (prim.IsLoaded() && (visible != 0 || walk->animatedVisibilityScopes > 0))
     {
+        const size_t meshesBefore = walk->context->importedMeshes.size();
         EmitGeometry(walk, prim, outPath);
+        if (walk->animatedVisibilityScopes > 0 && walk->context->importedMeshes.size() > meshesBefore)
+        {
+            walk->context->importedMeshes.back().visible = visible;
+        }
     }
 
     if (prim.IsA<UsdGeomPointInstancer>())
@@ -4743,27 +7386,106 @@ void ImportSubtree(ImportWalk* walk, const UsdPrim& prim, const std::string& out
     }
 }
 
-// Walks an opened stage into the context's node and mesh tables. Shared by RUsd_OpenStage and
-// RUsd_OpenStageEx so both import paths read a stage identically.
-static void ReadImportedStage(RUsdContext* context)
+// Static values are read where a viewer opens the stage: at startTimeCode when the stage authors
+// a time range, else at the earliest time, which gives an attribute its first sample when it has
+// samples and its default when it has none. Reading at UsdTimeCode::Default() ignores samples
+// altogether, so stages that author transforms only as samples (Blender's animated exports)
+// arrived with every object at its parent's origin.
+static void ResolveImportTime(RUsdContext* context)
 {
+    const UsdStageRefPtr& stage = context->stage;
+    RUsdImportTimeInfo& info = context->timeInfo;
+    info.startTimeCode = stage->GetStartTimeCode();
+    info.endTimeCode = stage->GetEndTimeCode();
+    info.timeCodesPerSecond = stage->GetTimeCodesPerSecond();
+    info.framesPerSecond = stage->GetFramesPerSecond();
+    info.hasTimeRange = stage->HasAuthoredTimeCodeRange() ? 1 : 0;
+    if (context->importAtDefaultTime)
+    {
+        info.readTimeKind = RUSD_READ_TIME_DEFAULT;
+        context->importTime = UsdTimeCode::Default();
+    }
+    else if (info.hasTimeRange != 0)
+    {
+        info.readTimeKind = RUSD_READ_TIME_START;
+        context->importTime = UsdTimeCode(info.startTimeCode);
+    }
+    else
+    {
+        info.readTimeKind = RUSD_READ_TIME_EARLIEST;
+        context->importTime = UsdTimeCode::EarliestTime();
+    }
+}
+
+// The stage-wide facts every read of a stage starts from: the time static values are read at,
+// the defaultPrim, the units and the up axis.
+static void ReadStageMetrics(RUsdContext* context)
+{
+    ResolveImportTime(context);
     UsdPrim defaultPrim = context->stage->GetDefaultPrim();
     context->defaultPrimPath = defaultPrim ? defaultPrim.GetPath().GetString() : std::string();
     context->importMetersPerUnit = UsdGeomGetStageMetersPerUnit(context->stage);
     TfToken upAxis = UsdGeomGetStageUpAxis(context->stage);
     context->importUpAxis = upAxis == UsdGeomTokens->z ? 2 : 1;
+}
 
-    // Instance proxies included: instanceable prims (Omniverse and most CAD exports build
-    // assemblies this way) keep all their geometry in prototypes, and the default
-    // traversal stops at the instance, which imported such stages as empty.
-    // The default predicate minus IsLoaded: with every payload loaded (RUsd_OpenStage) the two
-    // are the same, and with payloads left unloaded the payload's own prim still comes through
-    // as an empty placeholder node, so the hierarchy keeps its place for it.
-    ImportWalk walk(context, UsdTraverseInstanceProxies(UsdPrimIsActive && UsdPrimIsDefined && !UsdPrimIsAbstract));
+// Instance proxies included: instanceable prims (Omniverse and most CAD exports build
+// assemblies this way) keep all their geometry in prototypes, and the default
+// traversal stops at the instance, which imported such stages as empty.
+// The default predicate minus IsLoaded: with every payload loaded (RUsd_OpenStage) the two
+// are the same, and with payloads left unloaded the payload's own prim still comes through
+// as an empty placeholder node, so the hierarchy keeps its place for it.
+static Usd_PrimFlagsPredicate ImportPredicate()
+{
+    return UsdTraverseInstanceProxies(UsdPrimIsActive && UsdPrimIsDefined && !UsdPrimIsAbstract);
+}
+
+static void AppendSkipSummary(RUsdContext* context);
+
+// Walks an opened stage into the context's node and mesh tables. Shared by RUsd_OpenStage and
+// RUsd_OpenStageEx so both import paths read a stage identically.
+static void ReadImportedStage(RUsdContext* context)
+{
+    ReadStageMetrics(context);
+    ImportWalk walk(context, ImportPredicate());
     for (const UsdPrim& prim : context->stage->GetPseudoRoot().GetFilteredChildren(walk.predicate))
     {
         ImportSubtree(&walk, prim, prim.GetPath().GetString(), 0, UsdGeomImageable::PurposeInfo(), 1);
     }
+
+    AppendSkipSummary(context);
+}
+
+// What an import that skips past its limits left out. Put first, past the warning cap: these
+// say the result is partial, which is the one thing the host must not miss, and a host logs
+// the first few warnings only.
+static void AppendSkipSummary(RUsdContext* context)
+{
+    const RUsdContext::ImportLimits& limits = context->importLimits;
+    std::string partial;
+    if (context->skippedNodes > 0)
+    {
+        partial += "USD import: the stage exceeds the import limit of " + std::to_string(limits.nodes) +
+            " nodes; the walk stopped at '" + context->firstSkippedNode +
+            "', and the prims after it were not imported.\n";
+    }
+
+    if (context->skippedMeshes > 0)
+    {
+        partial += "USD import: " + std::to_string(context->skippedMeshes) +
+            " meshes were not imported: over the import limit of " + std::to_string(limits.meshes) +
+            " meshes or " + std::to_string(limits.geometryElements) + " points and triangle indices.\n";
+    }
+
+    if (context->skippedPlacements > 0)
+    {
+        partial += "USD import: " + std::to_string(context->skippedPlacements) +
+            " point-instancer placements were not drawn: over the import limit of " +
+            std::to_string(limits.instancePlacements) + ".\n";
+    }
+
+    std::lock_guard<std::mutex> lock(context->diagnosticsMutex);
+    context->diagnostics.insert(0, partial);
 }
 
 // Splits "a\tb\tc" style records. Empty input yields no records.
@@ -5060,6 +7782,51 @@ void EnsureMaterialXStdlibPath()
     (void)once;
 }
 
+// Linux: which TBB OpenUSD actually runs on. The dynamic linker looks a symbol up in the process's
+// global scope before a library's own dependencies, so libusd_ms's TBB calls go to whatever
+// libtbb.so.2 the host process links -- in the Editor, the Editor's Data/Tools/libtbb.so.2 -- and
+// not to the payload's. Windows renames its TBB (tbb_usdrt.dll) to keep the Editor's out; on Linux
+// a rename does not, because the lookup is by symbol, not by library: a renamed copy was tested
+// and the two TBBs ended up serving one process between them. Running on the host's TBB is fine
+// while it is the same ABI (TBB 2020.3, interface 11103, in the Editors so far). What is refused is
+// an older one, which TBB's compatibility rules do not cover. dlsym from here searches the scope
+// libusd_ms's calls are bound in: the global scope, then this library's own dependencies.
+bool TbbRuntimeIsUsable()
+{
+#if defined(__linux__)
+    static const std::string problem = []() -> std::string {
+        using VersionFunction = int (*)();
+        void* symbol = dlsym(RTLD_DEFAULT, "TBB_runtime_interface_version");
+        if (symbol == nullptr)
+        {
+            return std::string();
+        }
+
+        const int runtime = reinterpret_cast<VersionFunction>(symbol)();
+        if (runtime >= TBB_INTERFACE_VERSION)
+        {
+            return std::string();
+        }
+
+        Dl_info info = {};
+        const char* file = dladdr(symbol, &info) != 0 && info.dli_fname != nullptr ? info.dli_fname : "an unknown library";
+        std::ostringstream stream;
+        stream << "OpenUSD is running on TBB interface version " << runtime << " from " << file
+               << ", older than the " << TBB_INTERFACE_VERSION
+               << " this payload was built against. The host process loaded that TBB before the"
+                  " package's own lib/libtbb.so.2, and the package cannot run on it.";
+        return stream.str();
+    }();
+
+    if (!problem.empty())
+    {
+        SetError(nullptr, problem);
+        return false;
+    }
+#endif
+    return true;
+}
+
 }  // namespace
 
 int RUsd_GetApiVersion(void)
@@ -5080,6 +7847,14 @@ int RUsd_GetOpenUsdVersion(char* buffer, int bufferCapacity)
     stream << PXR_MAJOR_VERSION << "." << PXR_MINOR_VERSION << "." << PXR_PATCH_VERSION;
     return CopyStringToBuffer(stream.str(), buffer, bufferCapacity);
 }
+
+namespace
+{
+bool IsDracoPath(const std::string& path)
+{
+    return TfStringToLower(TfGetExtension(path)) == "drc";
+}
+} // namespace
 
 int RUsd_BeginExport(
     const char* outputPath,
@@ -5103,6 +7878,11 @@ int RUsd_BeginExportEx(
     }
 
     *outContext = nullptr;
+    if (!TbbRuntimeIsUsable())
+    {
+        return kFailure;
+    }
+
     std::unique_ptr<RUsdContext> context(new RUsdContext());
 
     try
@@ -5126,7 +7906,25 @@ int RUsd_BeginExportEx(
             rootName = "Root";
         }
 
-        context->stage = UsdStage::CreateNew(output);
+        // CreateNew on such a format gives a layer whose first edit fails (and the next one throws),
+        // so the stage is a usda one in memory, written out in the output's format by EndExport.
+        const SdfFileFormatConstPtr format = SdfFileFormat::FindByExtension(output);
+        if (IsDracoPath(output))
+        {
+            context->stage = UsdStage::CreateInMemory();
+            context->exportTo = output;
+            context->exportDraco = true;
+        }
+        else if (format && format->SupportsWriting() && !format->SupportsEditing())
+        {
+            context->stage = UsdStage::CreateInMemory();
+            context->exportTo = output;
+        }
+        else
+        {
+            context->stage = UsdStage::CreateNew(output);
+        }
+
         if (!context->stage)
         {
             SetError(context.get(), "OpenUSD failed to create a new stage.");
@@ -5322,6 +8120,296 @@ int RUsd_AddXform(
     }
 }
 
+namespace
+{
+// Draco's quantization bits for positions, texture coordinates and normals, and its compression
+// level (0-10): OpenUSD's usdcompress defaults but for the level (7, Draco's own default speed),
+// within a few micrometers for a model a meter across.
+constexpr int kDracoPositionBits = 14;
+constexpr int kDracoTexCoordBits = 12;
+constexpr int kDracoNormalBits = 10;
+constexpr int kDracoCompressionLevel = 7;
+
+// The value at every face corner, in face order, from values of any interpolation (and indices,
+// for an indexed primvar). False when a value is missing or an index is out of range.
+template <typename T>
+bool ExpandToCorners(
+    const VtArray<T>& values,
+    const VtIntArray& valueIndices,
+    const TfToken& interpolation,
+    const VtIntArray& faceCounts,
+    const VtIntArray& faceIndices,
+    std::vector<T>& corners)
+{
+    corners.clear();
+    corners.reserve(faceIndices.size());
+    size_t corner = 0;
+    for (size_t face = 0; face < faceCounts.size(); ++face)
+    {
+        for (int k = 0; k < faceCounts[face]; ++k, ++corner)
+        {
+            size_t element;
+            if (interpolation == UsdGeomTokens->vertex || interpolation == UsdGeomTokens->varying)
+            {
+                element = static_cast<size_t>(faceIndices[corner]);
+            }
+            else if (interpolation == UsdGeomTokens->faceVarying)
+            {
+                element = corner;
+            }
+            else if (interpolation == UsdGeomTokens->uniform)
+            {
+                element = face;
+            }
+            else if (interpolation == UsdGeomTokens->constant)
+            {
+                element = 0;
+            }
+            else
+            {
+                return false;
+            }
+
+            if (!valueIndices.empty())
+            {
+                if (element >= valueIndices.size() || valueIndices[element] < 0)
+                {
+                    return false;
+                }
+
+                element = static_cast<size_t>(valueIndices[element]);
+            }
+
+            if (element >= values.size())
+            {
+                return false;
+            }
+
+            corners.push_back(values[element]);
+        }
+    }
+
+    return true;
+}
+
+// A primvar's values at every face corner; false when it has none or they do not fit the faces.
+template <typename T>
+bool PrimvarCorners(
+    const UsdGeomPrimvar& primvar,
+    UsdTimeCode time,
+    const VtIntArray& faceCounts,
+    const VtIntArray& faceIndices,
+    std::vector<T>& corners)
+{
+    VtArray<T> values;
+    if (!primvar || !primvar.Get(&values, time) || values.empty())
+    {
+        return false;
+    }
+
+    VtIntArray valueIndices;
+    primvar.GetIndices(&valueIndices, time);
+    return ExpandToCorners(values, valueIndices, primvar.GetInterpolation(), faceCounts, faceIndices, corners);
+}
+
+// The mesh's primary texture coordinates: the first UV set alias with float2 values.
+UsdGeomPrimvar PrimaryUvPrimvar(const UsdGeomMesh& mesh)
+{
+    const UsdGeomPrimvarsAPI primvars(mesh.GetPrim());
+    for (const TfToken& name : UvSetAliasTokens()[0])
+    {
+        UsdGeomPrimvar primvar = primvars.GetPrimvar(name);
+        if (primvar && primvar.HasAuthoredValue() &&
+            (primvar.GetTypeName() == SdfValueTypeNames->TexCoord2fArray ||
+             primvar.GetTypeName() == SdfValueTypeNames->Float2Array))
+        {
+            return primvar;
+        }
+    }
+
+    return UsdGeomPrimvar();
+}
+
+// A .drc holds one mesh, with no hierarchy, transform or material. Every visible mesh of the
+// export stage, at its first time, is merged into one in the stage's space: points, faces (their
+// winding kept facing out through mirroring transforms and left-handed meshes) and, where every
+// mesh has them, normals and the primary texture coordinates, as face-varying values Draco
+// deduplicates. usdDraco's writer then encodes it, keeping polygons (Draco triangulates and
+// records the edges it added, which its reader undoes).
+bool WriteDracoFile(RUsdContext* context, const std::string& output)
+{
+    const UsdTimeCode time = UsdTimeCode::EarliestTime();
+    UsdGeomXformCache xformCache(time);
+    VtVec3fArray points;
+    VtIntArray faceCounts;
+    VtIntArray faceIndices;
+    std::vector<GfVec3f> normals;
+    std::vector<GfVec2f> uvs;
+    bool everyNormal = true;
+    bool everyUv = true;
+    int meshCount = 0;
+
+    for (const UsdPrim& prim : UsdPrimRange::Stage(context->stage, UsdTraverseInstanceProxies()))
+    {
+        const UsdGeomMesh mesh(prim);
+        if (!mesh || mesh.ComputeVisibility(time) == UsdGeomTokens->invisible)
+        {
+            continue;
+        }
+
+        const TfToken purpose = mesh.ComputePurpose();
+        if (purpose == UsdGeomTokens->guide || purpose == UsdGeomTokens->proxy)
+        {
+            continue;
+        }
+
+        VtVec3fArray meshPoints;
+        VtIntArray meshCounts;
+        VtIntArray meshIndices;
+        mesh.GetPointsAttr().Get(&meshPoints, time);
+        mesh.GetFaceVertexCountsAttr().Get(&meshCounts, time);
+        mesh.GetFaceVertexIndicesAttr().Get(&meshIndices, time);
+        if (meshPoints.empty() || meshCounts.empty())
+        {
+            continue;
+        }
+
+        size_t cornerCount = 0;
+        for (int count : meshCounts)
+        {
+            if (count < 3)
+            {
+                SetError(context, "Mesh " + prim.GetPath().GetString() +
+                    " has a face with fewer than three corners; Draco cannot hold it.");
+                return false;
+            }
+
+            cornerCount += static_cast<size_t>(count);
+        }
+
+        if (cornerCount != meshIndices.size())
+        {
+            SetError(context, "Mesh " + prim.GetPath().GetString() +
+                " has face vertex counts that do not match its indices.");
+            return false;
+        }
+
+        for (int index : meshIndices)
+        {
+            if (index < 0 || static_cast<size_t>(index) >= meshPoints.size())
+            {
+                SetError(context, "Mesh " + prim.GetPath().GetString() +
+                    " has a face vertex index outside its points.");
+                return false;
+            }
+        }
+
+        std::vector<GfVec3f> meshNormals;
+        const UsdGeomPrimvar normalsPrimvar = UsdGeomPrimvarsAPI(prim).GetPrimvar(UsdGeomTokens->normals);
+        bool hasNormals = false;
+        if (normalsPrimvar && normalsPrimvar.HasAuthoredValue())
+        {
+            hasNormals = PrimvarCorners(normalsPrimvar, time, meshCounts, meshIndices, meshNormals);
+        }
+        else
+        {
+            VtVec3fArray values;
+            hasNormals = mesh.GetNormalsAttr().Get(&values, time) && !values.empty() &&
+                ExpandToCorners(values, VtIntArray(), mesh.GetNormalsInterpolation(), meshCounts, meshIndices,
+                                meshNormals);
+        }
+
+        std::vector<GfVec2f> meshUvs;
+        const bool hasUvs = PrimvarCorners(PrimaryUvPrimvar(mesh), time, meshCounts, meshIndices, meshUvs);
+
+        const GfMatrix4d toStage = xformCache.GetLocalToWorldTransform(prim);
+        const GfMatrix4d toStageNormal = toStage.GetInverse().GetTranspose();
+        TfToken orientation;
+        mesh.GetOrientationAttr().Get(&orientation);
+        const bool reverse = (toStage.GetDeterminant() < 0.0) != (orientation == UsdGeomTokens->leftHanded);
+
+        const int base = static_cast<int>(points.size());
+        for (const GfVec3f& point : meshPoints)
+        {
+            points.push_back(GfVec3f(toStage.Transform(GfVec3d(point))));
+        }
+
+        everyNormal = everyNormal && hasNormals;
+        everyUv = everyUv && hasUvs;
+        size_t corner = 0;
+        for (int count : meshCounts)
+        {
+            faceCounts.push_back(count);
+            for (int k = 0; k < count; ++k)
+            {
+                const size_t source = corner + static_cast<size_t>(reverse ? count - 1 - k : k);
+                faceIndices.push_back(base + meshIndices[source]);
+                if (everyNormal)
+                {
+                    GfVec3f normal(toStageNormal.TransformDir(GfVec3d(meshNormals[source])));
+                    const float length = normal.GetLength();
+                    normals.push_back(length > 0.0f ? normal / length : normal);
+                }
+
+                if (everyUv)
+                {
+                    uvs.push_back(meshUvs[source]);
+                }
+            }
+
+            corner += static_cast<size_t>(count);
+        }
+
+        ++meshCount;
+    }
+
+    if (meshCount == 0)
+    {
+        SetError(context, "There is no visible mesh to write to the Draco file.");
+        return false;
+    }
+
+    UsdStageRefPtr merged = UsdStage::CreateInMemory();
+    UsdGeomMesh mesh = UsdGeomMesh::Define(merged, SdfPath("/DracoMesh"));
+    mesh.CreatePointsAttr().Set(points);
+    mesh.CreateFaceVertexCountsAttr().Set(faceCounts);
+    mesh.CreateFaceVertexIndicesAttr().Set(faceIndices);
+    mesh.CreateSubdivisionSchemeAttr().Set(UsdGeomTokens->none);
+    // usdDraco's writer takes face-varying values only with indices, one per corner.
+    VtIntArray cornerIndices(faceIndices.size());
+    for (size_t i = 0; i < cornerIndices.size(); ++i)
+    {
+        cornerIndices[i] = static_cast<int>(i);
+    }
+
+    const UsdGeomPrimvarsAPI primvars(mesh.GetPrim());
+    if (everyNormal && !normals.empty())
+    {
+        UsdGeomPrimvar primvar = primvars.CreatePrimvar(
+            UsdGeomTokens->normals, SdfValueTypeNames->Normal3fArray, UsdGeomTokens->faceVarying);
+        primvar.Set(VtVec3fArray(normals.begin(), normals.end()));
+        primvar.SetIndices(cornerIndices);
+    }
+
+    if (everyUv && !uvs.empty())
+    {
+        UsdGeomPrimvar primvar = primvars.CreatePrimvar(
+            TfToken("st"), SdfValueTypeNames->TexCoord2fArray, UsdGeomTokens->faceVarying);
+        primvar.Set(VtVec2fArray(uvs.begin(), uvs.end()));
+        primvar.SetIndices(cornerIndices);
+    }
+
+    if (!UsdDraco_WriteDraco(mesh, output, kDracoPositionBits, kDracoTexCoordBits, kDracoNormalBits,
+                             kDracoCompressionLevel, 1, 0, 0))
+    {
+        SetError(context, "OpenUSD's Draco writer failed to encode or write " + output + ".");
+        return false;
+    }
+
+    return true;
+}
+} // namespace
+
 int RUsd_EndExport(RUsdContext* context)
 {
     if (context == nullptr || !context->stage)
@@ -5332,7 +8420,20 @@ int RUsd_EndExport(RUsdContext* context)
 
     try
     {
-        bool saved = context->stage->GetRootLayer()->Save();
+        if (context->exportDraco)
+        {
+            if (!WriteDracoFile(context, context->exportTo))
+            {
+                return kFailure;
+            }
+
+            context->stage.Reset();
+            return kSuccess;
+        }
+
+        bool saved = context->exportTo.empty()
+            ? context->stage->GetRootLayer()->Save()
+            : context->stage->GetRootLayer()->Export(context->exportTo);
         if (!saved)
         {
             SetError(context, "OpenUSD failed to save the root layer.");
@@ -5350,6 +8451,324 @@ int RUsd_EndExport(RUsdContext* context)
     catch (...)
     {
         SetError(context, "Failed to finish USD export.");
+        return kFailure;
+    }
+}
+
+namespace
+{
+// The mesh RUsd_AddMesh(Ex) wrote at primPath, for the per-mesh setters below.
+bool FindExportMesh(RUsdContext* context, const char* primPath, int count, UsdGeomMesh* mesh)
+{
+    if (context == nullptr || !context->stage)
+    {
+        SetError(context, "USD export context is invalid.");
+        return false;
+    }
+
+    SdfPath path(SafeString(primPath));
+    if (!path.IsAbsolutePath() || path.IsAbsoluteRootPath())
+    {
+        SetError(context, "USD mesh prim path must be absolute.");
+        return false;
+    }
+
+    *mesh = UsdGeomMesh(context->stage->GetPrimAtPath(path));
+    if (!*mesh)
+    {
+        SetError(context, "No exported mesh at '" + path.GetString() + "'.");
+        return false;
+    }
+
+    VtVec3fArray points;
+    mesh->GetPointsAttr().Get(&points);
+    if (count <= 0 || static_cast<size_t>(count) != points.size())
+    {
+        SetError(context, "Per-vertex data for '" + path.GetString() + "' must have one value per point.");
+        return false;
+    }
+
+    return true;
+}
+
+// Defines a light or camera prim (any UsdGeomXformable schema) with its parents, local matrix
+// and visibility.
+template <typename Schema>
+Schema DefineXformable(RUsdContext* context, const char* primPath, const RUsdMatrix4x4* matrix, int visible)
+{
+    SdfPath path(SafeString(primPath));
+    if (!path.IsAbsolutePath() || path.IsAbsoluteRootPath())
+    {
+        SetError(context, "USD prim path must be absolute.");
+        return Schema();
+    }
+
+    EnsureParentXforms(context->stage, path);
+    Schema schema = Schema::Define(context->stage, path);
+    UsdGeomXformable xformable(schema.GetPrim());
+    xformable.ClearXformOpOrder();
+    if (matrix != nullptr)
+    {
+        xformable.MakeMatrixXform().Set(ToGfMatrix(*matrix));
+    }
+
+    UsdGeomImageable(schema.GetPrim()).CreateVisibilityAttr().Set(
+        visible != 0 ? UsdGeomTokens->inherited : UsdGeomTokens->invisible);
+    return schema;
+}
+}  // namespace
+
+int RUsd_SetMeshUvSet(RUsdContext* context, const char* primPath, int uvSet, const RUsdVec2* uv, int count)
+{
+    try
+    {
+        if (uvSet < 1 || uvSet > 2 || uv == nullptr)
+        {
+            SetError(context, "UV set must be 1 or 2 (uv0 is written by RUsd_AddMesh).");
+            return kFailure;
+        }
+
+        UsdGeomMesh mesh;
+        if (!FindExportMesh(context, primPath, count, &mesh))
+        {
+            return kFailure;
+        }
+
+        // st1 / st2: the first names the importer's UV-set table looks for.
+        UsdGeomPrimvar primvar = UsdGeomPrimvarsAPI(mesh.GetPrim()).CreatePrimvar(
+            TfToken(uvSet == 1 ? "st1" : "st2"), SdfValueTypeNames->TexCoord2fArray, UsdGeomTokens->vertex);
+        primvar.Set(CopyUv0(uv, count));
+        return kSuccess;
+    }
+    catch (const std::exception& exception)
+    {
+        SetError(context, MakeError("Failed to write a UV set", exception));
+        return kFailure;
+    }
+    catch (...)
+    {
+        SetError(context, "Failed to write a UV set.");
+        return kFailure;
+    }
+}
+
+int RUsd_SetMeshVertexColors(RUsdContext* context, const char* primPath, const RUsdVec4* colors, int count)
+{
+    try
+    {
+        UsdGeomMesh mesh;
+        if (colors == nullptr || !FindExportMesh(context, primPath, count, &mesh))
+        {
+            if (colors == nullptr)
+            {
+                SetError(context, "Vertex colours are null.");
+            }
+
+            return kFailure;
+        }
+
+        VtArray<GfVec3f> rgb(static_cast<size_t>(count));
+        VtArray<float> alpha(static_cast<size_t>(count));
+        bool translucent = false;
+        for (int i = 0; i < count; ++i)
+        {
+            rgb[static_cast<size_t>(i)] = GfVec3f(colors[i].x, colors[i].y, colors[i].z);
+            alpha[static_cast<size_t>(i)] = colors[i].w;
+            translucent = translucent || colors[i].w < 1.0f;
+        }
+
+        mesh.CreateDisplayColorPrimvar(UsdGeomTokens->vertex).Set(rgb);
+        // The material mirror may have authored a uniform/constant opacity; keep the two
+        // primvars at one interpolation.
+        if (translucent || mesh.GetDisplayOpacityPrimvar().HasAuthoredValue())
+        {
+            mesh.CreateDisplayOpacityPrimvar(UsdGeomTokens->vertex).Set(alpha);
+        }
+
+        return kSuccess;
+    }
+    catch (const std::exception& exception)
+    {
+        SetError(context, MakeError("Failed to write vertex colours", exception));
+        return kFailure;
+    }
+    catch (...)
+    {
+        SetError(context, "Failed to write vertex colours.");
+        return kFailure;
+    }
+}
+
+int RUsd_SetExportMaterialFlavors(RUsdContext* context, int flags)
+{
+    if (context == nullptr || !context->stage)
+    {
+        SetError(context, "USD export context is invalid.");
+        return kFailure;
+    }
+
+    context->materialFlavors = flags & (RUSD_MATERIAL_FLAVOR_OMNIPBR | RUSD_MATERIAL_FLAVOR_MATERIALX);
+    return kSuccess;
+}
+
+int RUsd_AddLight(
+    RUsdContext* context,
+    const char* primPath,
+    const RUsdMatrix4x4* matrix,
+    const RUsdExportLight* light,
+    int visible)
+{
+    if (context == nullptr || !context->stage || light == nullptr)
+    {
+        SetError(context, "USD export context or light is invalid.");
+        return kFailure;
+    }
+
+    try
+    {
+        UsdPrim prim;
+        switch (light->type)
+        {
+            case RUSD_LIGHT_DISTANT:
+            {
+                UsdLuxDistantLight distant = DefineXformable<UsdLuxDistantLight>(context, primPath, matrix, visible);
+                if (distant)
+                {
+                    distant.CreateAngleAttr().Set(light->angle);
+                    prim = distant.GetPrim();
+                }
+
+                break;
+            }
+            case RUSD_LIGHT_SPHERE:
+            {
+                UsdLuxSphereLight sphere = DefineXformable<UsdLuxSphereLight>(context, primPath, matrix, visible);
+                if (sphere)
+                {
+                    sphere.CreateRadiusAttr().Set(light->radius);
+                    prim = sphere.GetPrim();
+                }
+
+                break;
+            }
+            case RUSD_LIGHT_RECT:
+            {
+                UsdLuxRectLight rect = DefineXformable<UsdLuxRectLight>(context, primPath, matrix, visible);
+                if (rect)
+                {
+                    rect.CreateWidthAttr().Set(light->width);
+                    rect.CreateHeightAttr().Set(light->height);
+                    prim = rect.GetPrim();
+                }
+
+                break;
+            }
+            case RUSD_LIGHT_DISK:
+            {
+                UsdLuxDiskLight disk = DefineXformable<UsdLuxDiskLight>(context, primPath, matrix, visible);
+                if (disk)
+                {
+                    disk.CreateRadiusAttr().Set(light->radius);
+                    prim = disk.GetPrim();
+                }
+
+                break;
+            }
+            default:
+                SetError(context, "Unsupported light type for export.");
+                return kFailure;
+        }
+
+        if (!prim)
+        {
+            return kFailure;
+        }
+
+        UsdLuxLightAPI api(prim);
+        api.CreateColorAttr().Set(GfVec3f(light->color[0], light->color[1], light->color[2]));
+        api.CreateIntensityAttr().Set(light->intensity);
+        if (light->exposure != 0.0f)
+        {
+            api.CreateExposureAttr().Set(light->exposure);
+        }
+
+        if (light->normalize != 0)
+        {
+            api.CreateNormalizeAttr().Set(true);
+        }
+
+        if (light->colorTemperature > 0.0f)
+        {
+            api.CreateEnableColorTemperatureAttr().Set(true);
+            api.CreateColorTemperatureAttr().Set(light->colorTemperature);
+        }
+
+        if (light->coneAngle > 0.0f && light->type != RUSD_LIGHT_DISTANT)
+        {
+            UsdLuxShapingAPI shaping = UsdLuxShapingAPI::Apply(prim);
+            shaping.CreateShapingConeAngleAttr().Set(light->coneAngle);
+            shaping.CreateShapingConeSoftnessAttr().Set(light->coneSoftness);
+        }
+
+        UsdLuxShadowAPI::Apply(prim).CreateShadowEnableAttr().Set(light->castShadows != 0);
+        return kSuccess;
+    }
+    catch (const std::exception& exception)
+    {
+        SetError(context, MakeError("Failed to add light", exception));
+        return kFailure;
+    }
+    catch (...)
+    {
+        SetError(context, "Failed to add light.");
+        return kFailure;
+    }
+}
+
+int RUsd_AddCamera(
+    RUsdContext* context,
+    const char* primPath,
+    const RUsdMatrix4x4* matrix,
+    const RUsdExportCamera* camera,
+    int visible)
+{
+    if (context == nullptr || !context->stage || camera == nullptr)
+    {
+        SetError(context, "USD export context or camera is invalid.");
+        return kFailure;
+    }
+
+    try
+    {
+        UsdGeomCamera usdCamera = DefineXformable<UsdGeomCamera>(context, primPath, matrix, visible);
+        if (!usdCamera)
+        {
+            return kFailure;
+        }
+
+        usdCamera.CreateProjectionAttr().Set(camera->projection == RUSD_CAMERA_ORTHOGRAPHIC
+            ? UsdGeomTokens->orthographic
+            : UsdGeomTokens->perspective);
+        usdCamera.CreateFocalLengthAttr().Set(camera->focalLength);
+        usdCamera.CreateHorizontalApertureAttr().Set(camera->horizontalAperture);
+        usdCamera.CreateVerticalApertureAttr().Set(camera->verticalAperture);
+        if (camera->horizontalApertureOffset != 0.0f || camera->verticalApertureOffset != 0.0f)
+        {
+            usdCamera.CreateHorizontalApertureOffsetAttr().Set(camera->horizontalApertureOffset);
+            usdCamera.CreateVerticalApertureOffsetAttr().Set(camera->verticalApertureOffset);
+        }
+
+        usdCamera.CreateClippingRangeAttr().Set(GfVec2f(camera->nearClip, camera->farClip));
+        return kSuccess;
+    }
+    catch (const std::exception& exception)
+    {
+        SetError(context, MakeError("Failed to add camera", exception));
+        return kFailure;
+    }
+    catch (...)
+    {
+        SetError(context, "Failed to add camera.");
         return kFailure;
     }
 }
@@ -5379,7 +8798,16 @@ int RUsd_GetDiagnostics(
     char* buffer,
     int bufferCapacity)
 {
-    std::string diagnostics = context != nullptr ? context->diagnostics : g_lastDiagnostics;
+    std::string diagnostics;
+    if (context != nullptr)
+    {
+        std::lock_guard<std::mutex> lock(context->diagnosticsMutex);
+        diagnostics = context->diagnostics;
+    }
+    else
+    {
+        diagnostics = g_lastDiagnostics;
+    }
     if (diagnostics.empty())
     {
         diagnostics = std::string();
@@ -5399,6 +8827,11 @@ int RUsd_OpenStage(
     }
 
     *outContext = nullptr;
+    if (!TbbRuntimeIsUsable())
+    {
+        return kFailure;
+    }
+
     std::unique_ptr<RUsdContext> context(new RUsdContext());
 
     try
@@ -5789,6 +9222,130 @@ int RUsd_GetImportMaterialTextureLayout(
     return kSuccess;
 }
 
+int RUsd_SetRemoteAssetCache(const char* folder)
+{
+    std::lock_guard<std::mutex> lock(g_remoteCacheMutex);
+    g_remoteCache = folder != nullptr ? std::string(folder) : std::string();
+    return kSuccess;
+}
+
+int RUsd_GetImportRemoteRequestCount(RUsdContext* context, int* count)
+{
+    if (context == nullptr || count == nullptr)
+    {
+        SetError(context, "USD import remote request count needs a context and an output.");
+        return kFailure;
+    }
+    *count = static_cast<int>(context->remoteRequests.size());
+    return kSuccess;
+}
+
+int RUsd_GetImportRemoteRequest(RUsdContext* context, int index, char* buffer, int bufferCapacity)
+{
+    if (context == nullptr || index < 0 || index >= static_cast<int>(context->remoteRequests.size()))
+    {
+        SetError(context, "USD import remote request index is invalid.");
+        return kFailure;
+    }
+    CopyStringToBuffer(context->remoteRequests[static_cast<size_t>(index)], buffer, bufferCapacity);
+    return kSuccess;
+}
+
+int RUsd_GetImportMaterialNormalFlip(RUsdContext* context, int materialIndex, int* flipU, int* flipV)
+{
+    if (context == nullptr || materialIndex < 0 ||
+        materialIndex >= static_cast<int>(context->importedMaterials.size()))
+    {
+        SetError(context, "USD import material index is invalid.");
+        return kFailure;
+    }
+
+    const RUsdContext::ImportedMaterial& material = context->importedMaterials[static_cast<size_t>(materialIndex)];
+    if (flipU != nullptr)
+    {
+        *flipU = material.normalFlipU ? 1 : 0;
+    }
+    if (flipV != nullptr)
+    {
+        *flipV = material.normalFlipV ? 1 : 0;
+    }
+    return kSuccess;
+}
+
+int RUsd_GetImportTextureColorSpace(
+    RUsdContext* context,
+    const char* texturePath,
+    char* buffer,
+    int bufferCapacity)
+{
+    if (context == nullptr || texturePath == nullptr)
+    {
+        SetError(context, "USD import texture colour space query needs a context and a path.");
+        return kFailure;
+    }
+
+    auto found = context->assetColorSpaces.find(texturePath);
+    CopyStringToBuffer(found == context->assetColorSpaces.end() ? std::string() : found->second, buffer,
+                       bufferCapacity);
+    return kSuccess;
+}
+
+int RUsd_GetImportMaterialAlbedoMask(
+    RUsdContext* context,
+    int materialIndex,
+    char* maskTexturePathBuffer,
+    int maskTexturePathBufferCapacity,
+    float* maskColorRgb)
+{
+    if (context == nullptr || materialIndex < 0 ||
+        materialIndex >= static_cast<int>(context->importedMaterials.size()))
+    {
+        SetError(context, "USD import material index is invalid.");
+        return kFailure;
+    }
+
+    const RUsdContext::ImportedMaterial& material =
+        context->importedMaterials[static_cast<size_t>(materialIndex)];
+    if (maskTexturePathBuffer != nullptr && maskTexturePathBufferCapacity > 0)
+    {
+        CopyStringToBuffer(material.maskTexturePath, maskTexturePathBuffer, maskTexturePathBufferCapacity);
+    }
+
+    if (maskColorRgb != nullptr)
+    {
+        maskColorRgb[0] = material.maskColor[0];
+        maskColorRgb[1] = material.maskColor[1];
+        maskColorRgb[2] = material.maskColor[2];
+    }
+
+    return kSuccess;
+}
+
+int RUsd_GetImportMaterialUnrealBlend(
+    RUsdContext* context,
+    int materialIndex,
+    float* values)
+{
+    if (context == nullptr || materialIndex < 0 ||
+        materialIndex >= static_cast<int>(context->importedMaterials.size()) || values == nullptr)
+    {
+        SetError(context, "USD import material index is invalid.");
+        return kFailure;
+    }
+
+    const RUsdContext::ImportedMaterial& material =
+        context->importedMaterials[static_cast<size_t>(materialIndex)];
+    values[0] = static_cast<float>(material.maskMode);
+    for (int i = 0; i < 9; ++i)
+    {
+        values[1 + i] = material.channelColors[i];
+    }
+    values[10] = material.hasRoughnessRange ? 1.0f : 0.0f;
+    values[11] = material.roughnessMin;
+    values[12] = material.roughnessMax;
+    return kSuccess;
+}
+
 int RUsd_GetImportMeshUvSetInfo(
     RUsdContext* context,
     int meshIndex,
@@ -6060,6 +9617,11 @@ int RUsd_BeginLayerExport(
     }
 
     *outContext = nullptr;
+    if (!TbbRuntimeIsUsable())
+    {
+        return kFailure;
+    }
+
     std::unique_ptr<RUsdContext> context(new RUsdContext());
 
     try
@@ -6312,6 +9874,49 @@ int RUsd_SetActive(RUsdContext* context, const char* primPath, int active)
     });
 }
 
+int RUsd_AddRelocate(RUsdContext* context, const char* sourcePath, const char* targetPath)
+{
+    return RunExportEdit(context, "add a relocate", [&]() {
+        SdfPath source;
+        SdfPath target;
+        if (!ParseAbsolutePrimPath(context, sourcePath, &source) ||
+            !ParseAbsolutePrimPath(context, targetPath, &target))
+        {
+            return kFailure;
+        }
+
+        // What Pcp would refuse anyway, refused here with a reason: a root prim has no parent to
+        // leave, and a prim cannot move into its own subtree.
+        if (source.GetPathElementCount() < 2 || target.GetPathElementCount() < 2)
+        {
+            SetError(context, "A relocate cannot move a root prim, or make one.");
+            return kFailure;
+        }
+
+        if (source == target || target.HasPrefix(source))
+        {
+            SetError(context, "A relocate cannot move '" + source.GetString() + "' to itself or into its own subtree.");
+            return kFailure;
+        }
+
+        SdfLayerHandle layer = context->stage->GetRootLayer();
+        SdfRelocates relocates = layer->GetRelocates();
+        for (const SdfRelocate& existing : relocates)
+        {
+            if (existing.first == source || existing.second == target)
+            {
+                SetError(context, "The layer already relocates '" + existing.first.GetString() + "' to '" +
+                    existing.second.GetString() + "'.");
+                return kFailure;
+            }
+        }
+
+        relocates.emplace_back(source, target);
+        layer->SetRelocates(relocates);
+        return kSuccess;
+    });
+}
+
 int RUsd_SetVariantSelection(
     RUsdContext* context,
     const char* primPath,
@@ -6399,11 +10004,40 @@ int RUsd_PrimExists(RUsdContext* context, const char* primPath, int* exists)
     });
 }
 
-int RUsd_OpenStageEx(
+// RUsd_OpenStageEx and RUsd_OpenStageWithLimits: `limits` null imports with the defaults.
+// RUsdImportLimits into the walk's budgets: a field of 0 or less keeps the default.
+static bool TakeImportLimits(RUsdContext* context, const RUsdImportLimits* limits, RUsdContext::ImportLimits* to)
+{
+    // A larger struct is a newer caller's; its extra fields are not this build's to read.
+    if (limits->structSize < static_cast<int>(sizeof(RUsdImportLimits)))
+    {
+        SetError(context, "RUsdImportLimits.structSize is smaller than this plugin's RUsdImportLimits.");
+        return false;
+    }
+
+    const auto take = [](long long value, size_t* field) {
+        if (value > 0)
+        {
+            *field = static_cast<size_t>(value);
+        }
+    };
+    take(limits->maxNodes, &to->nodes);
+    take(limits->maxMeshes, &to->meshes);
+    take(limits->maxInstancePlacements, &to->instancePlacements);
+    take(limits->maxGeometryElements, &to->geometryElements);
+    take(limits->maxTrackSamples, &to->trackSamples);
+    take(limits->maxAnimationValues, &to->animationValues);
+    take(limits->maxJoints, &to->joints);
+    to->skipWhenExceeded = limits->skipWhenExceeded != 0;
+    return true;
+}
+
+static int OpenStageImpl(
     const char* inputPath,
     int flags,
     const char* variantSelections,
     const char* loadPaths,
+    const RUsdImportLimits* limits,
     RUsdContext** outContext)
 {
     if (outContext == nullptr)
@@ -6412,7 +10046,18 @@ int RUsd_OpenStageEx(
     }
 
     *outContext = nullptr;
+    if (!TbbRuntimeIsUsable())
+    {
+        return kFailure;
+    }
+
     std::unique_ptr<RUsdContext> context(new RUsdContext());
+
+    if (limits != nullptr && !TakeImportLimits(context.get(), limits, &context->importLimits))
+    {
+        *outContext = context.release();
+        return kFailure;
+    }
 
     try
     {
@@ -6430,6 +10075,7 @@ int RUsd_OpenStageEx(
         }
 
         const bool loadNone = (flags & RUSD_OPEN_LOAD_NO_PAYLOADS) != 0;
+        context->importAtDefaultTime = (flags & RUSD_OPEN_DEFAULT_TIME) != 0;
         context->stage = UsdStage::Open(input, loadNone ? UsdStage::LoadNone : UsdStage::LoadAll);
         if (!context->stage)
         {
@@ -6486,7 +10132,14 @@ int RUsd_OpenStageEx(
             }
         }
 
-        ReadImportedStage(context.get());
+        // From here on what the stage recomposes is recorded (RUSD_QUERY_CHANGES); the choices
+        // above are what it opened with.
+        context->changeListener.reset(new RUsdChangeListener(context->stage, &context->changedPaths));
+        if ((flags & RUSD_OPEN_NO_READ) == 0)
+        {
+            ReadImportedStage(context.get());
+        }
+
         *outContext = context.release();
         return kSuccess;
     }
@@ -6502,6 +10155,27 @@ int RUsd_OpenStageEx(
         DisableDiagnostics(context.get());
         return kFailure;
     }
+}
+
+int RUsd_OpenStageEx(
+    const char* inputPath,
+    int flags,
+    const char* variantSelections,
+    const char* loadPaths,
+    RUsdContext** outContext)
+{
+    return OpenStageImpl(inputPath, flags, variantSelections, loadPaths, nullptr, outContext);
+}
+
+int RUsd_OpenStageWithLimits(
+    const char* inputPath,
+    int flags,
+    const char* variantSelections,
+    const char* loadPaths,
+    const RUsdImportLimits* limits,
+    RUsdContext** outContext)
+{
+    return OpenStageImpl(inputPath, flags, variantSelections, loadPaths, limits, outContext);
 }
 
 int RUsd_GetImportNodeFlags(RUsdContext* context, int nodeIndex, int* flags)
@@ -6711,4 +10385,3082 @@ int RUsd_GetImportComposition(
         SetError(context, "Failed to read the USD composition.");
         return kFailure;
     }
+}
+
+// ---- Time, animation and skinning (API v13) -----------------------------------------------
+
+int RUsd_GetImportLayers(RUsdContext* context, char* buffer, int bufferCapacity, int* requiredLength)
+{
+    if (context == nullptr || !context->stage)
+    {
+        SetError(context, "USD import context is invalid.");
+        return kFailure;
+    }
+
+    try
+    {
+        std::string report;
+        std::set<std::string> seen;
+        for (const SdfLayerHandle& layer : context->stage->GetUsedLayers())
+        {
+            if (!layer || layer->IsAnonymous())
+            {
+                continue;
+            }
+
+            // A layer inside a .usdz (inside a .usdz...) is the outermost package's file.
+            std::string path = layer->GetRealPath();
+            for (int depth = 0; depth < 8 && ArIsPackageRelativePath(path); ++depth)
+            {
+                path = ArSplitPackageRelativePathOuter(path).first;
+            }
+
+            if (path.empty() || !seen.insert(path).second)
+            {
+                continue;
+            }
+
+            report += path;
+            report += '\n';
+        }
+
+        const int required = static_cast<int>(report.size()) + 1;
+        if (requiredLength != nullptr)
+        {
+            *requiredLength = required;
+        }
+
+        if (buffer == nullptr)
+        {
+            return kSuccess; // size query
+        }
+
+        if (bufferCapacity < required)
+        {
+            SetError(context, "Buffer too small for RUsd_GetImportLayers.");
+            return kFailure;
+        }
+
+        std::memcpy(buffer, report.c_str(), report.size() + 1);
+        return kSuccess;
+    }
+    catch (const std::exception& exception)
+    {
+        SetError(context, MakeError("Failed to list the stage's layers", exception));
+        return kFailure;
+    }
+    catch (...)
+    {
+        SetError(context, "Failed to list the stage's layers.");
+        return kFailure;
+    }
+}
+
+int RUsd_GetImportTimeInfo(RUsdContext* context, RUsdImportTimeInfo* info)
+{
+    if (context == nullptr || info == nullptr || !context->stage)
+    {
+        SetError(context, "Invalid arguments for RUsd_GetImportTimeInfo.");
+        return kFailure;
+    }
+
+    *info = context->timeInfo;
+    return kSuccess;
+}
+
+int RUsd_GetImportNodeTrackCount(RUsdContext* context, int* count)
+{
+    if (context == nullptr || count == nullptr)
+    {
+        SetError(context, "Invalid arguments for RUsd_GetImportNodeTrackCount.");
+        return kFailure;
+    }
+
+    *count = static_cast<int>(context->importedNodeTracks.size());
+    return kSuccess;
+}
+
+int RUsd_GetImportNodeTrack(RUsdContext* context, int index, RUsdImportNodeTrack* track)
+{
+    if (context == nullptr || track == nullptr || index < 0 ||
+        static_cast<size_t>(index) >= context->importedNodeTracks.size())
+    {
+        SetError(context, "Invalid arguments for RUsd_GetImportNodeTrack.");
+        return kFailure;
+    }
+
+    const RUsdContext::ImportedNodeTrack& source = context->importedNodeTracks[static_cast<size_t>(index)];
+    track->nodeIndex = source.nodeIndex;
+    track->kind = source.kind;
+    track->sampleCount = static_cast<int>(source.times.size());
+    return kSuccess;
+}
+
+int RUsd_CopyImportNodeTrack(
+    RUsdContext* context,
+    int index,
+    double* times,
+    int timeCapacity,
+    float* values,
+    int valueCapacity)
+{
+    if (context == nullptr || times == nullptr || values == nullptr || index < 0 ||
+        static_cast<size_t>(index) >= context->importedNodeTracks.size())
+    {
+        SetError(context, "Invalid arguments for RUsd_CopyImportNodeTrack.");
+        return kFailure;
+    }
+
+    const RUsdContext::ImportedNodeTrack& source = context->importedNodeTracks[static_cast<size_t>(index)];
+    if (!FitsCapacity(timeCapacity, source.times.size()) || !FitsCapacity(valueCapacity, source.values.size()))
+    {
+        SetError(context, "Buffer too small for RUsd_CopyImportNodeTrack.");
+        return kFailure;
+    }
+
+    std::copy(source.times.begin(), source.times.end(), times);
+    std::copy(source.values.begin(), source.values.end(), values);
+    return kSuccess;
+}
+
+namespace
+{
+std::string JoinJointNames(const RUsdContext::ImportedSkeleton& skeleton)
+{
+    std::string names;
+    for (size_t joint = 0; joint < skeleton.joints.size(); ++joint)
+    {
+        if (joint > 0)
+        {
+            names += '\n';
+        }
+
+        names += skeleton.joints[joint];
+    }
+
+    return names;
+}
+}
+
+int RUsd_GetImportSkeletonCount(RUsdContext* context, int* count)
+{
+    if (context == nullptr || count == nullptr)
+    {
+        SetError(context, "Invalid arguments for RUsd_GetImportSkeletonCount.");
+        return kFailure;
+    }
+
+    *count = static_cast<int>(context->importedSkeletons.size());
+    return kSuccess;
+}
+
+int RUsd_GetImportSkeleton(RUsdContext* context, int index, RUsdImportSkeleton* skeleton)
+{
+    if (context == nullptr || skeleton == nullptr || index < 0 ||
+        static_cast<size_t>(index) >= context->importedSkeletons.size())
+    {
+        SetError(context, "Invalid arguments for RUsd_GetImportSkeleton.");
+        return kFailure;
+    }
+
+    const RUsdContext::ImportedSkeleton& source = context->importedSkeletons[static_cast<size_t>(index)];
+    skeleton->nodeIndex = source.nodeIndex;
+    skeleton->jointCount = static_cast<int>(source.joints.size());
+    skeleton->sampleCount = static_cast<int>(source.times.size());
+    skeleton->jointNamesLength = static_cast<int>(JoinJointNames(source).size() + 1);
+    return kSuccess;
+}
+
+int RUsd_CopyImportSkeletonJoints(
+    RUsdContext* context,
+    int index,
+    char* jointNames,
+    int jointNamesCapacity,
+    int* parents,
+    float* bindTransforms,
+    float* restTransforms,
+    float* poseTransforms,
+    int jointCapacity)
+{
+    if (context == nullptr || jointNames == nullptr || parents == nullptr || bindTransforms == nullptr ||
+        restTransforms == nullptr || poseTransforms == nullptr || index < 0 ||
+        static_cast<size_t>(index) >= context->importedSkeletons.size())
+    {
+        SetError(context, "Invalid arguments for RUsd_CopyImportSkeletonJoints.");
+        return kFailure;
+    }
+
+    const RUsdContext::ImportedSkeleton& source = context->importedSkeletons[static_cast<size_t>(index)];
+    const std::string names = JoinJointNames(source);
+    if (!FitsCapacity(jointNamesCapacity, names.size() + 1) || !FitsCapacity(jointCapacity, source.joints.size()))
+    {
+        SetError(context, "Buffer too small for RUsd_CopyImportSkeletonJoints.");
+        return kFailure;
+    }
+
+    std::memcpy(jointNames, names.c_str(), names.size() + 1);
+    std::copy(source.parents.begin(), source.parents.end(), parents);
+    std::copy(source.bindTransforms.begin(), source.bindTransforms.end(), bindTransforms);
+    std::copy(source.restTransforms.begin(), source.restTransforms.end(), restTransforms);
+    std::copy(source.poseTransforms.begin(), source.poseTransforms.end(), poseTransforms);
+    return kSuccess;
+}
+
+int RUsd_CopyImportSkeletonAnimation(
+    RUsdContext* context,
+    int index,
+    double* times,
+    int timeCapacity,
+    float* transforms,
+    int transformCapacity)
+{
+    if (context == nullptr || times == nullptr || transforms == nullptr || index < 0 ||
+        static_cast<size_t>(index) >= context->importedSkeletons.size())
+    {
+        SetError(context, "Invalid arguments for RUsd_CopyImportSkeletonAnimation.");
+        return kFailure;
+    }
+
+    const RUsdContext::ImportedSkeleton& source = context->importedSkeletons[static_cast<size_t>(index)];
+    if (!FitsCapacity(timeCapacity, source.times.size()) || !FitsCapacity(transformCapacity, source.samples.size()))
+    {
+        SetError(context, "Buffer too small for RUsd_CopyImportSkeletonAnimation.");
+        return kFailure;
+    }
+
+    std::copy(source.times.begin(), source.times.end(), times);
+    std::copy(source.samples.begin(), source.samples.end(), transforms);
+    return kSuccess;
+}
+
+namespace
+{
+const RUsdContext::ImportedMesh* FindImportMesh(RUsdContext* context, int meshIndex)
+{
+    if (context == nullptr || meshIndex < 0 || static_cast<size_t>(meshIndex) >= context->importedMeshes.size())
+    {
+        return nullptr;
+    }
+
+    return &context->importedMeshes[static_cast<size_t>(meshIndex)];
+}
+}
+
+int RUsd_GetImportMeshSkin(RUsdContext* context, int meshIndex, RUsdImportMeshSkin* skin)
+{
+    const RUsdContext::ImportedMesh* mesh = FindImportMesh(context, meshIndex);
+    if (mesh == nullptr || skin == nullptr)
+    {
+        SetError(context, "Invalid arguments for RUsd_GetImportMeshSkin.");
+        return kFailure;
+    }
+
+    const RUsdContext::ImportedMesh::Skin& source = mesh->skin;
+    skin->skeletonIndex = source.skeletonIndex;
+    skin->influencesPerVertex = source.influences;
+    skin->blendShapeCount = static_cast<int>(source.blendShapes.size());
+    skin->blendShapeSampleCount = static_cast<int>(source.blendShapeWeightTimes.size());
+    skin->geomBindTransform = source.geomBindTransform;
+    skin->dualQuaternion = source.dualQuaternion;
+    return kSuccess;
+}
+
+int RUsd_CopyImportMeshSkinWeights(
+    RUsdContext* context,
+    int meshIndex,
+    int* jointIndices,
+    float* jointWeights,
+    int capacity)
+{
+    const RUsdContext::ImportedMesh* mesh = FindImportMesh(context, meshIndex);
+    if (mesh == nullptr || jointIndices == nullptr || jointWeights == nullptr)
+    {
+        SetError(context, "Invalid arguments for RUsd_CopyImportMeshSkinWeights.");
+        return kFailure;
+    }
+
+    const RUsdContext::ImportedMesh::Skin& source = mesh->skin;
+    if (!FitsCapacity(capacity, source.jointIndices.size()))
+    {
+        SetError(context, "Buffer too small for RUsd_CopyImportMeshSkinWeights.");
+        return kFailure;
+    }
+
+    std::copy(source.jointIndices.begin(), source.jointIndices.end(), jointIndices);
+    std::copy(source.jointWeights.begin(), source.jointWeights.end(), jointWeights);
+    return kSuccess;
+}
+
+int RUsd_GetImportBlendShape(
+    RUsdContext* context,
+    int meshIndex,
+    int shapeIndex,
+    char* nameBuffer,
+    int nameBufferCapacity,
+    int* frameCount,
+    int* hasNormals)
+{
+    const RUsdContext::ImportedMesh* mesh = FindImportMesh(context, meshIndex);
+    if (mesh == nullptr || frameCount == nullptr || hasNormals == nullptr || shapeIndex < 0 ||
+        static_cast<size_t>(shapeIndex) >= mesh->skin.blendShapes.size())
+    {
+        SetError(context, "Invalid arguments for RUsd_GetImportBlendShape.");
+        return kFailure;
+    }
+
+    const RUsdContext::ImportedMesh::BlendShape& shape = mesh->skin.blendShapes[static_cast<size_t>(shapeIndex)];
+    if (nameBuffer != nullptr)
+    {
+        CopyStringToBuffer(shape.name, nameBuffer, nameBufferCapacity);
+    }
+
+    *frameCount = static_cast<int>(shape.frames.size());
+    *hasNormals = !shape.frames.empty() && !shape.frames.front().deltaNormals.empty() ? 1 : 0;
+    return kSuccess;
+}
+
+int RUsd_CopyImportBlendShapeFrame(
+    RUsdContext* context,
+    int meshIndex,
+    int shapeIndex,
+    int frame,
+    float* weight,
+    RUsdVec3* deltaVertices,
+    RUsdVec3* deltaNormals,
+    int vertexCapacity)
+{
+    const RUsdContext::ImportedMesh* mesh = FindImportMesh(context, meshIndex);
+    if (mesh == nullptr || weight == nullptr || deltaVertices == nullptr || shapeIndex < 0 ||
+        static_cast<size_t>(shapeIndex) >= mesh->skin.blendShapes.size())
+    {
+        SetError(context, "Invalid arguments for RUsd_CopyImportBlendShapeFrame.");
+        return kFailure;
+    }
+
+    const RUsdContext::ImportedMesh::BlendShape& shape = mesh->skin.blendShapes[static_cast<size_t>(shapeIndex)];
+    if (frame < 0 || static_cast<size_t>(frame) >= shape.frames.size())
+    {
+        SetError(context, "Invalid arguments for RUsd_CopyImportBlendShapeFrame.");
+        return kFailure;
+    }
+
+    const RUsdContext::ImportedMesh::BlendShapeFrame& source = shape.frames[static_cast<size_t>(frame)];
+    if (!FitsCapacity(vertexCapacity, source.deltaVertices.size()))
+    {
+        SetError(context, "Buffer too small for RUsd_CopyImportBlendShapeFrame.");
+        return kFailure;
+    }
+
+    *weight = source.weight;
+    std::copy(source.deltaVertices.begin(), source.deltaVertices.end(), deltaVertices);
+    if (deltaNormals != nullptr && !source.deltaNormals.empty())
+    {
+        std::copy(source.deltaNormals.begin(), source.deltaNormals.end(), deltaNormals);
+    }
+
+    return kSuccess;
+}
+
+int RUsd_CopyImportMeshBlendShapeWeights(
+    RUsdContext* context,
+    int meshIndex,
+    float* weights,
+    int weightCapacity,
+    double* times,
+    int timeCapacity,
+    float* samples,
+    int sampleCapacity)
+{
+    const RUsdContext::ImportedMesh* mesh = FindImportMesh(context, meshIndex);
+    if (mesh == nullptr || weights == nullptr || times == nullptr || samples == nullptr)
+    {
+        SetError(context, "Invalid arguments for RUsd_CopyImportMeshBlendShapeWeights.");
+        return kFailure;
+    }
+
+    const RUsdContext::ImportedMesh::Skin& source = mesh->skin;
+    if (!FitsCapacity(weightCapacity, source.blendShapeWeights.size()) ||
+        !FitsCapacity(timeCapacity, source.blendShapeWeightTimes.size()) ||
+        !FitsCapacity(sampleCapacity, source.blendShapeWeightSamples.size()))
+    {
+        SetError(context, "Buffer too small for RUsd_CopyImportMeshBlendShapeWeights.");
+        return kFailure;
+    }
+
+    std::copy(source.blendShapeWeights.begin(), source.blendShapeWeights.end(), weights);
+    std::copy(source.blendShapeWeightTimes.begin(), source.blendShapeWeightTimes.end(), times);
+    std::copy(source.blendShapeWeightSamples.begin(), source.blendShapeWeightSamples.end(), samples);
+    return kSuccess;
+}
+
+int RUsd_GetImportMeshPointCache(RUsdContext* context, int meshIndex, RUsdImportPointCache* pointCache)
+{
+    const RUsdContext::ImportedMesh* mesh = FindImportMesh(context, meshIndex);
+    if (mesh == nullptr || pointCache == nullptr)
+    {
+        SetError(context, "Invalid arguments for RUsd_GetImportMeshPointCache.");
+        return kFailure;
+    }
+
+    pointCache->sampleCount = static_cast<int>(mesh->pointCacheTimes.size());
+    pointCache->vertexCount = mesh->pointCacheTimes.empty() ? 0 : static_cast<int>(mesh->points.size());
+    pointCache->hasNormals = mesh->pointCacheNormals.empty() ? 0 : 1;
+    return kSuccess;
+}
+
+int RUsd_CopyImportMeshPointCache(
+    RUsdContext* context,
+    int meshIndex,
+    double* times,
+    int timeCapacity,
+    RUsdVec3* points,
+    RUsdVec3* normals,
+    int valueCapacity)
+{
+    const RUsdContext::ImportedMesh* mesh = FindImportMesh(context, meshIndex);
+    if (mesh == nullptr || times == nullptr || points == nullptr ||
+        !FitsCapacity(timeCapacity, mesh->pointCacheTimes.size()) ||
+        !FitsCapacity(valueCapacity, mesh->pointCachePoints.size()) ||
+        (normals != nullptr && !FitsCapacity(valueCapacity, mesh->pointCacheNormals.size())))
+    {
+        SetError(context, "Invalid arguments for RUsd_CopyImportMeshPointCache.");
+        return kFailure;
+    }
+
+    std::copy(mesh->pointCacheTimes.begin(), mesh->pointCacheTimes.end(), times);
+    std::copy(mesh->pointCachePoints.begin(), mesh->pointCachePoints.end(), points);
+    if (normals != nullptr)
+    {
+        std::copy(mesh->pointCacheNormals.begin(), mesh->pointCacheNormals.end(), normals);
+    }
+
+    return kSuccess;
+}
+
+// ---- Animation and skinning on export (API v13) -------------------------------------------
+
+namespace
+{
+bool ExportPrim(RUsdContext* context, const char* primPath, const char* what, UsdPrim* prim)
+{
+    if (context == nullptr || !context->stage)
+    {
+        SetError(context, "USD export context is invalid.");
+        return false;
+    }
+
+    const SdfPath path(SafeString(primPath));
+    if (!path.IsAbsolutePath() || !path.IsPrimPath())
+    {
+        SetError(context, std::string(what) + ": the prim path must be absolute.");
+        return false;
+    }
+
+    *prim = context->stage->GetPrimAtPath(path);
+    if (!*prim)
+    {
+        SetError(context, std::string(what) + ": no prim at " + path.GetString() + ".");
+        return false;
+    }
+
+    return true;
+}
+
+GfMatrix4d MatrixFromFloats(const float* values)
+{
+    GfMatrix4d matrix;
+    for (int i = 0; i < 16; ++i)
+    {
+        matrix[i / 4][i % 4] = values[i];
+    }
+
+    return matrix;
+}
+
+VtTokenArray TokensFromLines(const std::string& text)
+{
+    VtTokenArray tokens;
+    std::string line;
+    std::istringstream stream(text);
+    while (std::getline(stream, line))
+    {
+        if (!line.empty())
+        {
+            tokens.push_back(TfToken(line));
+        }
+    }
+
+    return tokens;
+}
+
+bool SamplesValid(RUsdContext* context, const char* what, const void* times, const void* values, int count)
+{
+    if (count < 0 || static_cast<size_t>(count) > kMaxImportTrackSamples || (count > 0 && (times == nullptr || values == nullptr)))
+    {
+        SetError(context, std::string("Invalid samples for ") + what + ".");
+        return false;
+    }
+
+    return true;
+}
+}
+
+#define RUSD_EXPORT_GUARD(what)                                                     \
+    catch (const std::exception& exception)                                         \
+    {                                                                               \
+        SetError(context, MakeError(what, exception));                              \
+        return kFailure;                                                            \
+    }                                                                               \
+    catch (...)                                                                     \
+    {                                                                               \
+        SetError(context, std::string(what) + ".");                                 \
+        return kFailure;                                                            \
+    }
+
+int RUsd_SetExportTimeRange(RUsdContext* context, double startTimeCode, double endTimeCode,
+                            double timeCodesPerSecond, double framesPerSecond)
+{
+    if (context == nullptr || !context->stage || !(endTimeCode >= startTimeCode) ||
+        !(timeCodesPerSecond > 0.0) || !(framesPerSecond > 0.0))
+    {
+        SetError(context, "Invalid arguments for RUsd_SetExportTimeRange.");
+        return kFailure;
+    }
+
+    try
+    {
+        context->stage->SetStartTimeCode(startTimeCode);
+        context->stage->SetEndTimeCode(endTimeCode);
+        context->stage->SetTimeCodesPerSecond(timeCodesPerSecond);
+        context->stage->SetFramesPerSecond(framesPerSecond);
+        return kSuccess;
+    }
+    RUSD_EXPORT_GUARD("Failed to set the stage's time range")
+}
+
+int RUsd_SetXformSamples(RUsdContext* context, const char* primPath, const double* times,
+                         const float* matrices, int sampleCount)
+{
+    UsdPrim prim;
+    if (!ExportPrim(context, primPath, "RUsd_SetXformSamples", &prim) ||
+        !SamplesValid(context, "RUsd_SetXformSamples", times, matrices, sampleCount))
+    {
+        return kFailure;
+    }
+
+    try
+    {
+        UsdGeomXformable xformable(prim);
+        bool resets = false;
+        std::vector<UsdGeomXformOp> ops = xformable.GetOrderedXformOps(&resets);
+        UsdGeomXformOp op = ops.size() == 1 && ops[0].GetOpType() == UsdGeomXformOp::TypeTransform
+            ? ops[0]
+            : xformable.MakeMatrixXform();
+        for (int i = 0; i < sampleCount; ++i)
+        {
+            op.Set(MatrixFromFloats(matrices + 16 * static_cast<size_t>(i)), UsdTimeCode(times[i]));
+        }
+
+        return kSuccess;
+    }
+    RUSD_EXPORT_GUARD("Failed to write transform samples")
+}
+
+int RUsd_SetVisibilitySamples(RUsdContext* context, const char* primPath, const double* times,
+                              const int* visible, int sampleCount)
+{
+    UsdPrim prim;
+    if (!ExportPrim(context, primPath, "RUsd_SetVisibilitySamples", &prim) ||
+        !SamplesValid(context, "RUsd_SetVisibilitySamples", times, visible, sampleCount))
+    {
+        return kFailure;
+    }
+
+    try
+    {
+        UsdAttribute attribute = UsdGeomImageable(prim).CreateVisibilityAttr();
+        for (int i = 0; i < sampleCount; ++i)
+        {
+            attribute.Set(visible[i] != 0 ? UsdGeomTokens->inherited : UsdGeomTokens->invisible,
+                          UsdTimeCode(times[i]));
+        }
+
+        return kSuccess;
+    }
+    RUSD_EXPORT_GUARD("Failed to write visibility samples")
+}
+
+int RUsd_SetPointsSamples(RUsdContext* context, const char* meshPath, const double* times,
+                          const RUsdVec3* points, const RUsdVec3* normals, int pointCount, int sampleCount)
+{
+    UsdPrim prim;
+    if (!ExportPrim(context, meshPath, "RUsd_SetPointsSamples", &prim) ||
+        !SamplesValid(context, "RUsd_SetPointsSamples", times, points, sampleCount))
+    {
+        return kFailure;
+    }
+
+    if (!prim.IsA<UsdGeomMesh>() || pointCount <= 0 ||
+        static_cast<size_t>(pointCount) * static_cast<size_t>(sampleCount) > kMaxImportGeometryElements)
+    {
+        SetError(context, "Invalid arguments for RUsd_SetPointsSamples.");
+        return kFailure;
+    }
+
+    try
+    {
+        UsdGeomMesh mesh(prim);
+        UsdAttribute pointsAttr = mesh.CreatePointsAttr();
+        UsdAttribute extentAttr = mesh.CreateExtentAttr();
+        UsdAttribute normalsAttr = normals != nullptr ? mesh.CreateNormalsAttr() : UsdAttribute();
+        for (int i = 0; i < sampleCount; ++i)
+        {
+            const size_t offset = static_cast<size_t>(i) * static_cast<size_t>(pointCount);
+            const UsdTimeCode time(times[i]);
+            pointsAttr.Set(CopyPoints(points + offset, pointCount), time);
+            extentAttr.Set(ComputeExtent(points + offset, pointCount), time);
+            if (normalsAttr)
+            {
+                normalsAttr.Set(CopyPoints(normals + offset, pointCount), time);
+            }
+        }
+
+        return kSuccess;
+    }
+    RUSD_EXPORT_GUARD("Failed to write point samples")
+}
+
+int RUsd_SetSkinningMethod(RUsdContext* context, const char* meshPath, int dualQuaternion)
+{
+    UsdPrim prim;
+    if (!ExportPrim(context, meshPath, "RUsd_SetSkinningMethod", &prim))
+    {
+        return kFailure;
+    }
+
+    try
+    {
+        UsdSkelBindingAPI::Apply(prim).CreateSkinningMethodAttr().Set(
+            dualQuaternion != 0 ? UsdSkelTokens->dualQuaternion : UsdSkelTokens->classicLinear);
+        return kSuccess;
+    }
+    RUSD_EXPORT_GUARD("Failed to set the skinning method")
+}
+
+int RUsd_DefineSkelRoot(RUsdContext* context, const char* primPath)
+{
+    UsdPrim prim;
+    if (!ExportPrim(context, primPath, "RUsd_DefineSkelRoot", &prim))
+    {
+        return kFailure;
+    }
+
+    try
+    {
+        UsdSkelRoot::Define(context->stage, prim.GetPath());
+        return kSuccess;
+    }
+    RUSD_EXPORT_GUARD("Failed to define a SkelRoot")
+}
+
+int RUsd_AddSkeleton(RUsdContext* context, const char* skeletonPath, const char* jointPaths, int jointCount,
+                     const float* bindTransforms, const float* restTransforms)
+{
+    if (context == nullptr || !context->stage || jointCount <= 0 ||
+        static_cast<size_t>(jointCount) > kMaxImportJoints || bindTransforms == nullptr || restTransforms == nullptr)
+    {
+        SetError(context, "Invalid arguments for RUsd_AddSkeleton.");
+        return kFailure;
+    }
+
+    try
+    {
+        const SdfPath path(SafeString(skeletonPath));
+        const VtTokenArray joints = TokensFromLines(SafeString(jointPaths));
+        if (!path.IsAbsolutePath() || !path.IsPrimPath() || joints.size() != static_cast<size_t>(jointCount))
+        {
+            SetError(context, "RUsd_AddSkeleton: the path must be absolute and name one joint path per joint.");
+            return kFailure;
+        }
+
+        EnsureParentXforms(context->stage, path);
+        UsdSkelSkeleton skeleton = UsdSkelSkeleton::Define(context->stage, path);
+        VtMatrix4dArray bind(joints.size());
+        VtMatrix4dArray rest(joints.size());
+        for (size_t joint = 0; joint < joints.size(); ++joint)
+        {
+            bind[joint] = MatrixFromFloats(bindTransforms + 16 * joint);
+            rest[joint] = MatrixFromFloats(restTransforms + 16 * joint);
+        }
+
+        skeleton.CreateJointsAttr().Set(joints);
+        skeleton.CreateBindTransformsAttr().Set(bind);
+        skeleton.CreateRestTransformsAttr().Set(rest);
+        UsdSkelBindingAPI::Apply(skeleton.GetPrim());
+        return kSuccess;
+    }
+    RUSD_EXPORT_GUARD("Failed to add a skeleton")
+}
+
+int RUsd_BindSkinnedMesh(RUsdContext* context, const char* meshPath, const char* skeletonPath,
+                         const int* jointIndices, const float* jointWeights, int pointCount, int influences,
+                         const RUsdMatrix4x4* geomBindTransform)
+{
+    UsdPrim prim;
+    if (!ExportPrim(context, meshPath, "RUsd_BindSkinnedMesh", &prim))
+    {
+        return kFailure;
+    }
+
+    if (pointCount <= 0 || influences <= 0 || influences > kMaxImportInfluences ||
+        jointIndices == nullptr || jointWeights == nullptr)
+    {
+        SetError(context, "Invalid arguments for RUsd_BindSkinnedMesh.");
+        return kFailure;
+    }
+
+    try
+    {
+        const size_t count = static_cast<size_t>(pointCount) * static_cast<size_t>(influences);
+        VtIntArray indices(jointIndices, jointIndices + count);
+        VtFloatArray weights(jointWeights, jointWeights + count);
+        UsdSkelBindingAPI binding = UsdSkelBindingAPI::Apply(prim);
+        binding.CreateSkeletonRel().SetTargets({SdfPath(SafeString(skeletonPath))});
+        binding.CreateJointIndicesPrimvar(false, influences).Set(indices);
+        binding.CreateJointWeightsPrimvar(false, influences).Set(weights);
+        if (geomBindTransform != nullptr)
+        {
+            binding.CreateGeomBindTransformAttr().Set(ToGfMatrix(*geomBindTransform));
+        }
+
+        return kSuccess;
+    }
+    RUSD_EXPORT_GUARD("Failed to bind a skinned mesh")
+}
+
+int RUsd_AddBlendShapeFrame(RUsdContext* context, const char* meshPath, const char* shapeName, float weight,
+                            const int* pointIndices, int pointCount, const RUsdVec3* offsets,
+                            const RUsdVec3* normalOffsets)
+{
+    UsdPrim prim;
+    if (!ExportPrim(context, meshPath, "RUsd_AddBlendShapeFrame", &prim))
+    {
+        return kFailure;
+    }
+
+    if (pointCount < 0 || (pointCount > 0 && (pointIndices == nullptr || offsets == nullptr)) ||
+        !(weight > 0.0f && weight <= 1.0f))
+    {
+        SetError(context, "Invalid arguments for RUsd_AddBlendShapeFrame.");
+        return kFailure;
+    }
+
+    try
+    {
+        const TfToken name(TfMakeValidIdentifier(SafeString(shapeName)));
+        const SdfPath shapePath = prim.GetPath().AppendChild(name);
+        UsdSkelBlendShape shape = UsdSkelBlendShape::Define(context->stage, shapePath);
+        VtVec3fArray points(static_cast<size_t>(pointCount));
+        VtVec3fArray normals(normalOffsets != nullptr ? static_cast<size_t>(pointCount) : 0);
+        for (int i = 0; i < pointCount; ++i)
+        {
+            points[static_cast<size_t>(i)] = GfVec3f(offsets[i].x, offsets[i].y, offsets[i].z);
+            if (normalOffsets != nullptr)
+            {
+                normals[static_cast<size_t>(i)] = GfVec3f(normalOffsets[i].x, normalOffsets[i].y, normalOffsets[i].z);
+            }
+        }
+
+        shape.CreatePointIndicesAttr().Set(VtIntArray(pointIndices, pointIndices + pointCount));
+        if (weight >= 1.0f)
+        {
+            shape.CreateOffsetsAttr().Set(points);
+            if (normalOffsets != nullptr)
+            {
+                shape.CreateNormalOffsetsAttr().Set(normals);
+            }
+        }
+        else
+        {
+            const TfToken inbetweenName("w" + std::to_string(static_cast<int>(std::lround(weight * 1000.0f))));
+            UsdSkelInbetweenShape inbetween = shape.CreateInbetween(inbetweenName);
+            inbetween.SetWeight(weight);
+            inbetween.SetOffsets(points);
+            if (normalOffsets != nullptr)
+            {
+                inbetween.SetNormalOffsets(normals);
+            }
+        }
+
+        UsdSkelBindingAPI binding = UsdSkelBindingAPI::Apply(prim);
+        VtTokenArray names;
+        binding.GetBlendShapesAttr().Get(&names);
+        if (std::find(names.begin(), names.end(), name) == names.end())
+        {
+            names.push_back(name);
+            binding.CreateBlendShapesAttr().Set(names);
+            binding.CreateBlendShapeTargetsRel().AddTarget(shapePath);
+        }
+
+        return kSuccess;
+    }
+    RUSD_EXPORT_GUARD("Failed to add a blend shape")
+}
+
+int RUsd_SetSkeletonAnimation(RUsdContext* context, const char* skeletonPath, const char* blendShapeNames,
+                              int shapeCount, const double* times, int sampleCount, const float* jointTransforms,
+                              const float* blendShapeWeights)
+{
+    UsdPrim prim;
+    if (!ExportPrim(context, skeletonPath, "RUsd_SetSkeletonAnimation", &prim))
+    {
+        return kFailure;
+    }
+
+    const int samples = times == nullptr ? 1 : sampleCount;
+    if (samples < 1 || static_cast<size_t>(samples) > kMaxImportTrackSamples || shapeCount < 0 ||
+        jointTransforms == nullptr || (shapeCount > 0 && blendShapeWeights == nullptr))
+    {
+        SetError(context, "Invalid arguments for RUsd_SetSkeletonAnimation.");
+        return kFailure;
+    }
+
+    try
+    {
+        UsdSkelSkeleton skeleton(prim);
+        VtTokenArray joints;
+        skeleton.GetJointsAttr().Get(&joints);
+        const VtTokenArray shapes = TokensFromLines(SafeString(blendShapeNames));
+        if (joints.empty() || shapes.size() != static_cast<size_t>(shapeCount))
+        {
+            SetError(context, "RUsd_SetSkeletonAnimation: the skeleton has no joints, or the blend-shape names do not match their count.");
+            return kFailure;
+        }
+
+        const SdfPath animationPath = prim.GetPath().AppendChild(TfToken("Animation"));
+        UsdSkelAnimation animation = UsdSkelAnimation::Define(context->stage, animationPath);
+        animation.CreateJointsAttr().Set(joints);
+        if (shapeCount > 0)
+        {
+            animation.CreateBlendShapesAttr().Set(shapes);
+        }
+
+        for (int sample = 0; sample < samples; ++sample)
+        {
+            const UsdTimeCode time = times == nullptr ? UsdTimeCode::Default() : UsdTimeCode(times[sample]);
+            VtMatrix4dArray local(joints.size());
+            for (size_t joint = 0; joint < joints.size(); ++joint)
+            {
+                local[joint] = MatrixFromFloats(jointTransforms + 16 * (static_cast<size_t>(sample) * joints.size() + joint));
+            }
+
+            animation.SetTransforms(local, time);
+            if (shapeCount > 0)
+            {
+                const float* weights = blendShapeWeights + static_cast<size_t>(sample) * static_cast<size_t>(shapeCount);
+                animation.CreateBlendShapeWeightsAttr().Set(VtFloatArray(weights, weights + shapeCount), time);
+            }
+        }
+
+        UsdSkelBindingAPI::Apply(prim).CreateAnimationSourceRel().SetTargets({animationPath});
+        return kSuccess;
+    }
+    RUSD_EXPORT_GUARD("Failed to write a skeleton animation")
+}
+
+#undef RUSD_EXPORT_GUARD
+
+// ---- Stage API (API v13) ------------------------------------------------------------------------
+//
+// A stage kept open for the host to read and edit. Every call takes the context's stage as it is
+// now; reads compose through the Usd API and edits go to the stage's edit target. Values cross as
+// the type the attribute holds, checked against the held value's registered type name (never the
+// attribute's declared type: a stage can author any value under any declaration).
+
+namespace
+{
+
+template <typename TBody>
+int RunStageCall(RUsdContext* context, const char* what, TBody body)
+{
+    if (context == nullptr || !context->stage)
+    {
+        SetError(context, "USD stage context is invalid.");
+        return kFailure;
+    }
+
+    try
+    {
+        return body();
+    }
+    catch (const std::exception& exception)
+    {
+        SetError(context, MakeError(std::string("Failed to ") + what, exception));
+        return kFailure;
+    }
+    catch (...)
+    {
+        SetError(context, std::string("Failed to ") + what + ".");
+        return kFailure;
+    }
+}
+
+// An absolute prim path, or "/" (the pseudo-root) when `allowRoot`.
+bool ParseStagePath(RUsdContext* context, const char* primPath, bool allowRoot, SdfPath* out)
+{
+    const std::string text = SafeString(primPath);
+    if (allowRoot && text == "/")
+    {
+        *out = SdfPath::AbsoluteRootPath();
+        return true;
+    }
+
+    return ParseAbsolutePrimPath(context, primPath, out);
+}
+
+// The composed prim at `primPath` ("/" the pseudo-root when `allowRoot`); an error when there is none.
+bool FindStagePrim(RUsdContext* context, const char* primPath, bool allowRoot, UsdPrim* out)
+{
+    SdfPath path;
+    if (!ParseStagePath(context, primPath, allowRoot, &path))
+    {
+        return false;
+    }
+
+    *out = context->stage->GetPrimAtPath(path);
+    if (!*out)
+    {
+        SetError(context, "The stage has no prim at " + path.GetString() + ".");
+        return false;
+    }
+
+    return true;
+}
+
+bool ParsePropertyName(RUsdContext* context, const char* name, TfToken* out)
+{
+    const std::string text = SafeString(name);
+    if (!SdfPath::IsValidNamespacedIdentifier(text))
+    {
+        SetError(context, "'" + text + "' is not a valid property name.");
+        return false;
+    }
+
+    *out = TfToken(text);
+    return true;
+}
+
+// Edits through the Usd API cannot reach below an instance, and a layer whose format OpenUSD can
+// write but not edit (usdAbc's) refuses an edit by aborting, so both are turned away first.
+bool CheckEditable(RUsdContext* context, const SdfPath& path)
+{
+    const SdfLayerHandle layer = context->stage->GetEditTarget().GetLayer();
+    const SdfFileFormatConstPtr format = layer ? layer->GetFileFormat() : SdfFileFormatConstPtr();
+    if (!layer || (format && !format->SupportsEditing()))
+    {
+        SetError(context, "The edit target layer " + (layer ? "'" + layer->GetIdentifier() + "' " : std::string()) +
+            "cannot be edited; set the edit target to another layer (the session layer), or export the stage.");
+        return false;
+    }
+
+    for (SdfPath at = path; !at.IsEmpty() && at != SdfPath::AbsoluteRootPath(); at = at.GetParentPath())
+    {
+        const UsdPrim prim = context->stage->GetPrimAtPath(at);
+        if (!prim)
+        {
+            continue;
+        }
+
+        if (prim.IsInstanceProxy())
+        {
+            SetError(context, path.GetString() + " is below an instance, which is edited through its prototype "
+                "only; clear the instance's instanceable first.");
+            return false;
+        }
+
+        break;
+    }
+
+    return true;
+}
+
+bool ParseTime(RUsdContext* context, int timeKind, double time, bool writing, UsdTimeCode* out)
+{
+    switch (timeKind)
+    {
+        case RUSD_TIME_DEFAULT:
+            *out = UsdTimeCode::Default();
+            return true;
+        case RUSD_TIME_CODE:
+            if (!std::isfinite(time))
+            {
+                SetError(context, "The time code is not a finite number.");
+                return false;
+            }
+
+            *out = UsdTimeCode(time);
+            return true;
+        case RUSD_TIME_EARLIEST:
+            if (!writing)
+            {
+                *out = UsdTimeCode::EarliestTime();
+                return true;
+            }
+
+            break;
+        default:
+            break;
+    }
+
+    SetError(context, "Unknown time kind " + std::to_string(timeKind) + ".");
+    return false;
+}
+
+// The text an RUsd_* query returns, the RUsd_GetImportComposition way: a size query, then a copy.
+int ReturnText(RUsdContext* context, const std::string& text, char* buffer, int bufferCapacity, int* requiredLength)
+{
+    if (text.size() >= static_cast<size_t>(std::numeric_limits<int>::max()))
+    {
+        SetError(context, "The text is too long to return.");
+        return kFailure;
+    }
+
+    const int required = static_cast<int>(text.size()) + 1;
+    if (requiredLength != nullptr)
+    {
+        *requiredLength = required;
+    }
+
+    if (buffer == nullptr)
+    {
+        return kSuccess;
+    }
+
+    if (bufferCapacity < required)
+    {
+        SetError(context, "The text buffer is too small.");
+        return kFailure;
+    }
+
+    return CopyStringToBuffer(text, buffer, bufferCapacity);
+}
+
+// ---- Values -------------------------------------------------------------------------------------
+
+// The value type an RUSD_VALUE_* code names (an array type with RUSD_VALUE_ARRAY); invalid for an
+// unknown code.
+SdfValueTypeName PlainTypeName(int valueType)
+{
+    const bool array = (valueType & RUSD_VALUE_ARRAY) != 0;
+    switch (valueType & ~(RUSD_VALUE_ARRAY | RUSD_VALUE_RESOLVED))
+    {
+        case RUSD_VALUE_BOOL: return array ? SdfValueTypeNames->BoolArray : SdfValueTypeNames->Bool;
+        case RUSD_VALUE_UCHAR: return array ? SdfValueTypeNames->UCharArray : SdfValueTypeNames->UChar;
+        case RUSD_VALUE_INT: return array ? SdfValueTypeNames->IntArray : SdfValueTypeNames->Int;
+        case RUSD_VALUE_UINT: return array ? SdfValueTypeNames->UIntArray : SdfValueTypeNames->UInt;
+        case RUSD_VALUE_INT64: return array ? SdfValueTypeNames->Int64Array : SdfValueTypeNames->Int64;
+        case RUSD_VALUE_UINT64: return array ? SdfValueTypeNames->UInt64Array : SdfValueTypeNames->UInt64;
+        case RUSD_VALUE_HALF: return array ? SdfValueTypeNames->HalfArray : SdfValueTypeNames->Half;
+        case RUSD_VALUE_FLOAT: return array ? SdfValueTypeNames->FloatArray : SdfValueTypeNames->Float;
+        case RUSD_VALUE_DOUBLE: return array ? SdfValueTypeNames->DoubleArray : SdfValueTypeNames->Double;
+        case RUSD_VALUE_TIMECODE: return array ? SdfValueTypeNames->TimeCodeArray : SdfValueTypeNames->TimeCode;
+        case RUSD_VALUE_STRING: return array ? SdfValueTypeNames->StringArray : SdfValueTypeNames->String;
+        case RUSD_VALUE_TOKEN: return array ? SdfValueTypeNames->TokenArray : SdfValueTypeNames->Token;
+        case RUSD_VALUE_ASSET: return array ? SdfValueTypeNames->AssetArray : SdfValueTypeNames->Asset;
+        case RUSD_VALUE_INT2: return array ? SdfValueTypeNames->Int2Array : SdfValueTypeNames->Int2;
+        case RUSD_VALUE_INT3: return array ? SdfValueTypeNames->Int3Array : SdfValueTypeNames->Int3;
+        case RUSD_VALUE_INT4: return array ? SdfValueTypeNames->Int4Array : SdfValueTypeNames->Int4;
+        case RUSD_VALUE_HALF2: return array ? SdfValueTypeNames->Half2Array : SdfValueTypeNames->Half2;
+        case RUSD_VALUE_HALF3: return array ? SdfValueTypeNames->Half3Array : SdfValueTypeNames->Half3;
+        case RUSD_VALUE_HALF4: return array ? SdfValueTypeNames->Half4Array : SdfValueTypeNames->Half4;
+        case RUSD_VALUE_FLOAT2: return array ? SdfValueTypeNames->Float2Array : SdfValueTypeNames->Float2;
+        case RUSD_VALUE_FLOAT3: return array ? SdfValueTypeNames->Float3Array : SdfValueTypeNames->Float3;
+        case RUSD_VALUE_FLOAT4: return array ? SdfValueTypeNames->Float4Array : SdfValueTypeNames->Float4;
+        case RUSD_VALUE_DOUBLE2: return array ? SdfValueTypeNames->Double2Array : SdfValueTypeNames->Double2;
+        case RUSD_VALUE_DOUBLE3: return array ? SdfValueTypeNames->Double3Array : SdfValueTypeNames->Double3;
+        case RUSD_VALUE_DOUBLE4: return array ? SdfValueTypeNames->Double4Array : SdfValueTypeNames->Double4;
+        case RUSD_VALUE_QUATH: return array ? SdfValueTypeNames->QuathArray : SdfValueTypeNames->Quath;
+        case RUSD_VALUE_QUATF: return array ? SdfValueTypeNames->QuatfArray : SdfValueTypeNames->Quatf;
+        case RUSD_VALUE_QUATD: return array ? SdfValueTypeNames->QuatdArray : SdfValueTypeNames->Quatd;
+        case RUSD_VALUE_MATRIX2D: return array ? SdfValueTypeNames->Matrix2dArray : SdfValueTypeNames->Matrix2d;
+        case RUSD_VALUE_MATRIX3D: return array ? SdfValueTypeNames->Matrix3dArray : SdfValueTypeNames->Matrix3d;
+        case RUSD_VALUE_MATRIX4D: return array ? SdfValueTypeNames->Matrix4dArray : SdfValueTypeNames->Matrix4d;
+        default: return SdfValueTypeName();
+    }
+}
+
+// The RUSD_VALUE_* code for a declared type, roles ignored (point3f[] is float3[]); 0 when none.
+int ValueTypeOf(const SdfValueTypeName& typeName)
+{
+    if (!typeName)
+    {
+        return 0;
+    }
+
+    const TfType type = typeName.GetType();
+    for (int code = RUSD_VALUE_BOOL; code <= RUSD_VALUE_MATRIX4D; ++code)
+    {
+        if (PlainTypeName(code).GetType() == type)
+        {
+            return code;
+        }
+
+        if (PlainTypeName(code | RUSD_VALUE_ARRAY).GetType() == type)
+        {
+            return code | RUSD_VALUE_ARRAY;
+        }
+    }
+
+    return 0;
+}
+
+// How one element crosses: N components of type C.
+template <typename T, typename TComponent, int TCount>
+struct RawForm
+{
+    using C = TComponent;
+    static constexpr int N = TCount;
+    static_assert(sizeof(T) == sizeof(C) * N, "the type must be its components, packed");
+    static void Put(const T& value, C* out) { std::memcpy(out, &value, sizeof(T)); }
+    static T Take(const C* in)
+    {
+        T value;
+        std::memcpy(&value, in, sizeof(T));
+        return value;
+    }
+};
+
+struct BoolForm
+{
+    using C = unsigned char;
+    static constexpr int N = 1;
+    static void Put(const bool& value, C* out) { *out = value ? 1 : 0; }
+    static bool Take(const C* in) { return *in != 0; }
+};
+
+struct TimeCodeForm
+{
+    using C = double;
+    static constexpr int N = 1;
+    static void Put(const SdfTimeCode& value, C* out) { *out = value.GetValue(); }
+    static SdfTimeCode Take(const C* in) { return SdfTimeCode(*in); }
+};
+
+struct HalfForm
+{
+    using C = float;
+    static constexpr int N = 1;
+    static void Put(const GfHalf& value, C* out) { *out = static_cast<float>(value); }
+    static GfHalf Take(const C* in) { return GfHalf(*in); }
+};
+
+template <typename T, int TCount>
+struct HalfVecForm
+{
+    using C = float;
+    static constexpr int N = TCount;
+    static void Put(const T& value, C* out)
+    {
+        for (int i = 0; i < N; ++i)
+        {
+            out[i] = static_cast<float>(value[i]);
+        }
+    }
+    static T Take(const C* in)
+    {
+        T value;
+        for (int i = 0; i < N; ++i)
+        {
+            value[i] = GfHalf(in[i]);
+        }
+
+        return value;
+    }
+};
+
+// x, y, z, w: the imaginary part first, as Unity and most hosts keep a quaternion.
+template <typename T, typename TComponent>
+struct QuatForm
+{
+    using C = TComponent;
+    static constexpr int N = 4;
+    static void Put(const T& value, C* out)
+    {
+        const auto& imaginary = value.GetImaginary();
+        out[0] = static_cast<C>(imaginary[0]);
+        out[1] = static_cast<C>(imaginary[1]);
+        out[2] = static_cast<C>(imaginary[2]);
+        out[3] = static_cast<C>(value.GetReal());
+    }
+    static T Take(const C* in)
+    {
+        using Real = typename T::ScalarType;
+        using Imaginary = typename T::ImaginaryType;
+        return T(Real(in[3]), Imaginary(Real(in[0]), Real(in[1]), Real(in[2])));
+    }
+};
+
+using FormUChar = RawForm<unsigned char, unsigned char, 1>;
+using FormInt = RawForm<int, int, 1>;
+using FormUInt = RawForm<unsigned int, unsigned int, 1>;
+using FormInt64 = RawForm<int64_t, int64_t, 1>;
+using FormUInt64 = RawForm<uint64_t, uint64_t, 1>;
+using FormFloat = RawForm<float, float, 1>;
+using FormDouble = RawForm<double, double, 1>;
+using FormInt2 = RawForm<GfVec2i, int, 2>;
+using FormInt3 = RawForm<GfVec3i, int, 3>;
+using FormInt4 = RawForm<GfVec4i, int, 4>;
+using FormHalf2 = HalfVecForm<GfVec2h, 2>;
+using FormHalf3 = HalfVecForm<GfVec3h, 3>;
+using FormHalf4 = HalfVecForm<GfVec4h, 4>;
+using FormFloat2 = RawForm<GfVec2f, float, 2>;
+using FormFloat3 = RawForm<GfVec3f, float, 3>;
+using FormFloat4 = RawForm<GfVec4f, float, 4>;
+using FormDouble2 = RawForm<GfVec2d, double, 2>;
+using FormDouble3 = RawForm<GfVec3d, double, 3>;
+using FormDouble4 = RawForm<GfVec4d, double, 4>;
+using FormQuath = QuatForm<GfQuath, float>;
+using FormQuatf = QuatForm<GfQuatf, float>;
+using FormQuatd = QuatForm<GfQuatd, double>;
+using FormMatrix2d = RawForm<GfMatrix2d, double, 4>;
+using FormMatrix3d = RawForm<GfMatrix3d, double, 9>;
+using FormMatrix4d = RawForm<GfMatrix4d, double, 16>;
+
+// code, held type, form
+#define RUSD_NUMERIC_FORMS(X) \
+    X(RUSD_VALUE_BOOL, bool, BoolForm) \
+    X(RUSD_VALUE_UCHAR, unsigned char, FormUChar) \
+    X(RUSD_VALUE_INT, int, FormInt) \
+    X(RUSD_VALUE_UINT, unsigned int, FormUInt) \
+    X(RUSD_VALUE_INT64, int64_t, FormInt64) \
+    X(RUSD_VALUE_UINT64, uint64_t, FormUInt64) \
+    X(RUSD_VALUE_HALF, GfHalf, HalfForm) \
+    X(RUSD_VALUE_FLOAT, float, FormFloat) \
+    X(RUSD_VALUE_DOUBLE, double, FormDouble) \
+    X(RUSD_VALUE_TIMECODE, SdfTimeCode, TimeCodeForm) \
+    X(RUSD_VALUE_INT2, GfVec2i, FormInt2) \
+    X(RUSD_VALUE_INT3, GfVec3i, FormInt3) \
+    X(RUSD_VALUE_INT4, GfVec4i, FormInt4) \
+    X(RUSD_VALUE_HALF2, GfVec2h, FormHalf2) \
+    X(RUSD_VALUE_HALF3, GfVec3h, FormHalf3) \
+    X(RUSD_VALUE_HALF4, GfVec4h, FormHalf4) \
+    X(RUSD_VALUE_FLOAT2, GfVec2f, FormFloat2) \
+    X(RUSD_VALUE_FLOAT3, GfVec3f, FormFloat3) \
+    X(RUSD_VALUE_FLOAT4, GfVec4f, FormFloat4) \
+    X(RUSD_VALUE_DOUBLE2, GfVec2d, FormDouble2) \
+    X(RUSD_VALUE_DOUBLE3, GfVec3d, FormDouble3) \
+    X(RUSD_VALUE_DOUBLE4, GfVec4d, FormDouble4) \
+    X(RUSD_VALUE_QUATH, GfQuath, FormQuath) \
+    X(RUSD_VALUE_QUATF, GfQuatf, FormQuatf) \
+    X(RUSD_VALUE_QUATD, GfQuatd, FormQuatd) \
+    X(RUSD_VALUE_MATRIX2D, GfMatrix2d, FormMatrix2d) \
+    X(RUSD_VALUE_MATRIX3D, GfMatrix3d, FormMatrix3d) \
+    X(RUSD_VALUE_MATRIX4D, GfMatrix4d, FormMatrix4d)
+
+// Copies a held value of type T (or VtArray<T>) out through Form. With `out` null only the size.
+template <typename T, typename Form>
+long long PutValue(const VtValue& value, bool array, void* out, long long* count)
+{
+    constexpr long long element = static_cast<long long>(sizeof(typename Form::C)) * Form::N;
+    typename Form::C* to = static_cast<typename Form::C*>(out);
+    if (array)
+    {
+        const VtArray<T>& items = value.UncheckedGet<VtArray<T>>();
+        *count = static_cast<long long>(items.size());
+        if (to != nullptr)
+        {
+            for (const T& item : items)
+            {
+                Form::Put(item, to);
+                to += Form::N;
+            }
+        }
+
+        return element * static_cast<long long>(items.size());
+    }
+
+    *count = 1;
+    if (to != nullptr)
+    {
+        Form::Put(value.UncheckedGet<T>(), to);
+    }
+
+    return element;
+}
+
+// Writes data crossing in through Form as T (or VtArray<T>) at `at`. Typed, not through a VtValue:
+// a VtValue built in this plugin can fail OpenUSD's own type check (see VtValueHoldsType), while
+// UsdAttribute::Set<T> is what the export side writes everything with.
+template <typename T, typename Form>
+bool SetTyped(const UsdAttribute& attribute, UsdTimeCode at, const void* data, bool array, long long count,
+              long long bytes, std::string* error)
+{
+    constexpr long long element = static_cast<long long>(sizeof(typename Form::C)) * Form::N;
+    if (!array && count != 1)
+    {
+        *error = "a single value has an element count of 1";
+        return false;
+    }
+
+    if (count < 0 || count > std::numeric_limits<long long>::max() / element || count * element != bytes ||
+        (count > 0 && data == nullptr))
+    {
+        *error = "the data is not " + std::to_string(count) + " elements of " + std::to_string(element) + " bytes";
+        return false;
+    }
+
+    const typename Form::C* from = static_cast<const typename Form::C*>(data);
+    if (!array)
+    {
+        return attribute.Set(Form::Take(from), at);
+    }
+
+    VtArray<T> items(static_cast<size_t>(count));
+    T* write = items.data();
+    for (long long i = 0; i < count; ++i)
+    {
+        write[i] = Form::Take(from);
+        from += Form::N;
+    }
+
+    return attribute.Set(items, at);
+}
+
+// A string as it crosses: cut at its first NUL, which would otherwise end it early on the far side.
+std::string CrossingText(const std::string& text)
+{
+    return std::string(text.c_str());
+}
+
+std::string AssetText(const SdfAssetPath& asset, bool resolved)
+{
+    return CrossingText(resolved ? asset.GetResolvedPath() : asset.GetAssetPath());
+}
+
+long long PutStrings(const std::vector<std::string>& items, void* out)
+{
+    long long bytes = 0;
+    char* to = static_cast<char*>(out);
+    for (const std::string& item : items)
+    {
+        const size_t length = item.size() + 1;
+        if (to != nullptr)
+        {
+            std::memcpy(to, item.c_str(), length);
+            to += length;
+        }
+
+        bytes += static_cast<long long>(length);
+    }
+
+    return bytes;
+}
+
+// The texts of a string, token or asset value (one, or an array's), as they cross.
+std::vector<std::string> TextsOf(const VtValue& value, int valueType)
+{
+    const bool array = (valueType & RUSD_VALUE_ARRAY) != 0;
+    const bool resolved = (valueType & RUSD_VALUE_RESOLVED) != 0;
+    std::vector<std::string> texts;
+    switch (valueType & ~(RUSD_VALUE_ARRAY | RUSD_VALUE_RESOLVED))
+    {
+        case RUSD_VALUE_STRING:
+            if (array)
+            {
+                for (const std::string& item : value.UncheckedGet<VtStringArray>())
+                {
+                    texts.push_back(CrossingText(item));
+                }
+            }
+            else
+            {
+                texts.push_back(CrossingText(value.UncheckedGet<std::string>()));
+            }
+
+            break;
+        case RUSD_VALUE_TOKEN:
+            if (array)
+            {
+                for (const TfToken& item : value.UncheckedGet<VtTokenArray>())
+                {
+                    texts.push_back(CrossingText(item.GetString()));
+                }
+            }
+            else
+            {
+                texts.push_back(CrossingText(value.UncheckedGet<TfToken>().GetString()));
+            }
+
+            break;
+        case RUSD_VALUE_ASSET:
+            if (array)
+            {
+                for (const SdfAssetPath& item : value.UncheckedGet<VtArray<SdfAssetPath>>())
+                {
+                    texts.push_back(AssetText(item, resolved));
+                }
+            }
+            else
+            {
+                texts.push_back(AssetText(value.UncheckedGet<SdfAssetPath>(), resolved));
+            }
+
+            break;
+        default:
+            break;
+    }
+
+    return texts;
+}
+
+bool IsTextType(int valueType)
+{
+    const int plain = valueType & ~(RUSD_VALUE_ARRAY | RUSD_VALUE_RESOLVED);
+    return plain == RUSD_VALUE_STRING || plain == RUSD_VALUE_TOKEN || plain == RUSD_VALUE_ASSET;
+}
+
+// Copies a value already checked to hold `valueType` out; with `out` null only the size.
+long long PutAnyValue(const VtValue& value, int valueType, void* out, long long* count)
+{
+    if (IsTextType(valueType))
+    {
+        const std::vector<std::string> texts = TextsOf(value, valueType);
+        *count = static_cast<long long>(texts.size());
+        return PutStrings(texts, out);
+    }
+
+    const bool array = (valueType & RUSD_VALUE_ARRAY) != 0;
+    switch (valueType & ~RUSD_VALUE_ARRAY)
+    {
+#define RUSD_PUT_CASE(code, T, Form) case code: return PutValue<T, Form>(value, array, out, count);
+        RUSD_NUMERIC_FORMS(RUSD_PUT_CASE)
+#undef RUSD_PUT_CASE
+        default:
+            *count = 0;
+            return 0;
+    }
+}
+
+// NUL-terminated strings back to back, exactly `count` of them.
+bool SplitStrings(const void* data, long long count, long long bytes, std::vector<std::string>* out, std::string* error)
+{
+    if (count < 0 || bytes < 0 || (bytes > 0 && data == nullptr))
+    {
+        *error = "the string data is malformed";
+        return false;
+    }
+
+    const char* from = static_cast<const char*>(data);
+    const char* end = from + bytes;
+    while (from < end)
+    {
+        const void* nul = std::memchr(from, '\0', static_cast<size_t>(end - from));
+        if (nul == nullptr)
+        {
+            *error = "the last string is not NUL-terminated";
+            return false;
+        }
+
+        const char* stop = static_cast<const char*>(nul);
+        out->emplace_back(from, stop);
+        from = stop + 1;
+    }
+
+    if (static_cast<long long>(out->size()) != count)
+    {
+        *error = "the data holds " + std::to_string(out->size()) + " strings, not " + std::to_string(count);
+        return false;
+    }
+
+    return true;
+}
+
+// Writes a value crossing in as `valueType`; false with `error` set when the data is malformed, and
+// false with `error` empty when OpenUSD refuses it.
+bool SetAnyValue(const UsdAttribute& attribute, UsdTimeCode at, int valueType, const void* data, long long count,
+                 long long bytes, std::string* error)
+{
+    const bool array = (valueType & RUSD_VALUE_ARRAY) != 0;
+    const int plain = valueType & ~RUSD_VALUE_ARRAY;
+    if (IsTextType(valueType))
+    {
+        std::vector<std::string> texts;
+        if (!SplitStrings(data, count, bytes, &texts, error))
+        {
+            return false;
+        }
+
+        if (!array && texts.size() != 1)
+        {
+            *error = "a single value has an element count of 1";
+            return false;
+        }
+
+        if (plain == RUSD_VALUE_STRING)
+        {
+            return array ? attribute.Set(VtStringArray(texts.begin(), texts.end()), at) : attribute.Set(texts[0], at);
+        }
+
+        if (plain == RUSD_VALUE_TOKEN)
+        {
+            VtTokenArray tokens;
+            for (const std::string& text : texts)
+            {
+                tokens.push_back(TfToken(text));
+            }
+
+            return array ? attribute.Set(tokens, at) : attribute.Set(tokens[0], at);
+        }
+
+        VtArray<SdfAssetPath> assets;
+        for (const std::string& text : texts)
+        {
+            assets.push_back(SdfAssetPath(text));
+        }
+
+        return array ? attribute.Set(assets, at) : attribute.Set(assets[0], at);
+    }
+
+    switch (plain)
+    {
+#define RUSD_SET_CASE(code, T, Form) case code: return SetTyped<T, Form>(attribute, at, data, array, count, bytes, error);
+        RUSD_NUMERIC_FORMS(RUSD_SET_CASE)
+#undef RUSD_SET_CASE
+        default:
+            *error = "unknown value type " + std::to_string(valueType);
+            return false;
+    }
+}
+
+// A value's type, said as a stage would spell it ("float3[]"), for errors.
+std::string DescribeHeldType(const VtValue& value)
+{
+    const SdfValueTypeName name = SdfSchema::GetInstance().FindType(value);
+    return name ? name.GetAsToken().GetString() : value.GetTypeName();
+}
+
+bool FindAttribute(RUsdContext* context, const char* primPath, const char* name, UsdAttribute* out)
+{
+    UsdPrim prim;
+    TfToken property;
+    if (!FindStagePrim(context, primPath, false, &prim) || !ParsePropertyName(context, name, &property))
+    {
+        return false;
+    }
+
+    *out = prim.GetAttribute(property);
+    if (!*out)
+    {
+        SetError(context, prim.GetPath().GetString() + " has no attribute '" + property.GetString() + "'.");
+        return false;
+    }
+
+    return true;
+}
+
+// ---- Changes and rereads ------------------------------------------------------------------------
+
+bool IsPrototypeRoot(const SdfPath& root)
+{
+    return TfStringStartsWith(root.GetName(), "__Prototype");
+}
+
+SdfPath RootPrimOf(const SdfPath& path)
+{
+    SdfPath root = path;
+    while (root.GetPathElementCount() > 1)
+    {
+        root = root.GetParentPath();
+    }
+
+    return root;
+}
+
+// RUSD_QUERY_CHANGES: the changed prims, each one in an instance prototype given as the instances
+// that prototype serves (which may sit in another prototype, whose instances are then given in
+// turn). A prototype that is gone served instances that were recomposed themselves.
+std::string DescribeChanges(RUsdContext* context)
+{
+    std::set<SdfPath> changed;
+    std::vector<SdfPath> pending(context->changedPaths.begin(), context->changedPaths.end());
+    for (int round = 0; round < 16 && !pending.empty(); ++round)
+    {
+        std::vector<SdfPath> next;
+        for (const SdfPath& path : pending)
+        {
+            if (path.IsEmpty() || path == SdfPath::AbsoluteRootPath())
+            {
+                changed.insert(SdfPath::AbsoluteRootPath());
+                continue;
+            }
+
+            const SdfPath root = RootPrimOf(path);
+            if (!IsPrototypeRoot(root))
+            {
+                changed.insert(path);
+                continue;
+            }
+
+            const UsdPrim prototype = context->stage->GetPrimAtPath(root);
+            if (prototype && prototype.IsPrototype())
+            {
+                for (const UsdPrim& instance : prototype.GetInstances())
+                {
+                    next.push_back(instance.GetPath());
+                }
+            }
+        }
+
+        pending.swap(next);
+    }
+
+    std::string text;
+    for (const SdfPath& path : changed)
+    {
+        text += path.GetString();
+        text += '\n';
+    }
+
+    return text;
+}
+
+// RUSD_QUERY_REBUILD_ROOT: see the header.
+std::string RebuildRoot(RUsdContext* context, const SdfPath& changed)
+{
+    SdfPath path = changed.GetPrimPath();
+    if (path.IsEmpty() || !path.IsAbsolutePath() || path == SdfPath::AbsoluteRootPath() ||
+        IsPrototypeRoot(RootPrimOf(path)))
+    {
+        return std::string();
+    }
+
+    // A removed prim is widened from the nearest ancestor that still composes.
+    UsdPrim existing = context->stage->GetPrimAtPath(path);
+    for (SdfPath at = path; !existing && at.GetPathElementCount() > 1;)
+    {
+        at = at.GetParentPath();
+        existing = context->stage->GetPrimAtPath(at);
+    }
+
+    // A geometry subset belongs to its mesh.
+    while (existing && existing.IsA<UsdGeomSubset>())
+    {
+        existing = existing.GetParent();
+        path = existing.GetPath();
+    }
+
+    for (UsdPrim at = existing; at && !at.IsPseudoRoot(); at = at.GetParent())
+    {
+        // Shading and skeleton animation reach the prims bound to them, wherever those are.
+        if (at.IsA<UsdShadeNodeGraph>() || at.IsA<UsdShadeShader>() || at.IsA<UsdSkelAnimation>())
+        {
+            return std::string();
+        }
+
+        // A skeleton binds, and an instancer copies, across its whole subtree.
+        if (at.IsA<UsdSkelRoot>() || at.IsA<UsdGeomPointInstancer>())
+        {
+            path = at.GetPath();
+        }
+    }
+
+    return path.GetString();
+}
+
+// The first opinion a layer holds on a prim brings `over` specs for the prim and its ancestors with
+// it, and OpenUSD resyncs the topmost new one: a variant switch on one prim would be recorded as a
+// change to its parent's whole subtree. Those specs are inert, so they are made first and what
+// they record is dropped, leaving the edit's own change.
+void EnsureSpecQuietly(RUsdContext* context, const SdfPath& path)
+{
+    const UsdEditTarget& target = context->stage->GetEditTarget();
+    const SdfLayerHandle layer = target.GetLayer();
+    const SdfPath specPath = target.MapToSpecPath(path);
+    if (!layer || specPath.IsEmpty() || specPath.ContainsPrimVariantSelection() || layer->GetPrimAtPath(specPath))
+    {
+        return;
+    }
+
+    const std::set<SdfPath> before = context->changedPaths;
+    SdfCreatePrimInLayer(layer, specPath);
+    context->changedPaths = before;
+}
+
+void ResetImportTables(RUsdContext* context)
+{
+    std::vector<RUsdContext::ImportedMaterial>().swap(context->importedMaterials);
+    std::vector<RUsdContext::ImportedMesh>().swap(context->importedMeshes);
+    std::vector<RUsdContext::ImportedNode>().swap(context->importedNodes);
+    std::vector<RUsdContext::ImportedNodeTrack>().swap(context->importedNodeTracks);
+    std::vector<RUsdContext::ImportedSkeleton>().swap(context->importedSkeletons);
+    std::vector<RUsdContext::ImportedInstancedMesh>().swap(context->importedInstancedMeshes);
+    std::vector<RUsdContext::ImportedLight>().swap(context->importedLights);
+    std::vector<RUsdImportCamera>().swap(context->importedCameras);
+    std::vector<RUsdContext::ImportedAudio>().swap(context->importedAudio);
+    std::unordered_map<std::string, RUsdContext::MaterialCacheEntry>().swap(context->importedMaterialCache);
+    std::unordered_map<std::string, std::string>().swap(context->assetResolutions);
+    std::unordered_map<std::string, std::string>().swap(context->assetColorSpaces);
+    std::vector<std::string>().swap(context->remoteRequests);
+    context->animationValues = 0;
+    context->skippedNodes = 0;
+    context->firstSkippedNode.clear();
+    context->skippedMeshes = 0;
+    context->skippedPlacements = 0;
+    context->importWarningCount = 0;
+    {
+        std::lock_guard<std::mutex> lock(context->diagnosticsMutex);
+        context->diagnostics.clear();
+    }
+    context->compositionReport.clear();
+    context->compositionReportBuilt = false;
+    context->physics.reset();
+}
+
+} // namespace
+
+int RUsd_CreateStage(const char* path, int inMemory, RUsdContext** outContext)
+{
+    if (outContext == nullptr)
+    {
+        return kFailure;
+    }
+
+    *outContext = nullptr;
+    if (!TbbRuntimeIsUsable())
+    {
+        return kFailure;
+    }
+
+    std::unique_ptr<RUsdContext> context(new RUsdContext());
+    try
+    {
+        const std::string output = SafeString(path);
+        if (inMemory != 0)
+        {
+            context->stage = UsdStage::CreateInMemory();
+        }
+        else if (output.empty())
+        {
+            SetError(context.get(), "The stage path is empty.");
+            *outContext = context.release();
+            return kFailure;
+        }
+        else
+        {
+            // A format OpenUSD writes but cannot edit (usdAbc) is built in memory and exported on save.
+            const SdfFileFormatConstPtr format = SdfFileFormat::FindByExtension(output);
+            if (format && format->SupportsWriting() && !format->SupportsEditing())
+            {
+                context->stage = UsdStage::CreateInMemory();
+                context->exportTo = output;
+            }
+            else
+            {
+                context->stage = UsdStage::CreateNew(output);
+            }
+        }
+
+        if (!context->stage)
+        {
+            SetError(context.get(), "OpenUSD could not create a stage at '" + output + "'.");
+            *outContext = context.release();
+            return kFailure;
+        }
+
+        context->changeListener.reset(new RUsdChangeListener(context->stage, &context->changedPaths));
+        *outContext = context.release();
+        return kSuccess;
+    }
+    catch (const std::exception& exception)
+    {
+        SetError(context.get(), MakeError("Failed to create a USD stage", exception));
+    }
+    catch (...)
+    {
+        SetError(context.get(), "Failed to create a USD stage.");
+    }
+
+    *outContext = context.release();
+    return kFailure;
+}
+
+int RUsd_SaveStage(RUsdContext* context)
+{
+    return RunStageCall(context, "save the stage", [&]() {
+        if (!context->exportTo.empty())
+        {
+            if (!context->stage->Export(context->exportTo))
+            {
+                SetError(context, "OpenUSD could not write '" + context->exportTo + "'.");
+                return kFailure;
+            }
+
+            return kSuccess;
+        }
+
+        if (context->stage->GetRootLayer()->IsAnonymous())
+        {
+            SetError(context, "An in-memory stage has no file to save to; export it instead.");
+            return kFailure;
+        }
+
+        context->stage->Save();
+        const SdfLayerHandle session = context->stage->GetSessionLayer();
+        for (const SdfLayerHandle& layer : context->stage->GetUsedLayers())
+        {
+            if (layer && layer != session && !layer->IsAnonymous() && layer->IsDirty())
+            {
+                SetError(context, "OpenUSD could not save '" + layer->GetIdentifier() + "'.");
+                return kFailure;
+            }
+        }
+
+        return kSuccess;
+    });
+}
+
+int RUsd_ExportStage(RUsdContext* context, const char* path, int flatten)
+{
+    return RunStageCall(context, "export the stage", [&]() {
+        const std::string output = SafeString(path);
+        if (output.empty())
+        {
+            SetError(context, "The export path is empty.");
+            return kFailure;
+        }
+
+        const bool written = flatten != 0 ? context->stage->Export(output)
+                                          : context->stage->GetRootLayer()->Export(output);
+        if (!written)
+        {
+            SetError(context, "OpenUSD could not write '" + output + "'.");
+            return kFailure;
+        }
+
+        return kSuccess;
+    });
+}
+
+int RUsd_ReloadStage(RUsdContext* context)
+{
+    return RunStageCall(context, "reload the stage", [&]() {
+        context->stage->Reload();
+        return kSuccess;
+    });
+}
+
+int RUsd_GetStageInfo(RUsdContext* context, RUsdStageInfo* info)
+{
+    return RunStageCall(context, "read the stage metadata", [&]() {
+        if (info == nullptr || info->structSize < static_cast<int>(sizeof(RUsdStageInfo)))
+        {
+            SetError(context, "RUsdStageInfo is null, or its structSize is smaller than this plugin's.");
+            return kFailure;
+        }
+
+        const UsdStageRefPtr& stage = context->stage;
+        info->hasTimeRange = stage->HasAuthoredTimeCodeRange() ? 1 : 0;
+        info->startTimeCode = stage->GetStartTimeCode();
+        info->endTimeCode = stage->GetEndTimeCode();
+        info->timeCodesPerSecond = stage->GetTimeCodesPerSecond();
+        info->framesPerSecond = stage->GetFramesPerSecond();
+        info->metersPerUnit = UsdGeomGetStageMetersPerUnit(stage);
+        info->upAxis = UsdGeomGetStageUpAxis(stage) == UsdGeomTokens->z ? 2 : 1;
+        info->dirty = stage->GetSessionLayer()->IsDirty() ? 1 : 0;
+        for (const SdfLayerHandle& layer : stage->GetUsedLayers())
+        {
+            if (layer && layer->IsDirty())
+            {
+                info->dirty = 1;
+            }
+        }
+
+        return kSuccess;
+    });
+}
+
+int RUsd_SetStageMetadata(RUsdContext* context, int field, double value)
+{
+    return RunStageCall(context, "set stage metadata", [&]() {
+        if (!CheckEditable(context, SdfPath::AbsoluteRootPath()))
+        {
+            return kFailure;
+        }
+
+        if (!std::isfinite(value))
+        {
+            SetError(context, "The metadata value is not a finite number.");
+            return kFailure;
+        }
+
+        const UsdStageRefPtr& stage = context->stage;
+        bool written = true;
+        switch (field)
+        {
+            case RUSD_STAGE_START_TIME_CODE:
+                stage->SetStartTimeCode(value);
+                break;
+            case RUSD_STAGE_END_TIME_CODE:
+                stage->SetEndTimeCode(value);
+                break;
+            case RUSD_STAGE_TIME_CODES_PER_SECOND:
+            case RUSD_STAGE_FRAMES_PER_SECOND:
+                if (value <= 0.0)
+                {
+                    SetError(context, "A rate must be above 0.");
+                    return kFailure;
+                }
+
+                if (field == RUSD_STAGE_TIME_CODES_PER_SECOND)
+                {
+                    stage->SetTimeCodesPerSecond(value);
+                }
+                else
+                {
+                    stage->SetFramesPerSecond(value);
+                }
+
+                break;
+            case RUSD_STAGE_METERS_PER_UNIT:
+                if (value <= 0.0)
+                {
+                    SetError(context, "metersPerUnit must be above 0.");
+                    return kFailure;
+                }
+
+                written = UsdGeomSetStageMetersPerUnit(stage, value);
+                break;
+            case RUSD_STAGE_UP_AXIS:
+                if (value != 1.0 && value != 2.0)
+                {
+                    SetError(context, "The up axis is 1 (Y) or 2 (Z).");
+                    return kFailure;
+                }
+
+                written = UsdGeomSetStageUpAxis(stage, value == 2.0 ? UsdGeomTokens->z : UsdGeomTokens->y);
+                break;
+            default:
+                SetError(context, "Unknown stage metadata field " + std::to_string(field) + ".");
+                return kFailure;
+        }
+
+        if (!written)
+        {
+            SetError(context, "OpenUSD refused the stage metadata; the edit target must be the root or session layer.");
+            return kFailure;
+        }
+
+        return kSuccess;
+    });
+}
+
+int RUsd_SetEditTarget(
+    RUsdContext* context,
+    int target,
+    const char* layer,
+    const char* variantPrimPath,
+    const char* variantSet,
+    const char* variant)
+{
+    return RunStageCall(context, "set the edit target", [&]() {
+        const UsdStageRefPtr& stage = context->stage;
+        SdfLayerHandle chosen;
+        switch (target)
+        {
+            case RUSD_EDIT_TARGET_ROOT:
+                chosen = stage->GetRootLayer();
+                break;
+            case RUSD_EDIT_TARGET_SESSION:
+                chosen = stage->GetSessionLayer();
+                break;
+            case RUSD_EDIT_TARGET_LAYER:
+            {
+                const std::string wanted = SafeString(layer);
+                for (const SdfLayerHandle& candidate : stage->GetLayerStack(false))
+                {
+                    if (candidate && !wanted.empty() &&
+                        (candidate->GetIdentifier() == wanted || candidate->GetRealPath() == wanted))
+                    {
+                        chosen = candidate;
+                        break;
+                    }
+                }
+
+                if (!chosen)
+                {
+                    SetError(context, "'" + wanted + "' is not a layer of the stage's root layer stack.");
+                    return kFailure;
+                }
+
+                break;
+            }
+            default:
+                SetError(context, "Unknown edit target " + std::to_string(target) + ".");
+                return kFailure;
+        }
+
+        const std::string primText = SafeString(variantPrimPath);
+        const std::string setName = SafeString(variantSet);
+        const std::string variantName = SafeString(variant);
+        if (primText.empty() && setName.empty() && variantName.empty())
+        {
+            stage->SetEditTarget(stage->GetEditTargetForLocalLayer(chosen));
+            return kSuccess;
+        }
+
+        UsdPrim prim;
+        if (setName.empty() || variantName.empty() || !FindStagePrim(context, variantPrimPath, false, &prim))
+        {
+            if (setName.empty() || variantName.empty())
+            {
+                SetError(context, "A variant edit target names a prim, a variant set and a variant.");
+            }
+
+            return kFailure;
+        }
+
+        if (prim.IsInstanceProxy() || !prim.GetVariantSets().HasVariantSet(setName) ||
+            !prim.GetVariantSet(setName).HasAuthoredVariant(variantName))
+        {
+            SetError(context, prim.GetPath().GetString() + " has no variant " + setName + "=" + variantName + " to edit.");
+            return kFailure;
+        }
+
+        // OpenUSD makes specs inside a variant only while the prim composes it.
+        UsdVariantSet set = prim.GetVariantSet(setName);
+        if (set.GetVariantSelection() != variantName)
+        {
+            SetError(context, prim.GetPath().GetString() + " composes " + setName + "=" + set.GetVariantSelection() +
+                "; select " + variantName + " before editing inside it.");
+            return kFailure;
+        }
+
+        stage->SetEditTarget(set.GetVariantEditTarget(chosen));
+        return kSuccess;
+    });
+}
+
+int RUsd_GetPrimInfo(RUsdContext* context, const char* primPath, int* flags, int* specifier)
+{
+    return RunStageCall(context, "look up a prim", [&]() {
+        SdfPath path;
+        if (flags == nullptr || specifier == nullptr || !ParseStagePath(context, primPath, false, &path))
+        {
+            if (flags == nullptr || specifier == nullptr)
+            {
+                SetError(context, "The prim info outputs are null.");
+            }
+
+            return kFailure;
+        }
+
+        *flags = 0;
+        *specifier = -1;
+        const UsdPrim prim = context->stage->GetPrimAtPath(path);
+        if (!prim)
+        {
+            return kSuccess;
+        }
+
+        int bits = RUSD_PRIM_VALID;
+        bits |= prim.IsActive() ? RUSD_PRIM_ACTIVE : 0;
+        bits |= prim.IsDefined() ? RUSD_PRIM_DEFINED : 0;
+        bits |= prim.IsAbstract() ? RUSD_PRIM_ABSTRACT : 0;
+        bits |= prim.IsLoaded() ? RUSD_PRIM_LOADED : 0;
+        bits |= prim.HasAuthoredPayloads() ? RUSD_PRIM_HAS_PAYLOAD : 0;
+        bits |= prim.IsInstance() ? RUSD_PRIM_INSTANCE : 0;
+        bits |= prim.IsInstanceProxy() ? RUSD_PRIM_INSTANCE_PROXY : 0;
+        bits |= prim.HasVariantSets() ? RUSD_PRIM_VARIANT_SETS : 0;
+        bits |= prim.IsModel() ? RUSD_PRIM_MODEL : 0;
+        bits |= prim.HasAuthoredReferences() ? RUSD_PRIM_HAS_REFERENCES : 0;
+        *flags = bits;
+        switch (prim.GetSpecifier())
+        {
+            case SdfSpecifierDef: *specifier = RUSD_SPECIFIER_DEF; break;
+            case SdfSpecifierOver: *specifier = RUSD_SPECIFIER_OVER; break;
+            case SdfSpecifierClass: *specifier = RUSD_SPECIFIER_CLASS; break;
+            default: break;
+        }
+
+        return kSuccess;
+    });
+}
+
+int RUsd_QueryText(
+    RUsdContext* context,
+    int query,
+    const char* primPath,
+    const char* name,
+    char* buffer,
+    int bufferCapacity,
+    int* requiredLength)
+{
+    return RunStageCall(context, "query the stage", [&]() {
+        const UsdStageRefPtr& stage = context->stage;
+        std::string text;
+        const auto line = [&text](const std::string& item) {
+            text += item;
+            text += '\n';
+        };
+
+        switch (query)
+        {
+            case RUSD_QUERY_DEFAULT_PRIM:
+            {
+                const UsdPrim defaultPrim = stage->GetDefaultPrim();
+                text = defaultPrim ? defaultPrim.GetPath().GetString() : std::string();
+                return ReturnText(context, text, buffer, bufferCapacity, requiredLength);
+            }
+            case RUSD_QUERY_LAYERS:
+                for (const SdfLayerHandle& layer : stage->GetLayerStack(true))
+                {
+                    if (layer)
+                    {
+                        line(layer->GetIdentifier());
+                    }
+                }
+
+                return ReturnText(context, text, buffer, bufferCapacity, requiredLength);
+            case RUSD_QUERY_CHANGES:
+            {
+                text = DescribeChanges(context);
+                const int result = ReturnText(context, text, buffer, bufferCapacity, requiredLength);
+                if (result == kSuccess && buffer != nullptr)
+                {
+                    context->changedPaths.clear();
+                }
+
+                return result;
+            }
+            case RUSD_QUERY_REBUILD_ROOT:
+            {
+                SdfPath path;
+                if (!ParseStagePath(context, primPath, true, &path))
+                {
+                    return kFailure;
+                }
+
+                return ReturnText(context, RebuildRoot(context, path), buffer, bufferCapacity, requiredLength);
+            }
+            default:
+                break;
+        }
+
+        SdfPath path;
+        if (!ParseStagePath(context, primPath, true, &path))
+        {
+            return kFailure;
+        }
+
+        const UsdPrim prim = stage->GetPrimAtPath(path);
+        const std::string field = SafeString(name);
+        if (prim)
+        {
+            switch (query)
+            {
+                case RUSD_QUERY_CHILDREN:
+                case RUSD_QUERY_ALL_CHILDREN:
+                {
+                    const Usd_PrimFlagsPredicate predicate = query == RUSD_QUERY_CHILDREN
+                        ? UsdTraverseInstanceProxies(UsdPrimDefaultPredicate)
+                        : UsdTraverseInstanceProxies(UsdPrimAllPrimsPredicate);
+                    for (const UsdPrim& child : prim.GetFilteredChildren(predicate))
+                    {
+                        line(child.GetName().GetString());
+                    }
+
+                    break;
+                }
+                case RUSD_QUERY_TYPE_NAME:
+                    text = prim.GetTypeName().GetString();
+                    break;
+                case RUSD_QUERY_PROPERTIES:
+                    for (const UsdProperty& property : prim.GetProperties())
+                    {
+                        if (const UsdAttribute attribute = property.As<UsdAttribute>())
+                        {
+                            line(property.GetName().GetString() + "\ta\t" + attribute.GetTypeName().GetAsToken().GetString());
+                        }
+                        else if (property.Is<UsdRelationship>())
+                        {
+                            line(property.GetName().GetString() + "\tr\t");
+                        }
+                    }
+
+                    break;
+                case RUSD_QUERY_VARIANT_SETS:
+                {
+                    const UsdVariantSets sets = prim.GetVariantSets();
+                    for (const std::string& setName : sets.GetNames())
+                    {
+                        const UsdVariantSet set = sets.GetVariantSet(setName);
+                        std::string record = setName + "\t" + set.GetVariantSelection();
+                        for (const std::string& variantName : set.GetVariantNames())
+                        {
+                            record += "\t" + variantName;
+                        }
+
+                        line(record);
+                    }
+
+                    break;
+                }
+                case RUSD_QUERY_TARGETS:
+                    if (SdfPath::IsValidNamespacedIdentifier(field))
+                    {
+                        if (const UsdRelationship relationship = prim.GetRelationship(TfToken(field)))
+                        {
+                            SdfPathVector targets;
+                            relationship.GetForwardedTargets(&targets);
+                            for (const SdfPath& target : targets)
+                            {
+                                line(target.GetString());
+                            }
+                        }
+                    }
+
+                    break;
+                case RUSD_QUERY_METADATA:
+                    if (!field.empty())
+                    {
+                        VtValue value;
+                        if (prim.GetMetadata(TfToken(field), &value))
+                        {
+                            if (VtValueHoldsType(value, "TfToken"))
+                            {
+                                text = value.UncheckedGet<TfToken>().GetString();
+                            }
+                            else if (VtValueHoldsType(value, SdfValueTypeNames->String.GetType().GetTypeName().c_str()))
+                            {
+                                text = value.UncheckedGet<std::string>();
+                            }
+                        }
+                    }
+
+                    break;
+                default:
+                    SetError(context, "Unknown stage query " + std::to_string(query) + ".");
+                    return kFailure;
+            }
+        }
+        else if (query < RUSD_QUERY_CHILDREN || query > RUSD_QUERY_METADATA)
+        {
+            SetError(context, "Unknown stage query " + std::to_string(query) + ".");
+            return kFailure;
+        }
+
+        return ReturnText(context, text, buffer, bufferCapacity, requiredLength);
+    });
+}
+
+int RUsd_EditPrim(RUsdContext* context, const char* primPath, int edit, const char* name, const char* value)
+{
+    return RunStageCall(context, "edit a prim", [&]() {
+        const UsdStageRefPtr& stage = context->stage;
+        SdfPath path;
+        if (!ParseStagePath(context, primPath, false, &path))
+        {
+            return kFailure;
+        }
+
+        const std::string field = SafeString(name);
+        const std::string text = SafeString(value);
+        const auto refused = [&](const char* what) {
+            SetError(context, std::string("OpenUSD refused to ") + what + " at " + path.GetString() + ".");
+            return kFailure;
+        };
+
+        // Loading changes what the stage composes, not what any layer says.
+        if (edit == RUSD_EDIT_LOAD || edit == RUSD_EDIT_UNLOAD)
+        {
+            if (!stage->GetPrimAtPath(path))
+            {
+                SetError(context, "The stage has no prim at " + path.GetString() + ".");
+                return kFailure;
+            }
+
+            if (edit == RUSD_EDIT_LOAD)
+            {
+                stage->Load(path);
+            }
+            else
+            {
+                stage->Unload(path);
+            }
+
+            return kSuccess;
+        }
+
+        if (!CheckEditable(context, path))
+        {
+            return kFailure;
+        }
+
+        switch (edit)
+        {
+            case RUSD_EDIT_DEFINE:
+                return stage->DefinePrim(path, TfToken(text)) ? kSuccess : refused("define a prim");
+            case RUSD_EDIT_OVERRIDE:
+                return stage->OverridePrim(path) ? kSuccess : refused("override a prim");
+            case RUSD_EDIT_CLASS:
+                return stage->CreateClassPrim(path) ? kSuccess : refused("create a class (a root prim path)");
+            case RUSD_EDIT_REMOVE:
+                return stage->RemovePrim(path) ? kSuccess : refused("remove the prim's spec");
+            default:
+                break;
+        }
+
+        UsdPrim prim = stage->GetPrimAtPath(path);
+        if (!prim)
+        {
+            SetError(context, "The stage has no prim at " + path.GetString() + ".");
+            return kFailure;
+        }
+
+        const auto parseBool = [&](bool* out) {
+            if (text == "1" || text == "0")
+            {
+                *out = text == "1";
+                return true;
+            }
+
+            SetError(context, "The value is \"1\" or \"0\", or empty to clear the opinion.");
+            return false;
+        };
+        const auto parseTarget = [&](bool allowEmpty, SdfPath* out) {
+            if (allowEmpty && text.empty())
+            {
+                *out = SdfPath();
+                return true;
+            }
+
+            return ParseAbsolutePrimPath(context, value, out);
+        };
+
+        if (edit == RUSD_EDIT_ACTIVE || edit == RUSD_EDIT_SELECT_VARIANT)
+        {
+            EnsureSpecQuietly(context, path);
+        }
+
+        switch (edit)
+        {
+            case RUSD_EDIT_ACTIVE:
+            {
+                if (text.empty())
+                {
+                    return prim.ClearActive() ? kSuccess : refused("clear active");
+                }
+
+                bool active = true;
+                return !parseBool(&active) ? kFailure : (prim.SetActive(active) ? kSuccess : refused("set active"));
+            }
+            case RUSD_EDIT_INSTANCEABLE:
+            {
+                if (text.empty())
+                {
+                    return prim.ClearInstanceable() ? kSuccess : refused("clear instanceable");
+                }
+
+                bool instanceable = false;
+                return !parseBool(&instanceable)
+                    ? kFailure
+                    : (prim.SetInstanceable(instanceable) ? kSuccess : refused("set instanceable"));
+            }
+            case RUSD_EDIT_TYPE_NAME:
+                return prim.SetTypeName(TfToken(text)) ? kSuccess : refused("set the type name");
+            case RUSD_EDIT_METADATA:
+            {
+                if (field.empty())
+                {
+                    SetError(context, "The metadata field name is empty.");
+                    return kFailure;
+                }
+
+                // Only a string or token field: anything else would need its own type. The value
+                // is the schema's own fallback with the text swapped in, so it carries OpenUSD's type
+                // info: one built here can fail OpenUSD's later type checks (a flatten dropped a
+                // kind set from a TfToken made in this plugin; see VtValueHoldsType).
+                const TfToken key(field);
+                VtValue value = SdfSchema::GetInstance().GetFallback(key);
+                if (VtValueHoldsType(value, "TfToken"))
+                {
+                    TfToken token(text);
+                    value.UncheckedSwap(token);
+                    return prim.SetMetadata(key, value) ? kSuccess : refused("set metadata");
+                }
+
+                if (VtValueHoldsType(value, SdfValueTypeNames->String.GetType().GetTypeName().c_str()))
+                {
+                    std::string copy = text;
+                    value.UncheckedSwap(copy);
+                    return prim.SetMetadata(key, value) ? kSuccess : refused("set metadata");
+                }
+
+                SetError(context, "'" + field + "' is not a string or token metadata field.");
+                return kFailure;
+            }
+            case RUSD_EDIT_DEFAULT_PRIM:
+                if (!path.IsRootPrimPath())
+                {
+                    SetError(context, "The defaultPrim must be a root prim; " + path.GetString() + " is not.");
+                    return kFailure;
+                }
+
+                stage->SetDefaultPrim(prim);
+                return kSuccess;
+            case RUSD_EDIT_SELECT_VARIANT:
+            case RUSD_EDIT_ADD_VARIANT:
+            {
+                if (field.empty())
+                {
+                    SetError(context, "The variant set name is empty.");
+                    return kFailure;
+                }
+
+                if (edit == RUSD_EDIT_ADD_VARIANT)
+                {
+                    if (text.empty())
+                    {
+                        SetError(context, "The variant name is empty.");
+                        return kFailure;
+                    }
+
+                    return prim.GetVariantSets().AddVariantSet(field).AddVariant(text) ? kSuccess : refused("add a variant");
+                }
+
+                UsdVariantSet set = prim.GetVariantSet(field);
+                const bool done = text.empty() ? set.ClearVariantSelection() : set.SetVariantSelection(text);
+                return done ? kSuccess : refused("select a variant");
+            }
+            case RUSD_EDIT_ADD_REFERENCE:
+            case RUSD_EDIT_ADD_PAYLOAD:
+            {
+                SdfPath target;
+                if (!parseTarget(true, &target))
+                {
+                    return kFailure;
+                }
+
+                if (edit == RUSD_EDIT_ADD_REFERENCE)
+                {
+                    const bool done = field.empty()
+                        ? prim.GetReferences().AddInternalReference(target)
+                        : prim.GetReferences().AddReference(SdfReference(field, target));
+                    return done ? kSuccess : refused("add a reference");
+                }
+
+                const bool done = field.empty()
+                    ? prim.GetPayloads().AddInternalPayload(target)
+                    : prim.GetPayloads().AddPayload(SdfPayload(field, target));
+                return done ? kSuccess : refused("add a payload");
+            }
+            case RUSD_EDIT_CLEAR_REFERENCES:
+                return prim.GetReferences().ClearReferences() ? kSuccess : refused("clear references");
+            case RUSD_EDIT_CLEAR_PAYLOADS:
+                return prim.GetPayloads().ClearPayloads() ? kSuccess : refused("clear payloads");
+            case RUSD_EDIT_ADD_INHERIT:
+            case RUSD_EDIT_ADD_SPECIALIZE:
+            {
+                SdfPath target;
+                if (!parseTarget(false, &target))
+                {
+                    return kFailure;
+                }
+
+                const bool done = edit == RUSD_EDIT_ADD_INHERIT ? prim.GetInherits().AddInherit(target)
+                                                                : prim.GetSpecializes().AddSpecialize(target);
+                return done ? kSuccess : refused("add the arc");
+            }
+            case RUSD_EDIT_SET_TARGETS:
+            {
+                TfToken property;
+                if (!ParsePropertyName(context, name, &property))
+                {
+                    return kFailure;
+                }
+
+                SdfPathVector targets;
+                for (const std::vector<std::string>& record : SplitRecords(text))
+                {
+                    if (!SdfPath::IsValidPathString(record[0]) || !SdfPath(record[0]).IsAbsolutePath())
+                    {
+                        SetError(context, "'" + record[0] + "' is not an absolute path.");
+                        return kFailure;
+                    }
+
+                    targets.push_back(SdfPath(record[0]));
+                }
+
+                UsdRelationship relationship = prim.GetRelationship(property);
+                if (!relationship)
+                {
+                    relationship = prim.CreateRelationship(property, false);
+                }
+
+                return relationship && relationship.SetTargets(targets) ? kSuccess : refused("set targets");
+            }
+            case RUSD_EDIT_REMOVE_PROPERTY:
+            {
+                TfToken property;
+                if (!ParsePropertyName(context, name, &property))
+                {
+                    return kFailure;
+                }
+
+                return prim.RemoveProperty(property) ? kSuccess : refused("remove the property's spec");
+            }
+            case RUSD_EDIT_CLEAR_VALUE:
+            {
+                UsdAttribute attribute;
+                if (!FindAttribute(context, primPath, name, &attribute))
+                {
+                    return kFailure;
+                }
+
+                return attribute.Clear() ? kSuccess : refused("clear the attribute");
+            }
+            default:
+                SetError(context, "Unknown prim edit " + std::to_string(edit) + ".");
+                return kFailure;
+        }
+    });
+}
+
+int RUsd_GetAttributeInfo(RUsdContext* context, const char* primPath, const char* name, RUsdAttributeInfo* info)
+{
+    return RunStageCall(context, "read an attribute", [&]() {
+        if (info == nullptr || info->structSize < static_cast<int>(sizeof(RUsdAttributeInfo)))
+        {
+            SetError(context, "RUsdAttributeInfo is null, or its structSize is smaller than this plugin's.");
+            return kFailure;
+        }
+
+        UsdPrim prim;
+        TfToken property;
+        if (!FindStagePrim(context, primPath, false, &prim) || !ParsePropertyName(context, name, &property))
+        {
+            return kFailure;
+        }
+
+        const int structSize = info->structSize;
+        std::memset(info, 0, sizeof(RUsdAttributeInfo));
+        info->structSize = structSize;
+        const UsdAttribute attribute = prim.GetAttribute(property);
+        if (!attribute)
+        {
+            return kSuccess;
+        }
+
+        info->exists = 1;
+        info->valueType = ValueTypeOf(attribute.GetTypeName());
+        info->hasValue = attribute.HasValue() ? 1 : 0;
+        info->hasAuthoredValue = attribute.HasAuthoredValue() ? 1 : 0;
+        info->timeSampleCount = static_cast<int>(std::min<size_t>(attribute.GetNumTimeSamples(),
+                                                                  static_cast<size_t>(std::numeric_limits<int>::max())));
+        info->uniform = attribute.GetVariability() == SdfVariabilityUniform ? 1 : 0;
+        info->custom = attribute.IsCustom() ? 1 : 0;
+        return kSuccess;
+    });
+}
+
+int RUsd_GetAttributeValue(
+    RUsdContext* context,
+    const char* primPath,
+    const char* name,
+    int timeKind,
+    double time,
+    int valueType,
+    void* buffer,
+    long long bufferBytes,
+    long long* elementCount,
+    long long* requiredBytes)
+{
+    return RunStageCall(context, "read an attribute value", [&]() {
+        if (elementCount == nullptr || requiredBytes == nullptr)
+        {
+            SetError(context, "The value size outputs are null.");
+            return kFailure;
+        }
+
+        *elementCount = 0;
+        *requiredBytes = -1;
+        const SdfValueTypeName expected = PlainTypeName(valueType);
+        const int plain = valueType & ~(RUSD_VALUE_ARRAY | RUSD_VALUE_RESOLVED);
+        if (!expected || ((valueType & RUSD_VALUE_RESOLVED) != 0 && plain != RUSD_VALUE_ASSET) ||
+            (valueType & ~(0xff | RUSD_VALUE_ARRAY | RUSD_VALUE_RESOLVED)) != 0)
+        {
+            SetError(context, "Unknown value type " + std::to_string(valueType) + ".");
+            return kFailure;
+        }
+
+        UsdAttribute attribute;
+        UsdTimeCode at;
+        if (!FindAttribute(context, primPath, name, &attribute) || !ParseTime(context, timeKind, time, false, &at))
+        {
+            return kFailure;
+        }
+
+        // The value a size query read is held for the copy that follows it; any other call drops it.
+        std::ostringstream key;
+        key.precision(17);
+        key << attribute.GetPath().GetString() << '\n' << timeKind << '\n' << time << '\n' << valueType;
+        VtValue value;
+        if (context->pendingValueKey == key.str())
+        {
+            value.Swap(context->pendingValue);
+        }
+        else if (!attribute.Get(&value, at))
+        {
+            value = VtValue();
+        }
+
+        context->pendingValueKey.clear();
+        context->pendingValue = VtValue();
+        if (value.IsEmpty())
+        {
+            return kSuccess; // no value
+        }
+
+        if (value.GetTypeName() != expected.GetType().GetTypeName())
+        {
+            SetError(context, attribute.GetPath().GetString() + " holds " + DescribeHeldType(value) + ", not " +
+                expected.GetAsToken().GetString() + ".");
+            return kFailure;
+        }
+
+        long long count = 0;
+        const long long bytes = PutAnyValue(value, valueType, nullptr, &count);
+        *elementCount = count;
+        *requiredBytes = bytes;
+        if (buffer == nullptr || bufferBytes < bytes)
+        {
+            context->pendingValueKey = key.str();
+            context->pendingValue.Swap(value);
+            return kSuccess;
+        }
+
+        PutAnyValue(value, valueType, buffer, &count);
+        return kSuccess;
+    });
+}
+
+int RUsd_SetAttributeValue(
+    RUsdContext* context,
+    const char* primPath,
+    const char* name,
+    const char* typeName,
+    int flags,
+    int timeKind,
+    double time,
+    int valueType,
+    const void* data,
+    long long elementCount,
+    long long dataBytes)
+{
+    return RunStageCall(context, "write an attribute value", [&]() {
+        UsdPrim prim;
+        TfToken property;
+        UsdTimeCode at;
+        if (!FindStagePrim(context, primPath, false, &prim) || !ParsePropertyName(context, name, &property) ||
+            !ParseTime(context, timeKind, time, true, &at) || !CheckEditable(context, prim.GetPath()))
+        {
+            return kFailure;
+        }
+
+        context->pendingValueKey.clear();
+        context->pendingValue = VtValue();
+        UsdAttribute attribute = prim.GetAttribute(property);
+
+        // A clear or a block takes no value, so it needs no type: only an attribute.
+        if ((flags & (RUSD_SET_CLEAR | RUSD_SET_BLOCK)) != 0)
+        {
+            if (!attribute)
+            {
+                SetError(context, prim.GetPath().GetString() + " has no attribute '" + property.GetString() + "'.");
+                return kFailure;
+            }
+
+            bool done = true;
+            if ((flags & RUSD_SET_CLEAR) != 0)
+            {
+                done = at.IsDefault() ? attribute.ClearDefault() : attribute.ClearAtTime(at);
+            }
+            else if (at.IsDefault())
+            {
+                attribute.Block(); // the default and every sample
+            }
+            else
+            {
+                done = attribute.Set(SdfValueBlock(), at);
+            }
+
+            if (!done)
+            {
+                SetError(context, "OpenUSD refused to " + std::string((flags & RUSD_SET_CLEAR) != 0 ? "clear " : "block ") +
+                    attribute.GetPath().GetString() + ".");
+                return kFailure;
+            }
+
+            return kSuccess;
+        }
+
+        const SdfValueTypeName expected = PlainTypeName(valueType);
+        if (!expected || (valueType & ~(0xff | RUSD_VALUE_ARRAY)) != 0)
+        {
+            SetError(context, "Unknown value type " + std::to_string(valueType) + ".");
+            return kFailure;
+        }
+
+        if (!attribute)
+        {
+            const std::string declared = SafeString(typeName);
+            const SdfValueTypeName type = declared.empty() ? expected : SdfSchema::GetInstance().FindType(declared);
+            if (!type)
+            {
+                SetError(context, "'" + declared + "' is not a value type name.");
+                return kFailure;
+            }
+
+            if (type.GetType() != expected.GetType())
+            {
+                SetError(context, "An attribute of type " + type.GetAsToken().GetString() + " does not hold " +
+                    expected.GetAsToken().GetString() + ".");
+                return kFailure;
+            }
+
+            attribute = prim.CreateAttribute(property, type, (flags & RUSD_SET_CUSTOM) != 0,
+                (flags & RUSD_SET_UNIFORM) != 0 ? SdfVariabilityUniform : SdfVariabilityVarying);
+            if (!attribute)
+            {
+                SetError(context, "OpenUSD refused to make " + prim.GetPath().GetString() + "." + property.GetString() + ".");
+                return kFailure;
+            }
+        }
+        else if (attribute.GetTypeName().GetType() != expected.GetType())
+        {
+            SetError(context, attribute.GetPath().GetString() + " is declared " +
+                attribute.GetTypeName().GetAsToken().GetString() + ", not " + expected.GetAsToken().GetString() + ".");
+            return kFailure;
+        }
+
+        std::string error;
+        const bool written = SetAnyValue(attribute, at, valueType, data, elementCount, dataBytes, &error);
+        if (!error.empty())
+        {
+            SetError(context, "The value for " + attribute.GetPath().GetString() + " is malformed: " + error + ".");
+            return kFailure;
+        }
+
+        if (!written)
+        {
+            SetError(context, "OpenUSD refused the value for " + attribute.GetPath().GetString() + ".");
+            return kFailure;
+        }
+
+        return kSuccess;
+    });
+}
+
+int RUsd_GetAttributeTimeSamples(
+    RUsdContext* context,
+    const char* primPath,
+    const char* name,
+    double* times,
+    int capacity,
+    int* count)
+{
+    return RunStageCall(context, "read time samples", [&]() {
+        UsdAttribute attribute;
+        if (count == nullptr || !FindAttribute(context, primPath, name, &attribute))
+        {
+            if (count == nullptr)
+            {
+                SetError(context, "The sample count output is null.");
+            }
+
+            return kFailure;
+        }
+
+        std::vector<double> samples;
+        attribute.GetTimeSamples(&samples);
+        if (samples.size() > static_cast<size_t>(std::numeric_limits<int>::max()))
+        {
+            SetError(context, "The attribute has too many time samples to return.");
+            return kFailure;
+        }
+
+        *count = static_cast<int>(samples.size());
+        if (times == nullptr)
+        {
+            return kSuccess;
+        }
+
+        if (!FitsCapacity(capacity, samples.size()))
+        {
+            SetError(context, "The time sample buffer is too small.");
+            return kFailure;
+        }
+
+        std::copy(samples.begin(), samples.end(), times);
+        return kSuccess;
+    });
+}
+
+int RUsd_GetPrimTransform(
+    RUsdContext* context,
+    const char* primPath,
+    int space,
+    int timeKind,
+    double time,
+    RUsdMatrix4x4* matrix,
+    int* resetsXformStack)
+{
+    return RunStageCall(context, "read a transform", [&]() {
+        UsdPrim prim;
+        UsdTimeCode at;
+        if (matrix == nullptr || !FindStagePrim(context, primPath, false, &prim) ||
+            !ParseTime(context, timeKind, time, false, &at))
+        {
+            if (matrix == nullptr)
+            {
+                SetError(context, "The matrix output is null.");
+            }
+
+            return kFailure;
+        }
+
+        UsdGeomXformCache cache(at);
+        bool resets = false;
+        GfMatrix4d result(1.0);
+        if (space == RUSD_TRANSFORM_WORLD)
+        {
+            result = cache.GetLocalToWorldTransform(prim);
+        }
+        else if (space == RUSD_TRANSFORM_LOCAL)
+        {
+            if (prim.IsA<UsdGeomXformable>())
+            {
+                result = cache.GetLocalTransformation(prim, &resets);
+            }
+        }
+        else
+        {
+            SetError(context, "Unknown transform space " + std::to_string(space) + ".");
+            return kFailure;
+        }
+
+        *matrix = FromGfMatrix(result);
+        if (resetsXformStack != nullptr)
+        {
+            *resetsXformStack = resets ? 1 : 0;
+        }
+
+        return kSuccess;
+    });
+}
+
+int RUsd_SetPrimTransform(
+    RUsdContext* context,
+    const char* primPath,
+    int timeKind,
+    double time,
+    const RUsdMatrix4x4* matrix)
+{
+    return RunStageCall(context, "write a transform", [&]() {
+        UsdPrim prim;
+        UsdTimeCode at;
+        if (matrix == nullptr || !FindStagePrim(context, primPath, false, &prim) ||
+            !ParseTime(context, timeKind, time, true, &at) || !CheckEditable(context, prim.GetPath()))
+        {
+            if (matrix == nullptr)
+            {
+                SetError(context, "The matrix is null.");
+            }
+
+            return kFailure;
+        }
+
+        if (!prim.IsA<UsdGeomXformable>())
+        {
+            SetError(context, prim.GetPath().GetString() + " is not Xformable.");
+            return kFailure;
+        }
+
+        UsdGeomXformOp op = UsdGeomXformable(prim).MakeMatrixXform();
+        if (!op || !op.Set(ToGfMatrix(*matrix), at))
+        {
+            SetError(context, "OpenUSD refused the transform for " + prim.GetPath().GetString() + ".");
+            return kFailure;
+        }
+
+        return kSuccess;
+    });
+}
+
+int RUsd_ReadSubtrees(RUsdContext* context, const char* rootPaths, int flags, const RUsdImportLimits* limits)
+{
+    return RunStageCall(context, "reread part of the stage", [&]() {
+        if (flags != 0)
+        {
+            SetError(context, "RUsd_ReadSubtrees flags are reserved; pass 0.");
+            return kFailure;
+        }
+
+        std::vector<SdfPath> roots;
+        for (const std::vector<std::string>& record : SplitRecords(SafeString(rootPaths)))
+        {
+            SdfPath path;
+            if (!ParseAbsolutePrimPath(context, record[0].c_str(), &path))
+            {
+                return kFailure;
+            }
+
+            roots.push_back(path);
+        }
+
+        RUsdContext::ImportLimits budgets;
+        if (limits != nullptr && !TakeImportLimits(context, limits, &budgets))
+        {
+            return kFailure;
+        }
+
+        ResetImportTables(context);
+        context->importLimits = budgets;
+        ReadStageMetrics(context);
+        ImportWalk walk(context, ImportPredicate());
+        for (const SdfPath& root : roots)
+        {
+            const UsdPrim prim = context->stage->GetPrimAtPath(root);
+            if (!prim || !walk.predicate(prim))
+            {
+                continue; // gone: nothing to read
+            }
+
+            // The ancestors' purpose, visibility and animated-visibility scopes, as the full walk
+            // would have carried them down to this prim.
+            std::vector<UsdPrim> ancestors;
+            for (UsdPrim at = prim.GetParent(); at && !at.IsPseudoRoot(); at = at.GetParent())
+            {
+                ancestors.push_back(at);
+            }
+
+            UsdGeomImageable::PurposeInfo purposeInfo;
+            int visible = 1;
+            int scopes = 0;
+            bool excluded = false;
+            for (auto at = ancestors.rbegin(); at != ancestors.rend(); ++at)
+            {
+                bool animatesVisibility = false;
+                if (!InheritState(&walk, *at, &purposeInfo, &visible, &animatesVisibility))
+                {
+                    excluded = true;
+                    break;
+                }
+
+                if (animatesVisibility)
+                {
+                    ++walk.animatedVisibilityScopes;
+                    ++scopes;
+                }
+            }
+
+            if (!excluded)
+            {
+                ImportSubtree(&walk, prim, root.GetString(), static_cast<int>(ancestors.size()), purposeInfo, visible);
+            }
+
+            walk.animatedVisibilityScopes -= scopes;
+        }
+
+        AppendSkipSummary(context);
+        return kSuccess;
+    });
+}
+
+int RUsd_ReleaseImportData(RUsdContext* context)
+{
+    return RunStageCall(context, "release the import data", [&]() {
+        ResetImportTables(context);
+        return kSuccess;
+    });
+}
+
+int RUsd_ReadPhysics(RUsdContext* context, const RUsdPhysicsReadOptions* options, const RUsdPhysicsData** outData)
+{
+    return RunStageCall(context, "read the stage's physics", [&]() {
+        if (outData == nullptr)
+        {
+            SetError(context, "RUsd_ReadPhysics: outData is null.");
+            return kFailure;
+        }
+        *outData = nullptr;
+
+        // A larger struct is a newer caller's; its extra fields are not this build's to read.
+        RUsdPhysicsReadOptions read{};
+        read.structSize = static_cast<int>(sizeof(RUsdPhysicsReadOptions));
+        read.flags = RUSD_PHYSICS_READ_PHYSX;
+        if (options != nullptr)
+        {
+            if (options->structSize < static_cast<int>(sizeof(RUsdPhysicsReadOptions)))
+            {
+                SetError(context, "RUsdPhysicsReadOptions.structSize is smaller than this plugin's RUsdPhysicsReadOptions.");
+                return kFailure;
+            }
+            read.flags = options->flags;
+            read.skipWhenExceeded = options->skipWhenExceeded;
+            read.maxObjects = options->maxObjects;
+            read.maxMeshElements = options->maxMeshElements;
+            read.rootPaths = options->rootPaths;
+        }
+        if (read.maxObjects <= 0)
+        {
+            read.maxObjects = 1000000;
+        }
+        if (read.maxMeshElements <= 0)
+        {
+            read.maxMeshElements = 268435456;
+        }
+
+        // The previous block goes first: a failed read leaves nothing behind that looks current.
+        context->physics.reset();
+
+        // Prim path -> import index. A mesh is found by where it was placed, then by the prim it
+        // came from (a point-instancer prototype's placement differs from its source).
+        std::unordered_map<std::string, int> nodes;
+        for (size_t i = 0; i < context->importedNodes.size(); ++i)
+        {
+            nodes.emplace(context->importedNodes[i].path, static_cast<int>(i));
+        }
+        std::unordered_map<std::string, int> meshes;
+        for (size_t i = 0; i < context->importedMeshes.size(); ++i)
+        {
+            meshes.emplace(context->importedMeshes[i].primPath, static_cast<int>(i));
+        }
+        for (size_t i = 0; i < context->importedMeshes.size(); ++i)
+        {
+            meshes.emplace(context->importedMeshes[i].sourcePath, static_cast<int>(i));
+        }
+
+        rusd_physics::ImportLookups lookups;
+        lookups.node = [&](const std::string& path) {
+            const auto found = nodes.find(path);
+            return found != nodes.end() ? found->second : -1;
+        };
+        lookups.mesh = [&](const std::string& path) {
+            const auto found = meshes.find(path);
+            return found != meshes.end() ? found->second : -1;
+        };
+
+        context->physics = rusd_physics::Read(context->stage, read, lookups);
+        *outData = rusd_physics::Data(*context->physics);
+        return kSuccess;
+    });
+}
+
+int RUsd_ReleasePhysics(RUsdContext* context)
+{
+    return RunStageCall(context, "release the physics data", [&]() {
+        context->physics.reset();
+        return kSuccess;
+    });
 }

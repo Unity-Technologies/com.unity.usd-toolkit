@@ -60,21 +60,23 @@ What the layer keeps from each source:
   referencing prim itself would replace the default prim's `xformOpOrder`, and the part would
   land offset by whatever transform it carried.
 - **The time range.** A stage reads `startTimeCode`, `endTimeCode`, `timeCodesPerSecond` and
-  `framesPerSecond` from its root layer only, so the export copies them from the sources. It
-  writes the rates of the first source that authors them, and the union of the sources' ranges.
-  USD rescales a referenced layer's time samples to the root's time codes per second, so each
-  range is converted to that rate first: a source at 30 time codes per second with a range of
-  0–30 covers 0–24 in a layer at 24. A key that no source authors is not written, so a source
-  without time metadata leaves the layer unchanged.
+  `framesPerSecond` from its root layer only, so the export copies them from the sources. Each
+  source is opened with the toolkit's `UsdStage` (see `Scripts/Core/UsdLayerTimeMetadata.cs`),
+  so `.usda`, `.usdc`, text or binary `.usd` and `.usdz` sources all count, including the binary
+  `.usd` that Isaac Sim and Omniverse write. The layer gets the union of the sources' ranges and
+  the rates of the first source that has a range. USD rescales a referenced layer's time samples
+  to the root's time codes per second, so each range is converted to that rate first: a source
+  at 30 time codes per second with a range of 0–30 covers 0–24 in a layer at 24. A source has a
+  range when it authors both `startTimeCode` and `endTimeCode`. A source without one adds
+  nothing, and when no source has one the layer carries no time metadata.
 
 Two limitations:
 
-- **Time metadata is read from text sources only.** The toolkit's import does not report a
-  stage's time metadata, so the demo reads it from the layer header itself (see
-  `Scripts/Core/UsdLayerTimeMetadata.cs`). That works for `.usda` and for a text `.usd`. Binary
-  `.usdc` files, binary `.usd` files and `.usdz` packages add no time range; each export logs one
-  info line naming the binary sources it skipped. Most Isaac Sim and Omniverse output is binary
-  `.usd`, so for now an export assembled from those files carries no time range.
+- **Both rates are written, with their effective values.** `UsdStage` reports the rates USD
+  runs a stage at, not whether its layer authors them; USD falls back from
+  `timeCodesPerSecond` to `framesPerSecond` to 24. So the layer always carries both: a first
+  source that authors only `framesPerSecond = 12` gives `timeCodesPerSecond = 12` as well. The
+  playback rate is the same, only the header text differs from the source's.
 - **Only the default prim is referenced.** A reference brings in one prim and everything below
   it, which is standard USD behaviour. Top-level prims next to the source's default prim, such
   as a second root or a material scope outside it, are not part of the export.
@@ -196,7 +198,7 @@ the exported stage — the correction survives the round trip.
 rotated, then exported as a referencing layer and re-imported. Every prim landed within 1e-7 m of
 where it was. The layer carries `startTimeCode = 0`, `endTimeCode = 48`, `timeCodesPerSecond = 24`
 and `framesPerSecond = 24`, and the indexer's default prim keeps its own
-`translate`/`rotateY`.
+`translate`/`rotateY`. A binary `.usdc` copy of the indexer gives the same time range.
 
 **Relative-path fragility — tested specifically, because it is the likely failure:**
 
@@ -269,7 +271,7 @@ Runtime Demo/
       UsdImportService.cs          import + failure messages + load-in beat
       UsdExportService.cs          both export modes behind one call
       UsdReferenceLayerWriter.cs   the composition layer the toolkit cannot write
-      UsdLayerTimeMetadata.cs      time metadata from a text layer's header
+      UsdLayerTimeMetadata.cs      a source stage's time range and rates, through UsdStage
       UsdStageConversion.cs        up-axis / unit correction
       UsdSceneEntry.cs             one loaded stage
     Interaction/                   gizmo, outline, selection, orbit camera

@@ -6,24 +6,27 @@ OpenUSD/TBB file a build copies off the build host into Runtime/Plugins. Its own
 what it cannot do -- "prove the dependency tree is authentic upstream code" -- because by then the
 source has already been fetched and compiled. This script covers that earlier link: it pins the
 exact upstream revision each payload is built from and refuses a build that is not on it
-(SECURITY-282834, the trust-chain half of the code-signing review).
+(the trust-chain half of the code-signing review).
 
-Under the flags this package builds OpenUSD with (USD_BUILD_FLAGS in Native~/generate_sbom.py)
+Under the flags this package builds OpenUSD with (usd_build_flags() in Native~/generate_sbom.py)
 
     --build-variant release --build-monolithic --no-python --no-imaging --no-usdview
-    --no-examples --no-tutorials --no-tests --materialx
-    --build-args MaterialX,-DMATERIALX_BUILD_RENDER=OFF
+    --no-examples --no-tutorials --no-tests --materialx --alembic [--draco]
+    --build-args MaterialX,-DMATERIALX_BUILD_RENDER=OFF ... (static Alembic, OpenEXR, Draco)
 
-`build_usd.py` resolves two downloaded dependencies, TBB and MaterialX 1.39.4 (which vendors
-pugixml into MaterialXFormat); everything else in the payload is compiled from the OpenUSD tree
+`build_usd.py` resolves the downloaded dependencies TBB, MaterialX 1.39.4 (which vendors pugixml
+into MaterialXFormat), OpenEXR 3.1.13, Alembic 1.8.5 and Draco 1.5.6, plus zlib
+on Windows; OpenEXR's own CMake fetches Imath 3.1.9, which is pinned as a fetchcontent-archive that
+Native~/build_openusd.py supplies. Everything else in the payload is compiled from the OpenUSD tree
 itself, including the four libraries OpenUSD vendors in (`pxr/base/tf/pxrCLI11`,
 `pxrDoubleConversion`, `pxrLZ4`, `pxrTslRobinMap`) and libdeflate 1.18, which our own wrapper
 compiles from `pxr/imaging/plugin/hioOpenEXR/OpenEXR/deflate` although OpenUSD itself is built
 --no-imaging (Native~/src/UsdDeflate.c; Native~/CMakeLists.txt checks those files against their
-digests). So the whole payload is pinned by four things per platform, and that is what the records
-in Native~/dependency-sources hold: the OpenUSD commit, the TBB archive, the MaterialX archive, and
-the Unity patch applied to that commit before it is built (Native~/patches -- it replaces the
-vendored LZ4 1.9.2 with 1.10.0, SECURITY-282834).
+digests). So the whole payload is pinned by what the records in Native~/dependency-sources hold:
+the OpenUSD commit, the archives above, and the Unity patches applied before they are built
+(Native~/patches): to that commit (LZ4 1.10.0 in place of the vendored 1.9.2, security review; bounds
+and null checks in the usdAbc and usdDraco file format plugins) and to the Alembic archive (bounds
+and null checks in its reader), all found by fuzzing the payload or by review.
 
     # the clone is the pinned revision, unmodified, from the recorded remote
     python3 Native~/verify_upstream_sources.py --platform linux --openusd-src /opt/usd-26.05/src
@@ -80,6 +83,16 @@ STAMP_VERSION = 3
 # A row whose artifact is this pins a Unity patch to the pinned OpenUSD tree: `url` is the patch's
 # path in this repository, `sha256` its digest and `git_commit` the commit it applies to.
 PATCH_ARTIFACT = "patch"
+# The same for a Unity patch to a pinned archive: `git_commit` is that archive row's, which names
+# the one archive it applies to. Native~/build_openusd.py extracts the checked archive where
+# build_usd.py would, applies the patch there, and build_usd.py builds the patched tree it finds.
+ARCHIVE_PATCH_ARTIFACT = "archive-patch"
+PATCH_ARTIFACTS = (PATCH_ARTIFACT, ARCHIVE_PATCH_ARTIFACT)
+# A row whose artifact is this pins an archive a dependency's own CMake fetches with FetchContent,
+# which build_usd.py knows nothing about: Native~/build_openusd.py downloads and checks it like any
+# other archive, extracts it, and points that build at the extracted tree with downloads
+# disconnected (Imath, which OpenEXR fetches).
+FETCHCONTENT_ARTIFACT = "fetchcontent-archive"
 # What a Native~/security-scans record has to fill in (see its _TEMPLATE.md), and the severities
 # its result table counts. A finding at a blocking severity cannot be kept open by the record.
 SCAN_FIELDS = ("Component", "Version", "Commit scanned", "Source", "Scanned by", "Date", "Tool")
@@ -216,6 +229,21 @@ def patch_rows(rows):
     return [r for r in rows if r.artifact == PATCH_ARTIFACT]
 
 
+def archive_patch_rows(rows):
+    """The rows that pin a Unity patch applied to a pinned archive's tree."""
+    return [r for r in rows if r.artifact == ARCHIVE_PATCH_ARTIFACT]
+
+
+def all_patch_rows(rows):
+    """Every Unity patch, whatever it applies to."""
+    return [r for r in rows if r.artifact in PATCH_ARTIFACTS]
+
+
+def fetchcontent_rows(rows):
+    """The rows that pin a FetchContent source, which build_openusd.py extracts itself."""
+    return [r for r in rows if r.artifact == FETCHCONTENT_ARTIFACT]
+
+
 def patch_path(row: Row) -> pathlib.Path:
     path = (REPO / row.url).resolve()
     if not path.is_relative_to(REPO / "Native~" / "patches"):
@@ -311,7 +339,7 @@ def scan_record_problems(row: Row, rows, text: str):
 
     # What is compiled is the pinned tree with its patches applied, so that is what has to have
     # been scanned -- and the record has to say so by naming each patch it covered.
-    for patch in patch_rows(rows):
+    for patch in all_patch_rows(rows):
         if patch.git_commit == row.git_commit and patch.sha256 not in text:
             problems.append(f"does not name {patch.url} (sha256 {patch.sha256[:12]}...) as part of the "
                             "tree scanned")
@@ -345,7 +373,7 @@ def verify_scan(rows) -> bool:
     ok = True
     # A patch is scanned as part of the tree it is applied to, so it needs no record of its own;
     # the record of that tree has to name it.
-    for row in [r for r in rows if r.artifact != PATCH_ARTIFACT]:
+    for row in [r for r in rows if r.artifact not in PATCH_ARTIFACTS]:
         path = scan_record(row)
         if not path.is_file():
             print(f"FAIL {row.label}: no source scan recorded at {path.relative_to(REPO)}.")
@@ -366,7 +394,7 @@ def verify_scan(rows) -> bool:
 
 def archive_rows(rows):
     """The rows that pin a downloaded file."""
-    return [r for r in rows if r.sha256 != "-" and r.artifact != PATCH_ARTIFACT]
+    return [r for r in rows if r.sha256 != "-" and r.artifact not in PATCH_ARTIFACTS]
 
 
 def install_digests(install_root: pathlib.Path, platform: str) -> dict:
@@ -487,7 +515,7 @@ def check_stamp(install_root: pathlib.Path, platform: str, rows, require_scan: b
 
     applied = {(a.get("component"), a.get("sha256"))
                for a in stamped.get("patches_applied", []) if isinstance(a, dict)}
-    missing_patches = [r for r in patch_rows(rows) if (r.component, r.sha256) not in applied]
+    missing_patches = [r for r in all_patch_rows(rows) if (r.component, r.sha256) not in applied]
     if missing_patches:
         for row in missing_patches:
             print(f"FAIL {row.label}: the stamp does not say {row.url} was applied before the build.")
@@ -565,7 +593,7 @@ def main() -> int:
         width = max(len(r.label) for r in rows)
         for row in rows:
             pin = row.git_commit if row.sha256 == "-" else f"sha256:{row.sha256}"
-            if row.artifact == PATCH_ARTIFACT:
+            if row.artifact in PATCH_ARTIFACTS:
                 pin += f" onto {row.git_commit[:12]}"
             print(f"{row.label:<{width}}  {row.artifact:<15} {pin}")
             print(f"{'':<{width}}  {row.url}")
@@ -582,7 +610,7 @@ def main() -> int:
             sys.exit(f"The {args.platform} record pins no git source.")
         for row in git_rows(rows):
             ok &= verify_git(row, args.openusd_src)
-        for row in patch_rows(rows):
+        for row in all_patch_rows(rows):
             ok &= verify_patch(row)
 
     if args.archive:

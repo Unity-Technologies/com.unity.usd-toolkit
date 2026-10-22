@@ -37,9 +37,15 @@ Version:
 - OpenUSD **26.05**, public tag `v26.05`, commit `2095faf` ("Merge release v26.05")
 - The same tag and commit on all three platforms, built monolithic with
   `--build-variant release --build-monolithic --no-python --no-imaging --no-usdview
-  --no-examples --no-tutorials --no-tests --materialx
-  --build-args MaterialX,-DMATERIALX_BUILD_RENDER=OFF`, after applying
-  `Native~/patches/openusd-26.05-lz4-1.10.0.patch` (see the vendored components below)
+  --no-examples --no-tutorials --no-tests --materialx --alembic`, and `--draco` on macOS and
+  Linux, with the per-library arguments recorded in the SBOM (`usd_build_flags()` in
+  `Native~/generate_sbom.py`), after applying `Native~/patches/openusd-26.05-lz4-1.10.0.patch`
+  (see the vendored components below) and the Unity hardening patches
+  `openusd-26.05-file-format-hardening.patch` and `openusd-26.05-crate-hardening.patch` (bounds
+  checks in the file format plugins and in the binary layer reader; the latter is in the Windows
+  payload so far). A payload built before the Alembic and Draco plugins were
+  added was built without `--alembic` and `--draco`; the SBOM lists their libraries only for the
+  payloads that ship the plugins
 
 Source:
 
@@ -178,6 +184,56 @@ compiles it into `MaterialXFormat`. It ships as part of `libMaterialXFormat.1.dy
 - Full text: `ThirdPartyNotices~/licenses/pugixml-LICENSE.txt`, copied from the vendored
   `readme.txt`
 
+## Alembic, Imath and Draco (OpenUSD file format plugins)
+
+OpenUSD's `usdAbc` plugin reads and writes Alembic (`.abc`) files and its `usdDraco` plugin reads
+Draco-compressed meshes (`.drc`). A monolithic build compiles both plugins into the OpenUSD library,
+and the libraries they use are built static, so their code is redistributed inside the OpenUSD
+library of each payload that ships the plugins (`plugin/usd/usdAbc`, `plugin/usd/usdDraco`), not
+as files of their own:
+
+- `Runtime/Plugins/macOS/libusd_ms.dylib`: Alembic, Imath and Draco
+- `Runtime/Plugins/x86_64/Linux/lib/libusd_ms.so`: Alembic, Imath and Draco
+- `Runtime/Plugins/x86_64/Windows/usd_rt.dll`: Alembic, Imath and Draco (Draco through
+  `Native~/patches/openusd-26.05-windows-draco.patch`, as OpenUSD's `build_usd.py` refuses it in a
+  monolithic Windows build)
+
+Versions, each built by the same `build_usd.py` run from the source archive pinned by SHA-256 in
+`Native~/dependency-sources/<platform>.tsv`:
+
+- Alembic **1.8.5** (Ogawa only, no HDF5), the version OpenUSD v26.05's `build_usd.py` pins, with
+  a Unity patch applied (`Native~/patches/alembic-1.8.5-hardening.patch`: bounds and null checks in
+  its reader). The OpenUSD plugins that use these libraries are patched too
+  (`Native~/patches/openusd-26.05-file-format-hardening.patch`)
+- Imath **3.1.9**, the version OpenEXR 3.1.13 builds; OpenEXR itself is compiled only to build
+  Imath, and none of its libraries ships
+- Draco **1.5.6**, the version OpenUSD v26.05's `build_usd.py` pins
+
+Source:
+
+- https://github.com/alembic/alembic (tag `1.8.5`)
+- https://github.com/AcademySoftwareFoundation/Imath (tag `v3.1.9`)
+- https://github.com/google/draco (tag `1.5.6`)
+
+License:
+
+- Alembic: BSD 3-Clause. Full text: `ThirdPartyNotices~/licenses/Alembic-LICENSE.txt`
+- Imath: BSD 3-Clause. Full text: `ThirdPartyNotices~/licenses/Imath-LICENSE.txt`
+- Draco: Apache License 2.0. Full text: `ThirdPartyNotices~/licenses/Draco-LICENSE.txt`
+- OpenEXR (built, not redistributed): BSD 3-Clause, `ThirdPartyNotices~/licenses/OpenEXR-LICENSE.txt`
+
+Notices:
+
+```text
+TM & (c) 2009-2015 Lucasfilm Entertainment Company Ltd. or Lucasfilm Ltd.
+All rights reserved.
+(c) 2009-2015 Sony Pictures Imageworks Inc. All rights reserved.
+
+Copyright Contributors to the OpenEXR Project. All rights reserved.
+
+Copyright 2016 The Draco Authors.
+```
+
 ## Components vendored inside OpenUSD
 
 These are third-party libraries that live in the OpenUSD source tree and are
@@ -185,7 +241,7 @@ compiled into the monolithic OpenUSD library redistributed above. They ship as
 part of `libusd_ms.dylib` / `usd_rt.dll` / `libusd_ms.so` rather than as separate
 files, at the versions OpenUSD v26.05 vendors — except LZ4, which OpenUSD v26.05
 vendors at 1.9.2 and which this package's build replaces with upstream 1.10.0
-(`Native~/patches/openusd-26.05-lz4-1.10.0.patch`, SECURITY-282834 / CVE-2021-3520).
+(`Native~/patches/openusd-26.05-lz4-1.10.0.patch`, CVE-2021-3520).
 
 | Component | Version | License | Full text |
 |---|---|---|---|

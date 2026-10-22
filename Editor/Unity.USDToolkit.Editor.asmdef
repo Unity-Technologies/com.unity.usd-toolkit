@@ -13,6 +13,22 @@
   "precompiledReferences": [],
   "autoReferenced": true,
   "defineConstraints": [],
-  "versionDefines": [],
+  "versionDefines": [
+    {
+      "name": "com.unity.importer.usd",
+      "expression": "0.0.1",
+      "define": "USD_TOOLKIT_OTHER_USD_IMPORTER"
+    },
+    {
+      "name": "com.unity.formats.usd",
+      "expression": "0.0.1",
+      "define": "USD_TOOLKIT_OTHER_USD_IMPORTER"
+    },
+    {
+      "name": "com.unity.formats.alembic",
+      "expression": "0.0.1",
+      "define": "USD_TOOLKIT_OTHER_ALEMBIC_IMPORTER"
+    }
+  ],
   "noEngineReferences": false
 }

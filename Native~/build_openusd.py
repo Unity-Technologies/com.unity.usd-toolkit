@@ -2,10 +2,10 @@
 """Builds the OpenUSD install a native payload links against, from pinned source checked first.
 
 Pixar's `build_usd.py` downloads what it needs and compiles it in one go, and passes an
-`expectedSHA256` for Boost and nothing else. Under this package's flags the only thing it downloads
-is oneTBB, so run on its own it unpacks, compiles and links TBB before anything has looked at the
-archive -- a check afterwards only reports what has already run (SECURITY-282834, CWE-494). This
-script puts the check first:
+`expectedSHA256` for Boost and nothing else. Under this package's flags it downloads oneTBB,
+MaterialX, OpenEXR, Alembic and Draco (and zlib on Windows), so run on its own it unpacks, compiles
+and links each of them before anything has looked at the archive -- a check afterwards only reports
+what has already run (CWE-494). This script puts the check first:
 
     python3 Native~/build_openusd.py --platform linux \
         --openusd-src /opt/usd-26.05/src --install /opt/usd-26.05/install --require-scan
@@ -16,13 +16,19 @@ script puts the check first:
    the clone itself is never modified, so "unmodified clone" keeps meaning exactly that.
 2. Every archive that record pins is downloaded (or taken from --archive) into the directory
    `build_usd.py` downloads into, and checked against its recorded SHA-256. A mismatch stops here.
+   A fetchcontent-archive row -- source a dependency's own CMake would fetch, Imath for OpenEXR --
+   is then extracted here, member names checked, and that build is pointed at the extracted tree
+   (FETCHCONTENT_SOURCE_DIR_<NAME>) while its flags keep FetchContent disconnected. An archive an
+   archive-patch row applies to (Alembic) is extracted here too, where build_usd.py would extract
+   it, and its pinned patches applied; build_usd.py finds the directory and builds that tree.
 3. `build_usd.py` runs with the flags recorded in Native~/generate_sbom.py. It finds each archive
    already present and skips the download -- that is upstream behaviour this relies on, and step 4
    confirms it held. Its downloads are pointed at an unreachable proxy, so if it tries to fetch
    anything else the build fails instead of compiling something unchecked.
 4. Afterwards the archives are re-checked, the download directory must hold nothing else, the
-   clone must still be unmodified, and the patched worktree must still be the pinned commit with
-   exactly the pinned patches applied.
+   clone must still be unmodified, the patched worktree must still be the pinned commit with
+   exactly the pinned patches applied, and every tree extracted here must be as extracted (and
+   patched).
 5. Only then is the provenance stamp written into the install. It records that the archives were
    checked before the build, which patches were applied, and the SHA-256 of every file a wrapper
    build copies out of the install. `verify_upstream_sources.py --check-stamp` -- called by the build scripts and by
@@ -44,12 +50,14 @@ import os
 import pathlib
 import shutil
 import subprocess
+import stat
 import sys
 import tempfile
 import urllib.request
+import zipfile
 
 import verify_upstream_sources as sources
-from generate_sbom import USD_BUILD_FLAGS
+from generate_sbom import usd_build_flags
 
 # Far above any archive a record pins (the TBB archives are 2-20 MB), low enough that a hostile
 # server cannot fill the disk.
@@ -60,6 +68,10 @@ MAX_ARCHIVE_BYTES = 256 * 1024 * 1024
 # PowerShell, which ignores these variables; the check on the download directory afterwards still
 # catches an extra download there, just after the fact.
 UNREACHABLE_PROXY = "http://127.0.0.1:9"
+
+# For each component a fetchcontent-archive row may pin: the build_usd.py dependency whose CMake
+# fetches it, and the name FetchContent declares it under (FETCHCONTENT_SOURCE_DIR_<NAME>).
+FETCHCONTENT_TARGETS = {"Imath": ("OpenEXR", "IMATH")}
 PROXY_VARIABLES = ("http_proxy", "https_proxy", "all_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY")
 
 
@@ -130,6 +142,83 @@ def make_patched_tree(clone: pathlib.Path, tree: pathlib.Path, commit: str, patc
     if state[2]:
         raise RuntimeError(f"applying the patches left untracked files: {state[2]}")
     return state
+
+
+def extract_source(row, archive: pathlib.Path, downloads: pathlib.Path,
+                   keep_name: bool = False) -> pathlib.Path:
+    """Extracts a checked archive and returns its one top-level directory.
+
+    A FetchContent source goes to <Component>-<version>-src; with `keep_name`, the directory keeps
+    the archive's own name, which is where build_usd.py extracts it and looks for it. The digest
+    says the bytes are the pinned ones; the member names are checked anyway, so an archive cannot
+    write outside its directory whatever it contains.
+    """
+    destination = None if keep_name else downloads / f"{row.component}-{row.version}-src"
+    if destination is not None and destination.exists():
+        raise RuntimeError(f"{destination} already exists")
+    staging = pathlib.Path(tempfile.mkdtemp(prefix=f".{row.component}.", dir=downloads))
+    try:
+        with zipfile.ZipFile(archive) as bundle:
+            for member in bundle.infolist():
+                name = pathlib.PurePosixPath(member.filename)
+                mode = member.external_attr >> 16
+                if name.is_absolute() or ".." in name.parts or "\\" in member.filename:
+                    raise RuntimeError(f"{row.label}: archive member {member.filename!r} leaves its directory")
+                if stat.S_ISLNK(mode):
+                    raise RuntimeError(f"{row.label}: archive member {member.filename!r} is a link")
+            bundle.extractall(staging)
+        tops = [p for p in staging.iterdir()]
+        if len(tops) != 1 or not tops[0].is_dir():
+            raise RuntimeError(f"{row.label}: the archive does not hold exactly one directory")
+        if destination is None:
+            destination = downloads / tops[0].name
+            if destination.exists():
+                raise RuntimeError(f"{destination} already exists")
+        tops[0].rename(destination)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+    print(f"     {row.label}: extracted to {destination}")
+    return destination
+
+
+def apply_archive_patches(tree: pathlib.Path, patches) -> None:
+    """Applies pinned patches to an extracted archive tree, each checked to apply cleanly first.
+
+    The tree is not a repository, and git must not take it for part of one further up (an install
+    inside a checkout would have git apply the patch relative to that checkout instead), so
+    repository discovery stops at the tree.
+    """
+    env = dict(os.environ, GIT_CEILING_DIRECTORIES=str(tree.parent))
+    for row in patches:
+        path = sources.patch_path(row)
+        base = ["git", "-c", "core.autocrlf=false", "apply", "--whitespace=nowarn"]
+        for command in (base + ["--check", str(path)], base + [str(path)]):
+            result = subprocess.run(command, cwd=tree, env=env, capture_output=True, text=True)
+            if result.returncode != 0:
+                raise RuntimeError(f"{row.label}: {path.name} does not apply to {tree.name}: "
+                                   f"{result.stderr.strip()}")
+        print(f"     {row.label}: applied to {tree.name}")
+
+
+def tree_digest(root: pathlib.Path) -> str:
+    """SHA-256 over every file's relative path and contents, to tell whether a tree was changed."""
+    digest = hashlib.sha256()
+    for path in sorted(p for p in root.rglob("*") if p.is_file()):
+        digest.update(path.relative_to(root).as_posix().encode() + b"\0")
+        digest.update(hashlib.sha256(path.read_bytes()).digest())
+    return digest.hexdigest()
+
+
+def cmake_major() -> int:
+    """The major version of the cmake on PATH, which build_usd.py runs; 0 when there is none."""
+    cmake = shutil.which("cmake")
+    if not cmake:
+        return 0
+    out = subprocess.run([cmake, "--version"], capture_output=True, text=True).stdout
+    try:
+        return int(out.split()[2].split(".")[0])
+    except (IndexError, ValueError):
+        return 0
 
 
 def fetch(row, destination: pathlib.Path, local: pathlib.Path = None) -> bool:
@@ -204,6 +293,9 @@ def main() -> int:
     git_rows = sources.git_rows(rows)
     archives = sources.archive_rows(rows)
     patches = sources.patch_rows(rows)
+    archive_patches = sources.archive_patch_rows(rows)
+    fetched = sources.fetchcontent_rows(rows)
+    flags = usd_build_flags(platform)
     src = args.openusd_src.resolve()
     install = args.install.resolve()
     downloads = install / "src"
@@ -228,7 +320,7 @@ def main() -> int:
     # clone unless told not to -- and an untracked file there fails the clean-clone check below.
     os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
     ok = all([sources.verify_git(row, src) for row in git_rows])
-    ok &= all([sources.verify_patch(row) for row in patches])
+    ok &= all([sources.verify_patch(row) for row in patches + archive_patches])
     if args.require_scan:
         ok &= sources.verify_scan(rows)
     if not ok:
@@ -239,6 +331,19 @@ def main() -> int:
         if row.git_commit != git_rows[0].git_commit:
             return fail(f"{row.label} applies to {row.git_commit[:12]}, but the record pins "
                         f"{git_rows[0].git_commit[:12]}.")
+    # Each archive patch names its archive by that row's commit, which has to be one archive's.
+    patched_archives = []
+    for row in archive_patches:
+        targets = [a for a in archives if a.git_commit == row.git_commit]
+        if len(targets) != 1:
+            return fail(f"{row.label} applies to {row.git_commit[:12]}, which is not the commit of "
+                        "exactly one pinned archive.")
+        for entry in patched_archives:
+            if entry[0] is targets[0]:
+                entry[1].append(row)
+                break
+        else:
+            patched_archives.append((targets[0], [row]))
 
     # With patches, build_usd.py builds a worktree of the pinned commit with them applied, so the
     # clone itself is never modified and the clean-clone check means what it says.
@@ -248,12 +353,24 @@ def main() -> int:
     if not build_usd.is_file():
         return fail(f"{build_usd} is missing.")
     build_usd_text = build_usd.read_text(encoding="utf-8")
+    for row in fetched:
+        if row.component not in FETCHCONTENT_TARGETS:
+            return fail(f"{row.label}: no build is known to fetch {row.component}; nothing would use it.")
     for row in archives:
         # If the pinned clone would fetch a different file than the record pins, the pre-fetched
-        # archive would sit unused while build_usd.py downloads its own.
+        # archive would sit unused while build_usd.py downloads its own. A FetchContent source is
+        # not build_usd.py's to download.
+        if row in fetched:
+            continue
         if f'"{row.url}"' not in build_usd_text:
             return fail(f"{row.label}: build_usd.py at the pinned commit does not download {row.url}. "
                         "The record and the clone disagree; fix the record.")
+
+    # Alembic 1.8.5 sets policy CMP0042 to OLD, which CMake 4 no longer accepts: its configure step
+    # fails outright. CMake 3.31 builds it, and the rest of the install, the same way.
+    if "--alembic" in flags.split() and cmake_major() >= 4:
+        return fail("the cmake on PATH is 4.x, which cannot configure Alembic 1.8.5 (policy CMP0042 OLD). "
+                    "Put CMake 3.31 first on PATH for this build; nothing was built.")
 
     if install.exists() and any(install.iterdir()):
         return fail(f"{install} is not empty. build_usd.py would reuse whatever it finds there -- an "
@@ -284,8 +401,34 @@ def main() -> int:
         if not fetch(row, downloads / archive_name(row), local.get(archive_name(row))):
             return fail(f"{row.label}: not the recorded archive; nothing was built.")
 
+    fetch_args = []
+    extracted = {}
+    fetched_trees = []
+    for row in fetched:
+        try:
+            tree_root = extract_source(row, downloads / archive_name(row), downloads)
+        except (RuntimeError, OSError, zipfile.BadZipFile) as exc:
+            return fail(f"{exc}; nothing was built.")
+        dependency, name = FETCHCONTENT_TARGETS[row.component]
+        # Forward slashes: build_usd.py hands this to CMake unquoted, and CMake reads a Windows
+        # backslash as an escape (C:\USD\x arrives as C:USDx).
+        fetch_args.append(f"{dependency},-DFETCHCONTENT_SOURCE_DIR_{name}={tree_root.as_posix()}")
+        extracted[tree_root] = tree_digest(tree_root)
+        fetched_trees.append((row, tree_root))
+
+    for row, row_patches in patched_archives:
+        try:
+            tree_root = next((t for r, t in fetched_trees if r is row), None)
+            if tree_root is None:
+                tree_root = extract_source(row, downloads / archive_name(row), downloads, keep_name=True)
+            apply_archive_patches(tree_root, row_patches)
+        except (RuntimeError, OSError, zipfile.BadZipFile) as exc:
+            return fail(f"{exc}; nothing was built.")
+        extracted[tree_root] = tree_digest(tree_root)
+
     # --- build ----------------------------------------------------------------------------
-    command = [sys.executable, str(build_usd)] + USD_BUILD_FLAGS.split() + [
+    # usd_build_flags() ends with its --build-args entries, so these join that list.
+    command = [sys.executable, str(build_usd)] + flags.split() + fetch_args + [
         "--src", str(downloads), "--jobs", str(args.jobs)]
     env = dict(os.environ)
     # Windows environment names are case-insensitive. dict(os.environ) holds them upper-cased, so
@@ -318,6 +461,11 @@ def main() -> int:
               file=sys.stderr)
         ok = False
     ok &= all([sources.verify_git(row, src) for row in git_rows])
+    for tree_root, digest in extracted.items():
+        if tree_digest(tree_root) != digest:
+            print(f"FAIL {tree_root} changed during the build; it is no longer the extracted (and "
+                  "patched) archive.", file=sys.stderr)
+            ok = False
     if patched_state and tree_state(tree) != patched_state:
         print(f"FAIL {tree} changed during the build: it is no longer the pinned commit with exactly",
               file=sys.stderr)
@@ -333,7 +481,7 @@ def main() -> int:
         if not dylib.is_file() and built.is_file():
             shutil.copy2(built, dylib)
 
-    sources.write_stamp(install, platform, rows, args.require_scan, archives, patches)
+    sources.write_stamp(install, platform, rows, args.require_scan, archives, patches + archive_patches)
     print()
     print(f"Built and stamped {install}. Build the wrapper against it, for example:")
     script = {"macos": "Native~/build_macos.sh --openusd-root",

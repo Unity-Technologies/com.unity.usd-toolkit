@@ -37,7 +37,7 @@ rather than a half-written DLL.
 
 What this does NOT do: touch the renamed DLL itself. The file keeps its bytes, so a third-party
 signature on it stays valid -- Authenticode covers a PE's contents, not its filename. That matters
-here, because the file being renamed on Windows is Intel's signed TBB build (SECURITY-282834).
+here, because the file being renamed on Windows is Intel's signed TBB build (security review).
 """
 
 import argparse

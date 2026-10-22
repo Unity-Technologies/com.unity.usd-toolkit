@@ -11,7 +11,9 @@ namespace Unity.USDToolkit
             ".usd",
             ".usda",
             ".usdc",
-            ".usdz"
+            ".usdz",
+            ".abc",   // read through OpenUSD's usdAbc plugin, where the payload has it
+            ".drc"    // usdDraco
         };
 
         private static readonly string[] ThumbnailExtensions =

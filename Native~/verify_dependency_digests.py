@@ -3,7 +3,7 @@
 
 The build scripts copy a dependency tree straight off the build host into Runtime/Plugins. With
 no check, a tampered local OpenUSD or TBB install rides into the shipped package unnoticed
-(SECURITY-282834, CWE-347). This makes that step explicit: the digests of everything copied are
+(CWE-347). This makes that step explicit: the digests of everything copied are
 recorded in a checked-in file, and a later build fails if what it is about to copy no longer
 matches.
 
@@ -64,7 +64,7 @@ def collect(root: pathlib.Path, files):
 # Which files each platform's build copies out of the OpenUSD install root. Keeping this here,
 # rather than only inside the build scripts, is what lets a digest record be taken or checked
 # without running a build -- useful on a machine that has the dependency tree but is not the one
-# producing this release's payload (SECURITY-282834, CWE-347).
+# producing this release's payload (CWE-347).
 #
 # These mirror the build scripts, and drift between the two would show up as a failed gate on the
 # next real build, not as a silently wrong record:
@@ -138,7 +138,9 @@ def load(record_path: pathlib.Path):
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    # @file reads more arguments from file, one per line: build_windows.ps1 passes the file list
+    # that way, as the OpenUSD tree's paths run past Windows' 32767-character command line.
+    parser = argparse.ArgumentParser(description=__doc__, fromfile_prefix_chars="@")
     parser.add_argument("--platform", required=True, choices=["macos", "windows", "linux"])
     parser.add_argument("--root", required=True, help="Dependency root the paths are recorded relative to.")
     mode = parser.add_mutually_exclusive_group(required=True)

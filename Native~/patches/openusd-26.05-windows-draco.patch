@@ -1,0 +1,97 @@
+Unity USD Toolkit patch to OpenUSD v26.05 (commit 2095fafafd033fa23386d7ec6d58c7cc33974518), applied
+after openusd-26.05-crate-hardening.patch: the Draco file format plugin (usdDraco) in a monolithic
+Windows build without Python, and its writer exported on every platform.
+
+Applied by Native~/build_openusd.py to a worktree of the pinned commit, never to the clone itself;
+its SHA-256 is pinned in Native~/dependency-sources/<platform>.tsv. Every change is marked
+"Unity USD Toolkit" in the source.
+
+1. OpenUSD refuses usdDraco in any monolithic Windows build, in build_usd.py and again in CMake,
+   because "this currently results in missing symbols": usdDraco declares no export macros and
+   relies on CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS, which does not reach the monolithic library.
+   Built without Python, the toolkit's payload links (no unresolved symbol), Draco is static
+   inside usd_ms.dll (no new DLL), and the plugin reads .drc files through the file format
+   registry from inside the library, as on macOS and Linux. Both checks now refuse the
+   combination only with Python enabled.
+2. writer.h: UsdDraco_WriteDraco and UsdDraco_PrimvarSupported are declared USDDRACO_API
+   (ARCH_EXPORT inside the library, as usdAbc's api.h does), so the toolkit's wrapper can write
+   .drc files: the file format cannot (WriteToFile returns false), and in a monolithic Windows
+   library the writer was not exported at all. On macOS and Linux it only makes the two
+   functions' default visibility explicit.
+
+diff --git a/build_scripts/build_usd.py b/build_scripts/build_usd.py
+index 88fb54f..6d3cb55 100644
+--- a/build_scripts/build_usd.py
++++ b/build_scripts/build_usd.py
+@@ -2622,7 +2622,9 @@ if ZLIB in requiredDependencies:
+ 
+ # Error out if user is building monolithic library on windows with draco plugin
+ # enabled. This currently results in missing symbols.
+-if context.buildDraco and context.buildMonolithic and Windows():
++# Unity USD Toolkit: only with Python (see cmake/defaults/Options.cmake).
++if (context.buildDraco and context.buildMonolithic and Windows()
++        and context.buildPython):
+     PrintError("Draco plugin can not be enabled for monolithic build on Windows")
+     sys.exit(1)
+ 
+diff --git a/cmake/defaults/Options.cmake b/cmake/defaults/Options.cmake
+index f7211c6..50fc0a2 100644
+--- a/cmake/defaults/Options.cmake
++++ b/cmake/defaults/Options.cmake
+@@ -230,7 +230,13 @@ endif()
+ 
+ # Error out if user is building monolithic library on windows with draco plugin
+ # enabled. This currently results in missing symbols.
+-if (${PXR_BUILD_DRACO_PLUGIN} AND ${PXR_BUILD_MONOLITHIC} AND WIN32)
++# Unity USD Toolkit: only with Python. usdDraco declares no export macros
++# beyond its writer (it relies on CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS, which does
++# not reach the monolithic library); without Python only the writer is linked
++# to from outside, and the plugin registers its file format from inside the
++# library.
++if (${PXR_BUILD_DRACO_PLUGIN} AND ${PXR_BUILD_MONOLITHIC} AND WIN32
++    AND ${PXR_ENABLE_PYTHON_SUPPORT})
+     message(FATAL_ERROR 
+         "Draco plugin can not be enabled for monolithic builds on Windows")
+ endif()
+diff --git a/pxr/usd/plugin/usdDraco/writer.h b/pxr/usd/plugin/usdDraco/writer.h
+index 2ceabca..f141cb2 100644
+--- a/pxr/usd/plugin/usdDraco/writer.h
++++ b/pxr/usd/plugin/usdDraco/writer.h
+@@ -9,15 +9,29 @@
+ #define PXR_USD_PLUGIN_USD_DRACO_WRITER_H
+ 
+ #include "pxr/pxr.h"
++#include "pxr/base/arch/export.h"
+ #include "pxr/usd/usdGeom/mesh.h"
+ 
+ #include <string>
+ 
+ 
++// Unity USD Toolkit: the writer is exported, as usdAbc's API is, so a program
++// linking the OpenUSD library can write .drc files. usdDraco declared no export
++// macro, which in a monolithic Windows library left it unreachable, and
++// writing is not available through the file format (WriteToFile returns false).
++#if defined(PXR_STATIC)
++#   define USDDRACO_API
++#elif defined(USDDRACO_EXPORTS)
++#   define USDDRACO_API ARCH_EXPORT
++#else
++#   define USDDRACO_API ARCH_IMPORT
++#endif
++
+ PXR_NAMESPACE_OPEN_SCOPE
+ 
+ 
+ /// Encodes mesh and writes it in Draco format to a file at \p fileName.
++USDDRACO_API
+ bool UsdDraco_WriteDraco(const UsdGeomMesh &mesh,
+                          const std::string &fileName,
+                          int qp,
+@@ -31,6 +45,7 @@ bool UsdDraco_WriteDraco(const UsdGeomMesh &mesh,
+ /// Checks whether a USD primvar can be encoded to Draco. It is called from
+ /// usdcompress.py script to determine whether a primvar should be deleted from
+ /// USD mesh or remain in USD mesh.
++USDDRACO_API
+ bool UsdDraco_PrimvarSupported(const UsdGeomPrimvar &primvar);
+ 
+ 

@@ -97,6 +97,20 @@ namespace Unity.USDToolkit
             string outputPath,
             UsdExportOptions options = null)
         {
+            return ExportCore(root, outputPath, options, null);
+        }
+
+        // `afterScene` runs once the scene is written and before the stage is saved, with what was
+        // written where (in a Preserve export, on the scene layer, whose prims are the overrides and
+        // the new content); UsdAnimationRecorder adds its time samples there and sets
+        // `requiresAnimation`, which refuses a plugin older than API 13 before anything is written.
+        internal static UsdExportResult ExportCore(
+            GameObject root,
+            string outputPath,
+            UsdExportOptions options,
+            Action<IntPtr, ExportSceneInfo> afterScene,
+            bool requiresAnimation = false)
+        {
             if (root == null)
             {
                 throw new ArgumentNullException(nameof(root));
@@ -130,12 +144,17 @@ namespace Unity.USDToolkit
             // a prim, so writing it as one turned /Teapot into /Teapot/Teapot and moved every path.
             // With no explicit RootPrimName, a flattened export of an import root starts at the
             // stage's own root prim (its single child) and keeps the stage's units unless the
-            // caller asked for others.
+            // caller asked for others. The stage written is always Y-up, so a Z-up source gets its
+            // turn to Y-up on the root prim (zUpSource below), where the importer had put it on the
+            // import root; without it, a re-export of an Isaac Sim stage or a recording of Blender's
+            // Z-up output lay on its back.
             float metersPerUnit = options.MetersPerUnit;
             Transform exportedRootPrim = null;
             UsdStageSource stageSource = root.GetComponent<UsdStageSource>();
+            bool zUpSource = false;
             if (stageSource != null && options.Composition != UsdCompositionMode.Preserve)
             {
+                zUpSource = stageSource.UpAxisCode == 2;
                 if (string.IsNullOrWhiteSpace(options.RootPrimName) && root.transform.childCount == 1)
                 {
                     exportedRootPrim = root.transform.GetChild(0);
@@ -161,11 +180,28 @@ namespace Unity.USDToolkit
             };
 
             bool packageAsUsdz = IsUsdzPath(fullOutputPath);
+            bool alembic = IsAlembicPath(fullOutputPath);
+            bool draco = IsDracoPath(fullOutputPath);
             string stagingDirectory = null;
             IntPtr context = IntPtr.Zero;
             try
             {
                 ValidateNativeApiVersion();
+                if (requiresAnimation && !UsdNative.SupportsAnimation)
+                {
+                    throw new UsdExportException(
+                        $"Writing animation needs {UsdNative.NeedsPlugin(UsdNative.AnimationApiVersion)}; {UsdNative.LoadedPluginDescription}. Rebuild the native plugin for this platform (see Native~/REBUILD_WINDOWS_LINUX.md).");
+                }
+
+                if (alembic)
+                {
+                    RequireAlembicSupport(options, nativeRuntime);
+                }
+
+                if (draco)
+                {
+                    RequireDracoSupport(options, nativeRuntime, requiresAnimation);
+                }
 
                 // usdz is a read-only format, so it cannot be written as a stage. Write the stage
                 // (and, with ExportTextures, its texture folder) into a staging directory, then
@@ -180,13 +216,14 @@ namespace Unity.USDToolkit
                         Path.GetFileNameWithoutExtension(fullOutputPath) + ".usdc");
                 }
 
-                var textureContext = new TextureExportContext(stagePath, options.ExportTextures, options.IgnoreAlbedoInMetallicSlot);
+                // Alembic and Draco keep no material bindings, so texture files beside them would serve nothing.
+                var textureContext = new TextureExportContext(stagePath, options.ExportTextures && !alembic && !draco, options.IgnoreAlbedoInMetallicSlot);
                 if (options.Composition == UsdCompositionMode.Preserve)
                 {
                     // The composed path opens its own layers (the scene plus one per asset file)
                     // and hands back the scene layer's context, already saved, for the
                     // diagnostics and packaging below.
-                    ExportComposed(root, rootPrimName, stagePath, packageAsUsdz, options, result, textureContext, ref context);
+                    ExportComposed(root, rootPrimName, stagePath, packageAsUsdz, options, result, textureContext, afterScene, ref context);
                 }
                 else
                 {
@@ -195,15 +232,33 @@ namespace Unity.USDToolkit
                         rootPrimName,
                         metersPerUnit,
                         options.CaptureNativeDiagnostics);
-                    if (exportedRootPrim != null)
+                    ApplyMaterialFlavors(context, options);
+                    if (exportedRootPrim != null || alembic || draco || zUpSource)
                     {
                         // The stage's root prim keeps its own transform; below it, every prim is
-                        // written relative to it as usual.
-                        UsdNative.AddXform(context, "/" + rootPrimName,
-                            ToUsdMatrix(GetLocalMatrix(exportedRootPrim)), exportedRootPrim.gameObject.activeInHierarchy);
+                        // written relative to it as usual. A Z-up source is turned to Y-up there,
+                        // as the importer turns it. Alembic records no units and its readers
+                        // (OpenUSD, Unity's Alembic package, Maya) take it for centimeters, so
+                        // there the root prim also scales the scene into them. A Draco file has
+                        // no units either, and OpenUSD reads it the same way.
+                        Matrix4x4 rootMatrix = exportedRootPrim != null ? GetLocalMatrix(exportedRootPrim) : Matrix4x4.identity;
+                        if (zUpSource)
+                        {
+                            rootMatrix = Matrix4x4.Rotate(Quaternion.Euler(-90f, 0f, 0f)) * rootMatrix;
+                        }
+
+                        if (alembic || draco)
+                        {
+                            rootMatrix = Matrix4x4.Scale(Vector3.one * (metersPerUnit / AlembicMetersPerUnit)) * rootMatrix;
+                        }
+
+                        UsdNative.AddXform(context, "/" + rootPrimName, ToUsdMatrix(rootMatrix),
+                            exportedRootPrim == null ||
+                            (options.VisibilityPerObject ? exportedRootPrim.gameObject.activeSelf : exportedRootPrim.gameObject.activeInHierarchy));
                     }
 
-                    ExportMeshes(root, rootPrimName, context, options, result, textureContext);
+                    ExportSceneInfo scene = ExportMeshes(root, rootPrimName, context, options, result, textureContext, alembic || draco);
+                    afterScene?.Invoke(context, scene);
                     UsdNative.EndExport(context);
                 }
 
@@ -263,12 +318,89 @@ namespace Unity.USDToolkit
                 string.Equals(Path.GetExtension(path), ".usdz", StringComparison.OrdinalIgnoreCase);
         }
 
+        // What OpenUSD (UsdGeomGetStageMetersPerUnit's fallback) reads an Alembic file's units as.
+        internal const float AlembicMetersPerUnit = 0.01f;
+
+        internal static bool IsAlembicPath(string path)
+        {
+            return !string.IsNullOrEmpty(path) &&
+                string.Equals(Path.GetExtension(path), ".abc", StringComparison.OrdinalIgnoreCase);
+        }
+
+        internal static bool IsDracoPath(string path)
+        {
+            return !string.IsNullOrEmpty(path) &&
+                string.Equals(Path.GetExtension(path), ".drc", StringComparison.OrdinalIgnoreCase);
+        }
+
+        // A .drc is one mesh, encoded by OpenUSD's usdDraco writer (native API 13): every visible
+        // mesh merged in the export root's space, skinned meshes in their current pose, no
+        // hierarchy, materials or animation.
+        private static void RequireDracoSupport(UsdExportOptions options, NativeRuntimeInfo nativeRuntime, bool requiresAnimation)
+        {
+            if (options.Composition == UsdCompositionMode.Preserve)
+            {
+                throw new UsdExportException(
+                    "A Draco (.drc) file holds one mesh and cannot hold USD composition (references, payloads, overrides). Export it with UsdCompositionMode.Flatten, or write .usd/.usda/.usdc.");
+            }
+
+            if (requiresAnimation)
+            {
+                throw new UsdExportException(
+                    "A Draco (.drc) file holds one static mesh and cannot hold animation. Record to .usd/.usda/.usdc or .abc instead.");
+            }
+
+            if (!UsdNative.SupportsDracoExport)
+            {
+                throw new UsdExportException(
+                    $"Writing .drc needs {UsdNative.NeedsPlugin(UsdNative.DracoExportApiVersion)}; {UsdNative.LoadedPluginDescription}. Rebuild the native plugin for this platform (see Native~/REBUILD_WINDOWS_LINUX.md).",
+                    nativeRuntime.ToDiagnosticString());
+            }
+
+            bool found = false;
+            foreach (string entry in (nativeRuntime.PluginSearchPath ?? string.Empty).Split(Path.PathSeparator))
+            {
+                found |= entry.Length > 0 && File.Exists(Path.Combine(entry, "usdDraco", "resources", "plugInfo.json"));
+            }
+
+            if (!found)
+            {
+                throw new UsdExportException(
+                    "Writing .drc needs OpenUSD's usdDraco plugin, which this platform's payload does not have. Rebuild the payload with Native~/build_openusd.py (see Native~/REBUILD_WINDOWS_LINUX.md), or export .usd/.usda/.usdc instead.",
+                    nativeRuntime.ToDiagnosticString());
+            }
+        }
+
+        // An .abc is written by OpenUSD's usdAbc plugin. Alembic has no composition and no
+        // skeletons: an override export cannot be one, and skinned meshes are baked (ExportMeshes).
+        private static void RequireAlembicSupport(UsdExportOptions options, NativeRuntimeInfo nativeRuntime)
+        {
+            if (options.Composition == UsdCompositionMode.Preserve)
+            {
+                throw new UsdExportException(
+                    "An Alembic (.abc) file cannot hold USD composition (references, payloads, overrides). Export it with UsdCompositionMode.Flatten, or write .usd/.usda/.usdc.");
+            }
+
+            bool found = false;
+            foreach (string entry in (nativeRuntime.PluginSearchPath ?? string.Empty).Split(Path.PathSeparator))
+            {
+                found |= entry.Length > 0 && File.Exists(Path.Combine(entry, "usdAbc", "resources", "plugInfo.json"));
+            }
+
+            if (!found)
+            {
+                throw new UsdExportException(
+                    "Writing .abc needs OpenUSD's usdAbc plugin, which this platform's payload does not have. Rebuild the payload with Native~/build_openusd.py (see Native~/REBUILD_WINDOWS_LINUX.md), or export .usd/.usda/.usdc instead.",
+                    nativeRuntime.ToDiagnosticString());
+            }
+        }
+
         private static void RequireUsdzSupport()
         {
             if (!UsdNative.SupportsUsdz)
             {
                 throw new UsdExportException(
-                    $"Writing .usdz needs native API {UsdNative.UsdzApiVersion} or newer; the loaded {UsdNative.NativeDllName} reports {UsdNative.LoadedApiVersion}. Rebuild the native plugin for this platform (see Native~/REBUILD_WINDOWS_LINUX.md), or export .usdc/.usda instead.");
+                    $"Writing .usdz needs {UsdNative.NeedsPlugin(UsdNative.UsdzApiVersion)}; {UsdNative.LoadedPluginDescription}. Rebuild the native plugin for this platform (see Native~/REBUILD_WINDOWS_LINUX.md), or export .usdc/.usda instead.");
             }
         }
 
@@ -308,7 +440,7 @@ namespace Unity.USDToolkit
         // still accepted (added entry points are additive), but an *older* one is refused rather
         // than degraded: beyond the features it cannot deliver, any fix that is not gated on the
         // ABI version is simply absent from it with nothing in the version number to say so --
-        // the SECURITY-282834 topology and asset-path fixes are exactly that shape.
+        // the security review topology and asset-path fixes are exactly that shape.
         internal static void ValidateNativeApiVersion()
         {
             int apiVersion = UsdNative.LoadedApiVersion;
@@ -318,21 +450,24 @@ namespace Unity.USDToolkit
             }
 
             throw new UsdExportException(
-                $"Unity USD Toolkit native API version mismatch. This package's source is API " +
-                $"{UsdNative.LatestApiVersion} and requires at least API {UsdNative.MinimumApiVersion}, " +
-                $"but the loaded plugin reports API {apiVersion}. A plugin older than the source is " +
+                $"Unity USD Toolkit native plugin mismatch. This package is written against the " +
+                $"{UsdNative.PluginRelease(UsdNative.LatestApiVersion)} native plugin and needs at least the " +
+                $"{UsdNative.PluginRelease(UsdNative.MinimumApiVersion)} one, but {UsdNative.LoadedPluginDescription} " +
+                $"(native API {apiVersion}). A plugin older than the source is " +
                 $"missing entry points *and* any fix made since it was built, including the " +
-                $"SECURITY-282834 import hardening. Rebuild {UsdNative.NativeDllName} from this " +
+                $"import hardening. Rebuild {UsdNative.NativeDllName} from this " +
                 $"package's Native~ sources (see Native~/REBUILD_WINDOWS_LINUX.md).");
         }
 
-        private static void ExportMeshes(
+        // `bakeSkinning` writes every skinned mesh in its current pose, for a format with no skeletons.
+        private static ExportSceneInfo ExportMeshes(
             GameObject root,
             string rootPrimName,
             IntPtr context,
             UsdExportOptions options,
             UsdExportResult result,
-            TextureExportContext textureContext)
+            TextureExportContext textureContext,
+            bool bakeSkinning = false)
         {
             var usedPaths = new HashSet<string>(StringComparer.Ordinal);
             Dictionary<Transform, string> xformPaths = null;
@@ -340,6 +475,8 @@ namespace Unity.USDToolkit
             {
                 xformPaths = ExportXforms(root, rootPrimName, context, options);
             }
+
+            var scene = new ExportSceneInfo { XformPaths = xformPaths, BakeSkinning = bakeSkinning };
 
             var filters = root.GetComponentsInChildren<MeshFilter>(options.IncludeInactive);
             foreach (MeshFilter filter in filters)
@@ -356,20 +493,48 @@ namespace Unity.USDToolkit
                     continue;
                 }
 
+                // A mesh a UsdDualQuaternionSkin poses is a skinned mesh; ExportSkinnedMeshes writes it.
+                if (filter.TryGetComponent(out UsdDualQuaternionSkin _))
+                {
+                    continue;
+                }
+
                 Mesh workMesh = AcquireReadableMesh(filter, mesh, options, out bool tempMesh);
                 if (workMesh == null)
                 {
                     continue;
                 }
 
+                // A point cache draws its current frame through a vertex stream; that frame is
+                // what is on screen, so it is what is written, as a skinned mesh's current pose is.
+                Mesh stream = renderer != null ? renderer.additionalVertexStreams : null;
+                if (stream != null && stream.vertexCount == workMesh.vertexCount && stream.isReadable &&
+                    stream.HasVertexAttribute(UnityEngine.Rendering.VertexAttribute.Position))
+                {
+                    Mesh drawn = UnityEngine.Object.Instantiate(workMesh);
+                    drawn.SetVertices(stream.vertices);
+                    Vector3[] streamNormals = stream.normals;
+                    if (streamNormals.Length == drawn.vertexCount)
+                    {
+                        drawn.SetNormals(streamNormals);
+                    }
+
+                    if (tempMesh)
+                    {
+                        UnityEngine.Object.DestroyImmediate(workMesh);
+                    }
+
+                    workMesh = drawn;
+                    tempMesh = true;
+                }
+
                 try
                 {
                     RUsdMaterial[] materials = CreateMaterials(renderer, textureContext);
-                    bool visible = !options.PreserveInactiveAndDisabledVisibility ||
-                        filter.gameObject.activeInHierarchy && (renderer == null || renderer.enabled);
                     string primPath = options.TransformPolicy == UsdTransformPolicy.PreserveHierarchy
                         ? MakePreservedMeshPrimPath(root.transform, filter.transform, rootPrimName, xformPaths, usedPaths)
                         : MakeBakedMeshPrimPath(root.transform, filter.transform, rootPrimName, usedPaths);
+                    bool visible = IsShown(options, filter.gameObject, renderer, xformPaths, primPath);
 
                     BuildMeshPayload(root.transform, filter.transform, workMesh, options,
                         options.TransformPolicy == UsdTransformPolicy.PreserveHierarchy, out RUsdVec3[] points,
@@ -386,6 +551,12 @@ namespace Unity.USDToolkit
                         materials,
                         visible,
                         options.ExportBounds);
+                    WriteMeshExtras(context, primPath, workMesh, options);
+                    if (renderer != null)
+                    {
+                        scene.MeshPaths[renderer] = primPath;
+                    }
+
                     result.AddMesh(
                         GetTransformPath(root.transform, filter.transform),
                         mesh.name,
@@ -403,6 +574,10 @@ namespace Unity.USDToolkit
                     }
                 }
             }
+
+            ExportLightsAndCameras(root.transform, rootPrimName, context, options, xformPaths, usedPaths, result);
+            ExportSkinnedMeshes(root, rootPrimName, context, options, result, textureContext, scene, usedPaths);
+            return scene;
         }
 
         // A mesh with readable=false blocks CPU access (mesh.vertices and friends) in Play mode.
@@ -602,6 +777,30 @@ namespace Unity.USDToolkit
                 ReadComponent(data, offset, format, 1));
         }
 
+        // Whether the prim written for `target` shows. Normally what is on screen (activeInHierarchy);
+        // with VisibilityPerObject the object's own state (activeSelf), since USD visibility
+        // inherits. A mesh written as a child of its object's Xform (primPath not the Xform's own)
+        // leaves the object's state to that Xform. Without PreserveInactiveAndDisabledVisibility
+        // everything shows.
+        private static bool IsShown(UsdExportOptions options, GameObject target, Renderer renderer,
+                                    Dictionary<Transform, string> xformPaths, string primPath)
+        {
+            if (!options.PreserveInactiveAndDisabledVisibility)
+            {
+                return true;
+            }
+
+            bool enabled = renderer == null || renderer.enabled;
+            if (!options.VisibilityPerObject)
+            {
+                return enabled && target.activeInHierarchy;
+            }
+
+            bool ownPrim = primPath == null || xformPaths == null ||
+                           !xformPaths.TryGetValue(target.transform, out string xformPath) || xformPath == primPath;
+            return enabled && (!ownPrim || target.activeSelf);
+        }
+
         private static Dictionary<Transform, string> ExportXforms(
             GameObject root,
             string rootPrimName,
@@ -626,7 +825,7 @@ namespace Unity.USDToolkit
                     continue;
                 }
 
-                bool visible = !options.PreserveInactiveAndDisabledVisibility || transform.gameObject.activeInHierarchy;
+                bool visible = IsShown(options, transform.gameObject, null, null, null);
                 string parentPath = xformPaths.TryGetValue(transform.parent, out string resolvedParentPath)
                     ? resolvedParentPath
                     : "/" + rootPrimName;
@@ -918,12 +1117,13 @@ namespace Unity.USDToolkit
             }
 
             // Back to USD's linear colours; the inverse of UsdImporter.UsdColorToMaterialColor.
+            // The emission colour is an [HDR] property that Unity already stores linear, so it is
+            // exported as is.
             if (QualitySettings.activeColorSpace == ColorSpace.Linear)
             {
                 float alpha = color.a;
                 color = color.linear;
                 color.a = alpha;
-                emissive = emissive.linear;
             }
 
             return new RUsdMaterial
@@ -1390,7 +1590,7 @@ namespace Unity.USDToolkit
             // The opt-out is honoured in the Editor and in development builds, where a developer
             // may be iterating on the native plugin without regenerating the manifest. A release
             // player verifies regardless: post-distribution substitution is the threat this check
-            // exists for, and a shipped build is precisely where it applies (SECURITY-282834).
+            // exists for, and a shipped build is precisely where it applies (security review).
             if (options.VerifyNativeRuntimeIntegrity || IsReleasePlayer)
             {
                 if (!options.VerifyNativeRuntimeIntegrity)
@@ -1518,7 +1718,7 @@ namespace Unity.USDToolkit
         //
         // Descriptors are covered, not only libraries. OpenUSD decides which library to load from
         // plugInfo.json, so hashing binaries alone left an attacker free to add a library and
-        // repoint a descriptor at it, with the check still reporting OK (SECURITY-282834,
+        // repoint a descriptor at it, with the check still reporting OK (security review,
         // CWE-345). For the same reason an *unlisted* file inside the plugin resource trees is a
         // failure, not a warning: those trees are entirely ours, so anything extra in them was
         // added by someone else.
@@ -1700,7 +1900,7 @@ namespace Unity.USDToolkit
         // Every plugInfo.json names the library OpenUSD should load for that plugin, and OpenUSD
         // loads it in-process. A descriptor that points outside this package's own payload is
         // therefore arbitrary code execution, so each LibraryPath is resolved and confined before
-        // PXR_PLUGINPATH_NAME is set (SECURITY-282834, CWE-345). The digest check above notices a
+        // PXR_PLUGINPATH_NAME is set (CWE-345). The digest check above notices a
         // descriptor that was *edited*; this notices one that points somewhere it should not,
         // which also covers the case where the check is switched off.
         //
@@ -2077,7 +2277,7 @@ namespace Unity.USDToolkit
             return new[] { "libtbb.so", "libtbb.so.2", "libtbb.so.12" };
 #else
             // tbb_usdrt.dll is Intel's TBB renamed so the Windows loader cannot hand us the
-            // Editor's own tbb.dll instead (SECURITY-282834). tbb.dll stays in the list because a
+            // Editor's own tbb.dll instead (security review). tbb.dll stays in the list because a
             // payload built before that rename is still a valid payload.
             return new[] { "tbb_usdrt.dll", "tbb.dll" };
 #endif

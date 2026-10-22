@@ -33,6 +33,7 @@ namespace Unity.USDToolkit
         private const int CompressionRle = 1;
         private const int CompressionZips = 2;
         private const int CompressionZip = 3;
+        private const int CompressionPiz = 4;
 
         // Same limits as the native decoder (UsdImageCodecs.cpp). RGBA and a few auxiliary layers
         // is all a texture carries; thousands of channels only make every buffer enormous.
@@ -48,6 +49,8 @@ namespace Unity.USDToolkit
             {
                 case CompressionNone: return compressed;
                 case CompressionRle: return compressed * 64 + 128;
+                // Huffman with run codes: a flat image can shrink by far more than deflate.
+                case CompressionPiz: return compressed * 8192 + (1 << 20);
                 default: return compressed * 1032 + 1032;
             }
         }
@@ -109,6 +112,38 @@ namespace Unity.USDToolkit
             public int Height => (int)Height64;
         }
 
+        // Set only for the duration of TryDecodeFloat: the managed path then also writes linear
+        // float pixels here (the 8-bit output still happens, unused). Thread-local so concurrent
+        // texture decodes on worker threads are unaffected.
+        [ThreadStatic] private static float[] s_floatOut;
+        [ThreadStatic] private static bool s_floatRequested;
+
+        /// <summary>
+        /// Decodes to linear float RGBA (width*height*4, row 0 = bottom) without clamping, for a
+        /// dome light's environment where values above 1 are the sun and the lamps. Managed path only.
+        /// </summary>
+        public static bool TryDecodeFloat(byte[] data, out int width, out int height, out float[] rgba,
+                                          out string reason)
+        {
+            rgba = null;
+            s_floatRequested = true;
+            try
+            {
+                bool ok = TryDecode(data, false, out width, out height, out byte[] _, out reason);
+                if (ok)
+                {
+                    rgba = s_floatOut;
+                }
+
+                return ok && rgba != null;
+            }
+            finally
+            {
+                s_floatRequested = false;
+                s_floatOut = null;
+            }
+        }
+
         public static bool IsExr(byte[] data)
         {
             return data != null && data.Length >= 8 &&
@@ -136,14 +171,15 @@ namespace Unity.USDToolkit
             // The native reader is the same decoder in C++ with the platform's zlib; on ALab it
             // is the difference between a 70-second import and one Isaac Sim's size. It hands
             // back here only when its zlib could not be opened.
-            if (UsdNative.SupportsImageCodecs)
+            if (UsdNative.SupportsImageCodecs && !s_floatRequested)
             {
                 if (UsdNative.TryDecodeExr(data, srgb, out width, out height, out rgba, out reason, out bool fallback))
                 {
                     return true;
                 }
 
-                if (!fallback)
+                // The native reader predates PIZ; let the managed one try a compression it refused.
+                if (!fallback && (reason == null || reason.IndexOf("compression", StringComparison.OrdinalIgnoreCase) < 0))
                 {
                     width = 0;
                     height = 0;
@@ -198,9 +234,10 @@ namespace Unity.USDToolkit
                 case CompressionRle:
                 case CompressionZips:
                 case CompressionZip:
+                case CompressionPiz:
                     break;
                 default:
-                    reason = $"OpenEXR compression {CompressionName(header.Compression)} is not supported (NONE, RLE, ZIPS and ZIP are)";
+                    reason = $"OpenEXR compression {CompressionName(header.Compression)} is not supported (NONE, RLE, ZIPS, ZIP and PIZ are)";
                     return false;
             }
 
@@ -223,6 +260,14 @@ namespace Unity.USDToolkit
             width = (int)w;
             height = (int)h;
             rgba = new byte[(long)width * height * 4];
+            if (s_floatRequested)
+            {
+                s_floatOut = new float[(long)width * height * 4];
+                for (long i = 3; i < s_floatOut.LongLength; i += 4)
+                {
+                    s_floatOut[i] = 1f;
+                }
+            }
 
             // Channels the output does not take are skipped, so an alpha-less image still fills
             // alpha with 255.
@@ -256,6 +301,15 @@ namespace Unity.USDToolkit
                 {
                     rgba[i + 1] = rgba[i];
                     rgba[i + 2] = rgba[i];
+                }
+
+                if (s_floatOut != null)
+                {
+                    for (long i = 0; i < s_floatOut.LongLength; i += 4)
+                    {
+                        s_floatOut[i + 1] = s_floatOut[i];
+                        s_floatOut[i + 2] = s_floatOut[i];
+                    }
                 }
             }
 
@@ -464,7 +518,7 @@ namespace Unity.USDToolkit
         {
             reason = null;
             int width = header.Width, height = header.Height;
-            int linesPerChunk = header.Compression == CompressionZip ? 16 : 1;
+            int linesPerChunk = header.Compression == CompressionZip ? 16 : header.Compression == CompressionPiz ? 32 : 1;
             long bytesPerLine = BytesPerRow(header.Channels, width);
             if (bytesPerLine <= 0 || bytesPerLine * Math.Min(linesPerChunk, height) > int.MaxValue)
             {
@@ -501,7 +555,7 @@ namespace Unity.USDToolkit
                     return false;
                 }
 
-                if (!Unpack(data, at, dataSize, expected, header.Compression, chunk, scratch, out reason))
+                if (!Unpack(data, at, dataSize, expected, header.Compression, chunk, scratch, header, width, lines, out reason))
                 {
                     return false;
                 }
@@ -584,7 +638,7 @@ namespace Unity.USDToolkit
                     return false;
                 }
 
-                if (!Unpack(data, at, dataSize, expected, header.Compression, chunk, scratch, out reason))
+                if (!Unpack(data, at, dataSize, expected, header.Compression, chunk, scratch, header, tileW, tileH, out reason))
                 {
                     return false;
                 }
@@ -631,9 +685,20 @@ namespace Unity.USDToolkit
 
         // Produces the `expected` uncompressed bytes of one chunk into `chunk`.
         private static bool Unpack(byte[] data, int at, int dataSize, int expected, int compression,
-                                   byte[] chunk, byte[] scratch, out string reason)
+                                   byte[] chunk, byte[] scratch, Header header, int width, int lines, out string reason)
         {
             reason = null;
+            if (compression == CompressionPiz && dataSize != expected)
+            {
+                var sizes = new int[header.Channels.Length];
+                for (int i = 0; i < sizes.Length; i++)
+                {
+                    sizes[i] = header.Channels[i].BytesPerSample / 2;
+                }
+
+                return UsdExrPiz.Decompress(data, at, dataSize, chunk, expected, sizes, width, lines, out reason);
+            }
+
             if (compression == CompressionNone || dataSize == expected)
             {
                 // Stored raw: either the file is uncompressed or the codec did not help.
@@ -667,6 +732,7 @@ namespace Unity.USDToolkit
                                        int x0, int y0, int rowWidth, int rows)
         {
             byte[] halfTable = srgb ? HalfToSrgbByte : HalfToLinearByte;
+            float[] floats = s_floatOut;
             int width = header.Width, height = header.Height;
             int lineAt = 0;
             for (int row = 0; row < rows; row++)
@@ -686,14 +752,24 @@ namespace Unity.USDToolkit
                         case PixelHalf:
                             for (int x = 0; x < rowWidth; x++, outAt += 4, lineAt += 2)
                             {
-                                rgba[outAt] = halfTable[pixels[lineAt] | (pixels[lineAt + 1] << 8)];
+                                int bits = pixels[lineAt] | (pixels[lineAt + 1] << 8);
+                                rgba[outAt] = halfTable[bits];
+                                if (floats != null)
+                                {
+                                    floats[outAt] = HalfToFloat((ushort)bits);
+                                }
                             }
 
                             break;
                         case PixelFloat:
                             for (int x = 0; x < rowWidth; x++, outAt += 4, lineAt += 4)
                             {
-                                rgba[outAt] = ToByte(BitConverter.ToSingle(pixels, lineAt), srgb);
+                                float value = BitConverter.ToSingle(pixels, lineAt);
+                                rgba[outAt] = ToByte(value, srgb);
+                                if (floats != null)
+                                {
+                                    floats[outAt] = value;
+                                }
                             }
 
                             break;

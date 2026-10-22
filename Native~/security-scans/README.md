@@ -19,6 +19,11 @@ Every row in `Native~/dependency-sources/<platform>.tsv`, at the version pinned 
 | oneTBB | 2020.3 | `onetbb-2020.3.md` (macOS, Windows) |
 | oneTBB | 2020.3.1 | `onetbb-2020.3.1.md` (Linux) |
 | MaterialX | 1.39.4 | `materialx-1.39.4.md` (all platforms; must cover its vendored pugixml) |
+| OpenEXR | 3.1.13 | `openexr-3.1.13.md` (all platforms; compiled, though none of it ships) |
+| Imath | 3.1.9 | `imath-3.1.9.md` (all platforms; the FetchContent source OpenEXR builds) |
+| Alembic | 1.8.5 | `alembic-1.8.5.md` (all platforms) |
+| Draco | 1.5.6 | `draco-1.5.6.md` (macOS, Linux; say whether `third_party` was scanned -- it is not compiled) |
+| zlib | 1.2.13 | `zlib-1.2.13.md` (Windows; compiled for OpenEXR, none of it ships) |
 
 The record's file name is the row's component, lowercased, and its version:
 `verify_upstream_sources.py` looks for `<component>-<version>.md` and nothing else.
@@ -70,7 +75,10 @@ unverified tree measures whatever happened to be on the machine.
 What is compiled is that commit **with the Unity patches in `Native~/patches` applied**, so scan
 the patched tree — the `openusd-src` worktree `build_openusd.py` leaves inside the install — and
 say so in the OpenUSD record, with the patch's SHA-256. A patch has no record of its own; it is
-covered by the record of the tree it is applied to.
+covered by the record of the tree it is applied to. The same holds for an `archive-patch` row:
+Alembic is compiled from its archive with `alembic-1.8.5-hardening.patch` applied, so its record
+scans the patched tree `build_openusd.py` leaves at `<install>/src/alembic-1.8.5` and names the
+patch's SHA-256.
 
 Two things are worth settling with AppSec (`#support-appsec-tools`) rather than assuming: whether
 a Cycode SAST run over third-party source is what they want here or whether a different tool is
@@ -115,7 +123,7 @@ Passing the gate is still not the review. Someone has to read the record and agr
 
 Both the release and the stamp record it. `--check-stamp <install> --require-scan` fails an install
 built without `--require-scan`. `Native~/CMakeLists.txt` uses that check to leave `.unscanned-build`
-in a payload whose install was built without it, and `.yamato/pack.yml` requires a passing record
+in a payload whose install was built without it, and the CI pack job requires a passing record
 for every platform's pins and runs `generate_native_hashes.py --release`, which refuses a marked
 payload. A local build or the integrity job only warns, so work goes on while a scan is outstanding;
 the payload just cannot be packed.
@@ -123,6 +131,7 @@ the payload just cannot be packed.
 ## Status
 
 **No scan has been run yet.** Cycode covers this repository's own code, not the upstream source,
-so there is no record here for OpenUSD, oneTBB or MaterialX. The three committed payloads carry
+so there is no record here for OpenUSD, oneTBB, MaterialX, or the OpenEXR, Imath, Alembic, Draco and
+zlib sources the file format plugins added. The three committed payloads carry
 `.unscanned-build` for that reason, and the pack job refuses them until they are rebuilt from
 source with a passing record for each version.

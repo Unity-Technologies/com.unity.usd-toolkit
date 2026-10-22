@@ -1,0 +1,12 @@
+#usda 1.0
+(
+    defaultPrim = "Root"
+    doc = "Time-metadata fixture no_time, written by make_time.py."
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+def Xform "Root"
+{
+}
+

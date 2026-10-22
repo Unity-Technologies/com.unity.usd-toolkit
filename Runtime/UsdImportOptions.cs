@@ -25,7 +25,7 @@ namespace Unity.USDToolkit
         ///
         /// Honoured in the Editor and in development builds only. A release player verifies
         /// regardless, because post-distribution substitution is the threat the check exists for
-        /// (SECURITY-282834).
+        /// (security review).
         /// </remarks>
         public bool VerifyNativeRuntimeIntegrity = true;
 
@@ -48,6 +48,62 @@ namespace Unity.USDToolkit
         public bool IncludeInvisible = true;
         public bool GenerateColliders;
         public bool RecalculateNormalsIfMissing = true;
+
+        /// <summary>
+        /// Shades every mesh with smooth normals computed from its geometry, as Isaac Sim does,
+        /// instead of the normals the stage authors. Isaac Sim's RTX renderer draws a mesh the same
+        /// whether its <c>normals</c> or <c>primvars:normals</c> are present, blocked or replaced
+        /// (measured on NVIDIA's Factory), so a stage whose exporter wrote hard breaks into its
+        /// normals (the Factory's car body: facets in Unity, smooth in Isaac Sim) only matches
+        /// when Unity ignores them too. Faces meeting at more than 60 degrees keep their edge.
+        /// Turn it off to import the authored normals as they are. On by default.
+        /// </summary>
+        public bool SmoothNormalsLikeIsaac = true;
+
+        /// <summary>
+        /// Decodes a normal map whose file input authors no colour space as sRGB when the file is
+        /// 8-bit, as Isaac Sim does. USD reads an unauthored colour space as "auto", which for an
+        /// 8-bit image is sRGB, and Omniverse applies that to normal maps too: NVIDIA's pallet prop
+        /// (an OmniPBR with a .tga normal map and no colorSpace) shades its sunlit top at a quarter
+        /// of what the same map read as raw gives (Isaac Sim 6.2, 0.25 against 3.46 times the
+        /// albedo, measured from its HdrColor and DiffuseAlbedo outputs). An authored "raw" or
+        /// "sRGB" is always followed. Turn it off to read every normal map as linear data. On by
+        /// default.
+        /// </summary>
+        public bool NormalMapColorSpaceLikeIsaac = true;
+
+        /// <summary>
+        /// Downloads the remote MDL modules a stage names by URL from NVIDIA's content servers,
+        /// with the textures they use, as Isaac Sim does, and imports them as the OmniPBR
+        /// materials they are. Isaac Sim stages often bind NVIDIA's material library this way
+        /// (https://omniverse-content-production.s3.us-west-2.amazonaws.com/Materials/...), and
+        /// without the download those surfaces import default grey. Only HTTPS on NVIDIA's content
+        /// hosts is fetched; a stage that needed a download is read a second time once the files
+        /// are in <see cref="RemoteMaterialCacheFolder"/>, and later imports read the cache. Off by
+        /// default: an import reaches the network only when the caller turns this on, since an
+        /// importer that goes online on its own is a policy question (air-gapped sites, security
+        /// review). Modules already in the cache are read either way.
+        /// </summary>
+        public bool DownloadRemoteMaterials;
+
+        /// <summary>
+        /// Where downloaded remote materials are kept, by host and path. Null means
+        /// <c>Application.temporaryCachePath</c>/UsdRemoteMaterials.
+        /// </summary>
+        public string RemoteMaterialCacheFolder;
+
+        /// <summary>
+        /// Draws open meshes from both sides, as Isaac Sim does. Omniverse RTX renders every mesh
+        /// double-sided whatever its <c>doubleSided</c> says (measured on Isaac Sim 6.2: a
+        /// <c>doubleSided = 0</c> quad seen from behind is drawn and lit), so a ceiling panel or a
+        /// wall built as a single sheet is visible from both sides there, and blocks light from
+        /// both. With this on, a mesh with open edges gets back faces as an authored
+        /// <c>doubleSided</c> mesh does; a closed mesh is left one-sided, since its inside cannot
+        /// be seen from outside and its triangles need not double. NVIDIA's Simple_Warehouse
+        /// ceiling imported invisible from below without it, and let its sunlight in. Turn it off
+        /// to follow <c>doubleSided</c> strictly. On by default.
+        /// </summary>
+        public bool DoubleSidedOpenMeshes = true;
         public bool CaptureNativeDiagnostics;
         public string NativeDiagnosticsLogPath;
 
@@ -58,6 +114,14 @@ namespace Unity.USDToolkit
         // Enable this only for stages you trust that deliberately reference a shared texture
         // library living outside their folder.
         public bool AllowExternalAssetPaths;
+
+        /// <summary>
+        /// The budgets the import is held to: nodes, meshes, point-instancer placements, points and
+        /// triangle indices, and animation samples, values and joints -- and whether a stage over
+        /// one fails the import (the default) or imports what fits, with a warning. The defaults
+        /// are the fixed limits earlier versions imported within. See <see cref="UsdImportLimits"/>.
+        /// </summary>
+        public UsdImportLimits Limits = new UsdImportLimits();
 
         // Async import only (UsdImporter.ImportAsync): the main-thread object-build pass yields
         // to the next frame once it has spent this many milliseconds, so large imports do not
@@ -138,15 +202,27 @@ namespace Unity.USDToolkit
         public bool ShareIdenticalMeshes = true;
 
         /// <summary>
+        /// Builds one Unity <see cref="Material"/> per distinct set of material values -- colours,
+        /// scalars, UV transform and texture files -- and shares it among every renderer whose USD
+        /// material resolves to the same set. Stages exported from Omniverse or the Unreal connector
+        /// bind a material prim per mesh, so without this a warehouse imports thousands of
+        /// identical Materials; Surface Cache GI then needs an atlas slice for each and fails past
+        /// 2,048. The shared Material keeps the first prim's name, and an edit to
+        /// <c>Renderer.sharedMaterial</c> shows on every object that uses it. Turn it off to get
+        /// one Material per material prim, as imports did before. On by default.
+        /// </summary>
+        public bool ShareIdenticalMaterials = true;
+
+        /// <summary>
         /// Adds a Unity <see cref="Light"/> for each UsdLux light (distant, sphere, disk, cylinder
-        /// and rect; native API 7). It sits on a child object turned to Unity's +Z convention,
+        /// and rect; the 0.8.0 native plugin). It sits on a child object turned to Unity's +Z convention,
         /// which exporters skip. Intensities are mapped heuristically: USD has no single unit
         /// convention for them, so check the result against the source renderer. On by default.
         /// </summary>
         public bool ImportLights = true;
 
         /// <summary>
-        /// Adds a disabled Unity <see cref="Camera"/> for each UsdGeomCamera (native API 7), on a
+        /// Adds a disabled Unity <see cref="Camera"/> for each UsdGeomCamera (the 0.8.0 native plugin), on a
         /// child object turned to Unity's convention, so the scene's existing camera keeps
         /// rendering until one of these is enabled. On by default.
         /// </summary>
@@ -154,17 +230,126 @@ namespace Unity.USDToolkit
 
         /// <summary>
         /// Adds an <see cref="AudioSource"/> and a <see cref="UsdSpatialAudio"/> for each
-        /// UsdMediaSpatialAudio (native API 7). The clip itself is not loaded; see
+        /// UsdMediaSpatialAudio (the 0.8.0 native plugin). The clip itself is not loaded; see
         /// <see cref="UsdSpatialAudio"/>. On by default.
         /// </summary>
         public bool ImportSpatialAudio = true;
 
         /// <summary>
-        /// Applies a UsdLuxDomeLight to the scene: its colour times intensity becomes the flat
-        /// ambient colour, and a PNG or JPG texture becomes a panoramic skybox. This changes
-        /// <see cref="RenderSettings"/> for the whole scene, so it is off by default; the dome is
-        /// always recorded on a <see cref="UsdDomeLight"/>.
+        /// Applies a UsdLuxDomeLight to the scene. With <see cref="PhysicalLightUnits"/> its texture
+        /// (OpenEXR, Radiance HDR, PNG or JPG; an untextured dome is a uniform sky) becomes the
+        /// skybox, the ambient light and the environment reflection, at the calibrated exposure;
+        /// without it, colour times intensity becomes a flat ambient. This changes
+        /// <see cref="RenderSettings"/> for the whole scene. On by default so that a stage looks
+        /// the way Isaac Sim draws it; the dome is always recorded on a <see cref="UsdDomeLight"/>.
         /// </summary>
-        public bool ApplyDomeLightToEnvironment;
+        public bool ApplyDomeLightToEnvironment = true;
+
+        /// <summary>
+        /// Converts light intensities with fixed scale factors calibrated against Isaac Sim 6.2.0
+        /// (RTX Real-Time 2.0) instead of normalising them to the stage's brightest light: a
+        /// distant light of 1000 and one of 10000 then differ by ten times, as authored. Rect lights
+        /// become a grid of wide spots (URP has no real-time area light). On by default.
+        /// </summary>
+        public bool PhysicalLightUnits = true;
+
+        /// <summary>
+        /// With <see cref="PhysicalLightUnits"/>, adds a shadowless point light at each emissive
+        /// surface, sized by its emitting area, so that an emitter lights its surroundings the way
+        /// a path tracer does. On by default.
+        /// </summary>
+        public bool EmissiveMeshLights = true;
+
+        /// <summary>
+        /// With <see cref="PhysicalLightUnits"/>, captures the scene's environment reflection from
+        /// inside the stage (its horizontal centre, 1.5 m above its lowest point) once the import
+        /// is lit, so metals and glass reflect the hall rather than the sky. Surfaces outside the
+        /// building reflect the interior too. The capture does not follow later lighting changes;
+        /// call <see cref="UsdImporter.RefreshReflection"/> after them. On by default.
+        /// </summary>
+        public bool InteriorReflection = true;
+
+        /// <summary>
+        /// Reads static values (transforms, points, primvars, visibility, implicit surfaces,
+        /// lights and cameras) at the stage's <c>startTimeCode</c>, or at each attribute's first
+        /// time sample when the stage authors no time range, as a viewer opens the stage. Turned
+        /// off they are read at USD's Default time, which ignores time samples: a stage that authors
+        /// its transforms only as samples, as Blender's animated exports do, then arrives with every
+        /// object at its parent's origin. Needs the 0.8.1 native plugin; older plugins always read at Default.
+        /// On by default.
+        /// </summary>
+        public bool ReadAtStageStartTime = true;
+
+        /// <summary>
+        /// Builds UsdSkel skinning: a joint hierarchy under each Skeleton prim (with a
+        /// <see cref="UsdSkeleton"/> on the Skeleton's object), and a
+        /// <see cref="SkinnedMeshRenderer"/> with bone weights, bind poses and blend shapes for each
+        /// skinned mesh, posed as the stage is at the read time. Joints are not prims, so exporters
+        /// and <see cref="UsdPrimSource"/> skip them. Turned off, skinned meshes import as static
+        /// meshes in their authored points, as before. Needs the 0.8.1 native plugin. On by default.
+        /// </summary>
+        public bool ImportSkinning = true;
+
+        /// <summary>
+        /// Skins the meshes UsdSkel marks <c>skel:skinningMethod = "dualQuaternion"</c> the way
+        /// UsdSkel does: a <see cref="UsdDualQuaternionSkin"/> deforms them on the CPU and draws the
+        /// result through their MeshRenderer, so twisting and bending joints keep their volume. Turned
+        /// off, they get a SkinnedMeshRenderer like every other skinned mesh, which blends linearly
+        /// on the GPU (cheaper, but the "candy wrapper" collapse dual quaternions exist to avoid
+        /// comes back), with a warning. Needs <see cref="ImportSkinning"/>. On by default.
+        /// </summary>
+        public bool DualQuaternionSkinning = true;
+
+        /// <summary>
+        /// Imports the stage's animation -- time-sampled prim transforms and visibility, skeleton
+        /// animation, blend-shape weights and time-sampled mesh points (point caches) -- as a
+        /// <see cref="UsdAnimationData"/> played by a
+        /// <see cref="UsdAnimationPlayer"/> on the import root (reported in
+        /// <see cref="UsdImportResult.Animation"/>), starting at the read time. Skeleton animation
+        /// needs <see cref="ImportSkinning"/>. Turned off, the stage imports frozen at the read
+        /// time. Needs the 0.8.1 native plugin. On by default.
+        /// </summary>
+        public bool ImportAnimation = true;
+
+        /// <summary>
+        /// Keeps each imported texture's CPU copy, so its pixels can be read back
+        /// (<c>Texture2D.isReadable</c>) and it can be saved as an asset, which serializes that copy.
+        /// The USD stage importer for project assets turns this on. Off by default: the GPU has the
+        /// pixels, and keeping a second copy doubles the memory textures take.
+        /// </summary>
+        public bool KeepTexturesReadable;
+
+        /// <summary>
+        /// Keeps the stage open after the import as <see cref="UsdStageSource.Stage"/>, so the first
+        /// live switch (<see cref="UsdStageSource.SwitchVariant"/>) need not open it again. The stage
+        /// holds its layers in memory for as long as the import lives; without this it is opened on
+        /// first use. Needs <see cref="RecordSource"/> and the 0.8.1 native plugin. Off by default.
+        /// </summary>
+        public bool KeepStageOpen;
+
+        /// <summary>
+        /// Builds the stage's UsdPhysics: each articulation (PhysicsArticulationRootAPI) as an
+        /// <see cref="ArticulationBody"/> tree with its joints' limits and drives, other rigid
+        /// bodies as <see cref="Rigidbody"/> with FixedJoint / ConfigurableJoint, colliders,
+        /// physics materials and collision filtering, read with OpenUSD's own physics parser
+        /// (PhysX's attributes included). ArticulationBody needs each link under its parent link,
+        /// so links an Isaac Sim robot keeps as siblings are moved under their parent link (world
+        /// pose kept). Next to each Unity body and joint a <see cref="UsdPhysicsBody"/> /
+        /// <see cref="UsdPhysicsJoint"/> keeps the authored values to compare against; what could
+        /// not be mapped is in <see cref="UsdImportResult.PhysicsNotes"/>. Gravity and the step rate
+        /// are recorded in a <see cref="UsdPhysicsScene"/>, not applied. Needs the 0.8.1 native
+        /// plugin. Off by default.
+        /// </summary>
+        public bool ImportPhysics;
+
+        // A copy whose lists are its own, so editing one set of options never changes another.
+        internal UsdImportOptions Clone()
+        {
+            var copy = (UsdImportOptions)MemberwiseClone();
+            copy.Limits = Limits?.Clone();
+            copy.VariantSelections = new List<UsdVariantSelection>(VariantSelections ?? new List<UsdVariantSelection>());
+            copy.PayloadsToLoad = new List<string>(PayloadsToLoad ?? new List<string>());
+            return copy;
+        }
     }
 }

@@ -1,0 +1,14 @@
+#usda 1.0
+(
+    defaultPrim = "Root"
+    doc = "Time-metadata fixture start_only, written by make_time.py."
+    metersPerUnit = 1
+    startTimeCode = 10
+    timeCodesPerSecond = 30
+    upAxis = "Y"
+)
+
+def Xform "Root"
+{
+}
+

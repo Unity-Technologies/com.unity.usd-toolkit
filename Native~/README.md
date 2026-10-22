@@ -34,9 +34,13 @@ The native binary cannot be cross-compiled — build Windows on Windows, macOS o
 macOS. Each is a two-step process: build OpenUSD once, then build this wrapper.
 
 OpenUSD is always built with `Native~/build_openusd.py`, never with `build_usd.py` directly:
-it checks the pinned TBB and MaterialX archives *before* `build_usd.py` compiles them and stamps the install,
-and every wrapper build (the three scripts below and `CMakeLists.txt` itself) refuses an
-install without that stamp. See `REBUILD_WINDOWS_LINUX.md` §5.
+it checks the pinned TBB, MaterialX, OpenEXR, Imath, Alembic and Draco archives *before*
+`build_usd.py` compiles them and stamps the install, and every wrapper build (the three scripts
+below and `CMakeLists.txt` itself) refuses an install without that stamp. See
+`REBUILD_WINDOWS_LINUX.md` §5. It builds OpenUSD's Alembic and Draco plugins everywhere (Draco
+on Windows through `patches/openusd-26.05-windows-draco.patch`), which needs **CMake 3.x** on `PATH` for the OpenUSD build: Alembic 1.8.5 sets
+a policy CMake 4 refuses, and the script stops early when it finds CMake 4. The wrapper builds
+below take either.
 
 **Windows (PowerShell, x64 Native Tools Command Prompt for VS):**
 1. Build OpenUSD 26.05 monolithic from a `v26.05` clone into a new directory:
@@ -57,7 +61,7 @@ install without that stamp. See `REBUILD_WINDOWS_LINUX.md` §5.
 1. Build OpenUSD (monolithic, universal) from a `v26.05` clone into a new directory:
    ```bash
    python3 Native~/build_openusd.py --platform macos --openusd-src <clone> \
-       --install /Users/Shared/usd-26.05-mtlx/install --build-target universal --require-scan
+       --install /Users/Shared/usd-26.05-hardened/install --build-target universal --require-scan
    ```
    It sets `MACOSX_DEPLOYMENT_TARGET=12.0` (`--deployment-target`). Nothing in OpenUSD's build
    sets a deployment target, so its dylibs otherwise take the SDK default — the build machine's
@@ -65,7 +69,7 @@ install without that stamp. See `REBUILD_WINDOWS_LINUX.md` §5.
    a macOS player. The wrapper's own `--deployment-target` does not reach them.
 2. From the package root:
    ```bash
-   ./Native~/build_macos.sh --openusd-root /Users/Shared/usd-26.05-mtlx/install --arch universal \
+   ./Native~/build_macos.sh --openusd-root /Users/Shared/usd-26.05-hardened/install --arch universal \
        --codesign-id "<Developer ID>"
    ```
    Installs `UnityUSDToolkitNative.dylib` + payload into `Runtime/Plugins/macOS/`.

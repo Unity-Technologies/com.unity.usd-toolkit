@@ -1,0 +1,515 @@
+Unity USD Toolkit patch to OpenUSD v26.05 (commit 2095fafafd033fa23386d7ec6d58c7cc33974518), applied
+after openusd-26.05-lz4-1.10.0.patch: bounds and null checks in the usdDraco and usdAbc file format
+plugins.
+
+Applied by Native~/build_openusd.py to a worktree of the pinned commit, never to the clone itself;
+its SHA-256 is pinned in Native~/dependency-sources/<platform>.tsv. Every change is marked
+"Unity USD Toolkit" in the source. Found by fuzzing the macOS payload (16,000 mutated .abc and .drc
+files, each through the importer's full read) and by importing meshes UsdDraco_WriteDraco itself
+wrote; every crash site below was hit. Files the plugins write themselves read exactly as before.
+
+usdDraco (pxr/usd/plugin/usdDraco):
+1. importAttribute.h: Draco copies byte_stride() bytes per value, a size the file declares; an
+   attribute whose stride is not sizeof(T) is now ignored, where it wrote past _values on the heap
+   (or past a local T in GetMappedValue). A point's value index is checked against the attribute
+   before it is read, and the original point order (PopulateValuesWithOrder) before it is written:
+   an order entry outside the values wrote a whole value past the end of _values.
+2. importTranslator.cpp, _FindOriginalFaceEdges: walks a polygon with an explicit stack instead of
+   recursing once per triangle, and never crosses an edge with no triangle on the other side. A
+   boundary edge flagged as added had Face(kInvalidCornerIndex) = 0xFFFFFFFF read and written as
+   triangleVisited[] and read as a face; a Suzanne mesh written with polygons preserved hit it.
+   Upstream dev still has this code as of 2026-10-17.
+3. importTranslator.cpp, _PopulateIndicesFromMesh: every face corner has to name a point and a
+   position before the corner table is built (one garbage index made Draco allocate for billions
+   of vertices); the corner table is built only for polygon reconstruction, and checked; each
+   polygon's edges are followed with find() (operator[] inserted edges) and must form one loop of
+   exactly as many corners as edges, within the index arrays.
+4. importTranslator.cpp: attribute metadata names its attribute by unique id, which was used as an
+   index into the attribute list; it is looked up by id and checked. attributeDescriptor.cpp: an
+   attribute found by its metadata must still have metadata when looked up by attribute id.
+
+usdAbc (pxr/usd/plugin/usdAbc):
+5. The reader runs Alembic with kQuietNoopPolicy, so a sample Alembic cannot read comes back as a
+   null pointer rather than an exception. _CopyGenericValue (alembicReader.cpp) and
+   _ConvertPODArray (alembicUtil.cpp) dereferenced it; no sample is now no value.
+6. AddOutOfSchemaProperty: a header can say compound for a property that does not open as one; the
+   invalid compound was read through a null pointer. Nesting is limited to 256 levels.
+7. UsdAbc_AlembicDataReader::HasField/HasValue, where values are read on demand: an exception from
+   Alembic or Ogawa is no value (TF_RUNTIME_ERROR) rather than an unwinding OpenUSD.
+
+diff --git a/pxr/usd/plugin/usdAbc/alembicReader.cpp b/pxr/usd/plugin/usdAbc/alembicReader.cpp
+index 691c893..37235fc 100644
+--- a/pxr/usd/plugin/usdAbc/alembicReader.cpp
++++ b/pxr/usd/plugin/usdAbc/alembicReader.cpp
+@@ -1900,7 +1900,8 @@ public:
+     /// out-of-schema properties, building a namespaced name from the
+     /// property hierarchy with \p name as the left-most component.
+     void AddOutOfSchemaProperty(const std::string& name,
+-                                const AlembicProperty& property);
++                                const AlembicProperty& property,
++                                int depth = 0);
+ 
+     /// Set the schema.  This makes additional properties available via
+     /// the \c ExtractSchema() method.
+@@ -2089,7 +2090,8 @@ _PrimReaderContext::AddUniformProperty(
+ void
+ _PrimReaderContext::AddOutOfSchemaProperty(
+     const std::string& name,
+-    const AlembicProperty& property)
++    const AlembicProperty& property,
++    int depth)
+ {
+     // Get property info.
+     const PropertyHeader* header = property.GetHeader();
+@@ -2100,7 +2102,19 @@ _PrimReaderContext::AddOutOfSchemaProperty(
+ 
+     // Handle compound properties.
+     if (header->isCompound()) {
++        // Unity USD Toolkit: a header can say compound for a property Alembic cannot open as
++        // one (a damaged file); the invalid compound was then read through a null pointer. And
++        // each nested compound recursed once more, as deep as the file nests them.
++        static const int maxDepth = 256;
++        if (depth >= maxDepth) {
++            TF_WARN("Alembic property '%s' nests compounds deeper than %d; "
++                    "the rest is skipped.", name.c_str(), maxDepth);
++            return;
++        }
+         ICompoundProperty compound = property.Cast<ICompoundProperty>();
++        if (!compound.valid()) {
++            return;
++        }
+ 
+         // Fill usedNames.
+         std::set<std::string> usedNames;
+@@ -2122,7 +2136,7 @@ _PrimReaderContext::AddOutOfSchemaProperty(
+                 GetPath().AppendProperty(TfToken(namespacedName));
+             AddOutOfSchemaProperty(
+                 namespacedName,
+-                AlembicProperty(childPath, rawName, compound));
++                AlembicProperty(childPath, rawName, compound), depth + 1);
+         }
+ 
+         return;
+@@ -2339,6 +2353,13 @@ _CopyGenericValue(const shared_ptr<TypedArraySample<AlembicTraits> >& src)
+         AlembicTraits::pod_enum>::value_type SrcType;
+     static const int SrcExtent = AlembicTraits::extent;
+ 
++    // Unity USD Toolkit: the reader runs Alembic with kQuietNoopPolicy, so a sample Alembic
++    // could not read (a damaged file) comes back as a null pointer instead of an exception;
++    // it was dereferenced here. No sample is no value.
++    if (!src) {
++        return VtValue();
++    }
++
+     // All Alembic data is packed POD elements so we can simply use the
+     // address of src as the address of the first POD element.
+     const SrcType* srcData = reinterpret_cast<const SrcType*>(src->get());
+@@ -4270,7 +4291,15 @@ UsdAbc_AlembicDataReader::HasField(
+     const TfToken& fieldName,
+     SdfAbstractDataValue* value) const
+ {
+-    return _impl->HasField(path, fieldName, UsdAbc_AlembicDataAny(value));
++    // Unity USD Toolkit: values are read from the archive on demand, here; an exception from
++    // Alembic or Ogawa (a damaged file) is no value rather than an unwinding OpenUSD.
++    try {
++        return _impl->HasField(path, fieldName, UsdAbc_AlembicDataAny(value));
++    }
++    catch (const std::exception& e) {
++        TF_RUNTIME_ERROR("Alembic read of %s failed: %s", path.GetText(), e.what());
++        return false;
++    }
+ }
+ 
+ bool
+@@ -4279,7 +4308,13 @@ UsdAbc_AlembicDataReader::HasField(
+     const TfToken& fieldName,
+     VtValue* value) const
+ {
+-    return _impl->HasField(path, fieldName, UsdAbc_AlembicDataAny(value));
++    try {
++        return _impl->HasField(path, fieldName, UsdAbc_AlembicDataAny(value));
++    }
++    catch (const std::exception& e) {
++        TF_RUNTIME_ERROR("Alembic read of %s failed: %s", path.GetText(), e.what());
++        return false;
++    }
+ }
+ 
+ bool
+@@ -4288,7 +4323,13 @@ UsdAbc_AlembicDataReader::HasValue(
+     Index index,
+     SdfAbstractDataValue* value) const
+ {
+-    return _impl->HasValue(path, index, UsdAbc_AlembicDataAny(value));
++    try {
++        return _impl->HasValue(path, index, UsdAbc_AlembicDataAny(value));
++    }
++    catch (const std::exception& e) {
++        TF_RUNTIME_ERROR("Alembic read of %s failed: %s", path.GetText(), e.what());
++        return false;
++    }
+ }
+ 
+ bool
+@@ -4297,7 +4338,13 @@ UsdAbc_AlembicDataReader::HasValue(
+     Index index,
+     VtValue* value) const
+ {
+-    return _impl->HasValue(path, index, UsdAbc_AlembicDataAny(value));
++    try {
++        return _impl->HasValue(path, index, UsdAbc_AlembicDataAny(value));
++    }
++    catch (const std::exception& e) {
++        TF_RUNTIME_ERROR("Alembic read of %s failed: %s", path.GetText(), e.what());
++        return false;
++    }
+ }
+ 
+ void
+diff --git a/pxr/usd/plugin/usdAbc/alembicUtil.cpp b/pxr/usd/plugin/usdAbc/alembicUtil.cpp
+index f47b7dc..a31ba7c 100644
+--- a/pxr/usd/plugin/usdAbc/alembicUtil.cpp
++++ b/pxr/usd/plugin/usdAbc/alembicUtil.cpp
+@@ -123,6 +123,11 @@ struct _ConvertPODArray {
+         IArrayProperty property(parent, name);
+         property.get(sample, iss);
+ 
++        // Unity USD Toolkit: null when Alembic could not read it (kQuietNoopPolicy).
++        if (!sample) {
++            return false;
++        }
++
+         // Copy each element.
+         VtArray<UsdType> result(sample->size());
+         _ConvertPODToUsdArray<UsdType, AlembicType, extent>()(
+diff --git a/pxr/usd/plugin/usdDraco/attributeDescriptor.cpp b/pxr/usd/plugin/usdDraco/attributeDescriptor.cpp
+index b15fbc9..2693ca0 100644
+--- a/pxr/usd/plugin/usdDraco/attributeDescriptor.cpp
++++ b/pxr/usd/plugin/usdDraco/attributeDescriptor.cpp
+@@ -201,6 +201,10 @@ UsdDracoAttributeDescriptor UsdDracoAttributeDescriptor::FromDracoMesh(
+     // Get attribute metadata from Draco mesh.
+     const draco::AttributeMetadata *metadata =
+         mesh.GetAttributeMetadataByAttributeId(attributeId);
++    // Unity USD Toolkit: the attribute was found by a metadata entry, but its metadata is looked
++    // up again by attribute id, which a malformed file can leave without one.
++    if (metadata == nullptr)
++        return Invalid();
+ 
+     // Create descriptor from Draco attribute and metadata.
+     return FromDracoAttribute(attribute, *metadata, isPrimvar);
+diff --git a/pxr/usd/plugin/usdDraco/importAttribute.h b/pxr/usd/plugin/usdDraco/importAttribute.h
+index e2e9e65..e88fd5a 100644
+--- a/pxr/usd/plugin/usdDraco/importAttribute.h
++++ b/pxr/usd/plugin/usdDraco/importAttribute.h
+@@ -82,6 +82,14 @@ private:
+     const draco::PointAttribute *_GetFromMesh(
+         const draco::Mesh &dracoMesh);
+ 
++    // Unity USD Toolkit: the value index of a point, or -1 when the file maps the point outside
++    // the attribute's values. Draco's own accessors read whatever index the file names.
++    int64_t _ValueIndex(draco::PointIndex pi) const;
++
++    // Unity USD Toolkit: drops the attribute, as if the mesh did not have it, so a malformed one
++    // fails the import cleanly (for positions, _CheckData's "no points") instead of being read.
++    void _Invalidate(const char *why);
++
+     // Specialization for arithmetic types.
+     template <class T_ = T,
+         typename std::enable_if<std::is_arithmetic<T_>::value>::type* = nullptr>
+@@ -137,6 +145,33 @@ template <class T>
+ UsdDracoImportAttribute<T>::UsdDracoImportAttribute(
+         UsdDracoAttributeDescriptor descriptor, const draco::Mesh &dracoMesh) :
+             _descriptor(descriptor), _pointAttribute(_GetFromMesh(dracoMesh)) {
++    // Unity USD Toolkit: Draco copies byte_stride() bytes per value, a size the file declares.
++    // Read into a T of another size, a wider stride wrote past the value: past the end of
++    // _values on the heap, or past a local T on the stack in GetMappedValue.
++    if (_pointAttribute != nullptr &&
++        _pointAttribute->byte_stride() != static_cast<int64_t>(sizeof(T))) {
++        _Invalidate("its values are not the size the attribute's type needs");
++    }
++}
++
++template <class T>
++int64_t UsdDracoImportAttribute<T>::_ValueIndex(draco::PointIndex pi) const {
++    if (!_pointAttribute->is_mapping_identity() &&
++        pi.value() >= _pointAttribute->indices_map_size()) {
++        return -1;
++    }
++    const draco::AttributeValueIndex avi = _pointAttribute->mapped_index(pi);
++    return avi.value() < _pointAttribute->size()
++        ? static_cast<int64_t>(avi.value()) : -1;
++}
++
++template <class T>
++void UsdDracoImportAttribute<T>::_Invalidate(const char *why) {
++    TF_RUNTIME_ERROR("Draco attribute '%s' is ignored: %s.",
++                     _descriptor.GetName().GetText(), why);
++    _pointAttribute = nullptr;
++    _values.clear();
++    _indices.clear();
+ }
+ 
+ template <class T>
+@@ -214,9 +249,20 @@ void UsdDracoImportAttribute<T>::PopulateValuesWithOrder(
+         const draco::Mesh::Face &face = dracoMesh.face(draco::FaceIndex(i));
+         for (size_t c = 0; c < 3; c++) {
+             const draco::PointIndex pi = face[c];
++            // Unity USD Toolkit: the original order is read from the file. An index outside
++            // the values wrote a whole value past the end of _values.
+             const int origIndex = order.GetMappedValue(pi);
++            const int64_t valueIndex = _ValueIndex(pi);
++            if (origIndex < 0 || static_cast<size_t>(origIndex) >= numValues ||
++                valueIndex < 0) {
++                _Invalidate("its point order names a value it does not have");
++                return;
++            }
+             if (!populated[origIndex]) {
+-                _pointAttribute->GetMappedValue(pi, _values[origIndex].data());
++                _pointAttribute->GetValue(
++                    draco::AttributeValueIndex(
++                        static_cast<uint32_t>(valueIndex)),
++                    _values[origIndex].data());
+                 populated[origIndex] = true;
+             }
+         }
+@@ -228,8 +274,13 @@ inline T UsdDracoImportAttribute<T>::GetMappedValue(
+         draco::PointIndex pi) const {
+     if (_pointAttribute == nullptr)
+         return T(0);
++    // Unity USD Toolkit: only a value the attribute has.
++    const int64_t valueIndex = _ValueIndex(pi);
++    if (valueIndex < 0)
++        return T(0);
+     T value;
+-    _pointAttribute->GetMappedValue(pi, &value);
++    _pointAttribute->GetValue(
++        draco::AttributeValueIndex(static_cast<uint32_t>(valueIndex)), &value);
+     return value;
+ }
+ 
+@@ -238,7 +289,8 @@ inline int UsdDracoImportAttribute<T>::GetMappedIndex(
+         draco::PointIndex pi) const {
+     if (_pointAttribute == nullptr)
+         return -1;
+-    return static_cast<int>(_pointAttribute->mapped_index(pi).value());
++    // Unity USD Toolkit: -1 for a point mapped outside the values, as for no attribute.
++    return static_cast<int>(_ValueIndex(pi));
+ }
+ 
+ template <class T>
+diff --git a/pxr/usd/plugin/usdDraco/importTranslator.cpp b/pxr/usd/plugin/usdDraco/importTranslator.cpp
+index 504084d..65f9770 100644
+--- a/pxr/usd/plugin/usdDraco/importTranslator.cpp
++++ b/pxr/usd/plugin/usdDraco/importTranslator.cpp
+@@ -45,35 +45,46 @@ void UsdDracoImportTranslator::_FindOriginalFaceEdges(
+         const draco::CornerTable *cornerTable,
+         std::vector<bool> &triangleVisited,
+         PolygonEdges &polygonEdges) {
+-    // Do not add any edges if this triangular face has already been visited.
+-    if (triangleVisited[faceIndex.value()])
+-      return;
+-    triangleVisited[faceIndex.value()] = true;
+-    const draco::Mesh::Face &face = _dracoMesh.face(faceIndex);
+-    for (size_t c = 0; c < 3; c++) {
+-        // Check for added edge using this corner.
+-        const draco::PointIndex pi = face[c];
+-        bool isNewEdge = _addedEdges.GetMappedValue(pi);
+-        const draco::CornerIndex ci = cornerTable->FirstCorner(faceIndex) + c;
+-        const draco::CornerIndex co = cornerTable->Opposite(ci);
+-
+-        // Check for the new edge using the opposite corner.
+-        if (!isNewEdge && co != draco::kInvalidCornerIndex) {
+-            const draco::PointIndex pi = _dracoMesh.CornerToPointId(co);
+-            isNewEdge = _addedEdges.GetMappedValue(pi);
+-        }
+-        if (isNewEdge) {
+-            // Visit triangle across the new edge.
+-            const draco::FaceIndex oppositeFaceIndex = cornerTable->Face(co);
+-            _FindOriginalFaceEdges(oppositeFaceIndex, cornerTable,
+-                                   triangleVisited, polygonEdges);
+-        } else {
+-            // Insert the original edge to the map.
+-            const draco::PointIndex pointFrom = face[(c + 1) % 3];
+-            draco::PointIndex pointTo = face[(c + 2) % 3];
+-            polygonEdges.insert(
+-                {PositionIndex(_positions.GetMappedIndex(pointFrom)),
+-                 pointTo});
++    // Unity USD Toolkit: walks the polygon with an explicit stack instead of recursing (a file
++    // can describe one polygon of millions of triangles, one stack frame each), and never
++    // crosses an edge with no triangle on the other side. The added-edge flag is read from the
++    // file; on a boundary edge the opposite corner is invalid, and Face() of it is
++    // kInvalidFaceIndex (0xFFFFFFFF), which was then read and written as triangleVisited[] and
++    // read as a face -- far outside both. Unity's fuzzing of the payload, and a mesh written by
++    // UsdDraco_WriteDraco itself (Suzanne, polygons preserved), crashed there.
++    const size_t numTriangles = triangleVisited.size();
++    std::vector<draco::FaceIndex> pending(1, faceIndex);
++    while (!pending.empty()) {
++        const draco::FaceIndex current = pending.back();
++        pending.pop_back();
++        // Do not add any edges if this triangular face has already been visited.
++        if (current.value() >= numTriangles || triangleVisited[current.value()])
++            continue;
++        triangleVisited[current.value()] = true;
++        const draco::Mesh::Face &face = _dracoMesh.face(current);
++        for (size_t c = 0; c < 3; c++) {
++            // Check for added edge using this corner.
++            const draco::PointIndex pi = face[c];
++            bool isNewEdge = _addedEdges.GetMappedValue(pi);
++            const draco::CornerIndex ci = cornerTable->FirstCorner(current) + c;
++            const draco::CornerIndex co = cornerTable->Opposite(ci);
++
++            // Check for the new edge using the opposite corner.
++            if (!isNewEdge && co != draco::kInvalidCornerIndex) {
++                const draco::PointIndex pi = _dracoMesh.CornerToPointId(co);
++                isNewEdge = _addedEdges.GetMappedValue(pi);
++            }
++            if (isNewEdge && co != draco::kInvalidCornerIndex) {
++                // Visit triangle across the new edge.
++                pending.push_back(cornerTable->Face(co));
++            } else {
++                // Insert the original edge to the map.
++                const draco::PointIndex pointFrom = face[(c + 1) % 3];
++                draco::PointIndex pointTo = face[(c + 2) % 3];
++                polygonEdges.insert(
++                    {PositionIndex(_positions.GetMappedIndex(pointFrom)),
++                     pointTo});
++            }
+         }
+     }
+ }
+@@ -96,7 +107,8 @@ SdfLayerRefPtr UsdDracoImportTranslator::_Translate()
+         return layer;
+ 
+     // Populate indices.
+-    _PopulateIndicesFromMesh();
++    if (!_PopulateIndicesFromMesh())
++        return layer;
+ 
+     // Create USD mesh and set attributes.
+     UsdGeomMesh usdMesh = UsdGeomMesh::Define(stage, SdfPath("/DracoMesh"));
+@@ -147,8 +159,15 @@ void UsdDracoImportTranslator::_PopulateValuesFromMesh() {
+         _dracoMesh.GetMetadata()->attribute_metadatas();
+     for (size_t i = 0; i < metadatas.size(); i++) {
+         const draco::AttributeMetadata &metadata = *metadatas[i];
+-        const draco::PointAttribute &attribute =
+-            *_dracoMesh.attribute(metadata.att_unique_id());
++        // Unity USD Toolkit: metadata names its attribute by unique id, which attribute()
++        // took as an index into the attribute list; a file can name any id, or none.
++        const draco::PointAttribute *found =
++            _dracoMesh.GetAttributeByUniqueId(metadata.att_unique_id());
++        if (found == nullptr) {
++            TF_RUNTIME_ERROR("Draco mesh has metadata for a missing attribute.");
++            return;
++        }
++        const draco::PointAttribute &attribute = *found;
+         auto importAttribute = CreateAttributeFrom(attribute, metadata);
+         if (!importAttribute) {
+             TF_RUNTIME_ERROR("Draco mesh has invalid attribute.");
+@@ -200,7 +219,7 @@ UsdDracoImportTranslator::CreateAttributeFrom(
+             descriptor, creator);
+ }
+ 
+-void UsdDracoImportTranslator::_PopulateIndicesFromMesh() {
++bool UsdDracoImportTranslator::_PopulateIndicesFromMesh() {
+     // Allocate index arrays as if all faces were triangles. The arrays will be
+     // downsized if it turns out that the mesh has quads and other polygons.
+     const size_t numFaces = _dracoMesh.num_faces();
+@@ -213,9 +232,32 @@ void UsdDracoImportTranslator::_PopulateIndicesFromMesh() {
+         _genericAttributes[i]->ResizeIndices(numCorners);
+     }
+ 
+-    // Create corner table.
+-    std::unique_ptr<draco::CornerTable> cornerTable =
+-        draco::CreateCornerTableFromPositionAttribute(&_dracoMesh);
++    // Unity USD Toolkit: every corner has to name a point the mesh has, and that point a
++    // position. The corner table below is sized by the largest position index the faces reach,
++    // so one garbage index made Draco allocate for billions of vertices (an abort), and the
++    // index arrays filled below are read through the same mapping.
++    for (size_t i = 0; i < numFaces; i++) {
++        const draco::Mesh::Face &face = _dracoMesh.face(draco::FaceIndex(i));
++        for (size_t c = 0; c < 3; c++) {
++            if (face[c].value() >= _dracoMesh.num_points() ||
++                _positions.GetMappedIndex(face[c]) < 0) {
++                TF_RUNTIME_ERROR("Draco mesh face %zu names a point it does not have.", i);
++                return false;
++            }
++        }
++    }
++
++    // Create corner table. Unity USD Toolkit: only polygon reconstruction uses it.
++    std::unique_ptr<draco::CornerTable> cornerTable;
++    if (_addedEdges.HasPointAttribute()) {
++        cornerTable = draco::CreateCornerTableFromPositionAttribute(&_dracoMesh);
++        // Null when the faces do not make a corner table.
++        if (cornerTable == nullptr ||
++            static_cast<size_t>(cornerTable->num_faces()) != numFaces) {
++            TF_RUNTIME_ERROR("Draco mesh faces do not form a corner table.");
++            return false;
++        }
++    }
+ 
+     // Reconstruct polygons here.
+     size_t vertexIndex = 0;
+@@ -239,18 +281,39 @@ void UsdDracoImportTranslator::_PopulateIndicesFromMesh() {
+             }
+             _faceVertexCounts[faceIndex] = polygonEdges.size();
+ 
++            // Unity USD Toolkit: the edges come from the file's added-edge flags, so they need
++            // not form one closed loop. operator[] inserted an edge for every point the walk
++            // reached that had none, and a loop that never closed wrote corners past the index
++            // arrays. Each edge is now followed once, by find(), and the walk has to end back
++            // at its start after exactly as many corners as the polygon has edges.
++            if (vertexIndex + polygonEdges.size() > numCorners) {
++                TF_RUNTIME_ERROR("Draco mesh polygons have more corners than its triangles.");
++                return false;
++            }
++
+             // Traverse a polygon by following its edges. The starting point is
+             // not guaranteed to be the same as in the original polygon.
+             // It is deterministic, however, and defined by std::map behavior.
+             const draco::AttributeValueIndex firstPositionIndex =
+                 polygonEdges.begin()->first;
+             draco::AttributeValueIndex positionIndex = firstPositionIndex;
++            size_t walked = 0;
+             do {
+                 // Get the next polygon point index by following polygon edge.
+-                const draco::PointIndex pi = polygonEdges[positionIndex];
++                const PolygonEdges::const_iterator edge = polygonEdges.find(positionIndex);
++                if (edge == polygonEdges.end() || walked == polygonEdges.size()) {
++                    TF_RUNTIME_ERROR("Draco mesh polygon edges do not form a loop.");
++                    return false;
++                }
++                const draco::PointIndex pi = edge->second;
+                 _SetIndices(vertexIndex++, pi);
+-                positionIndex = _positions.GetMappedIndex(pi);
++                walked++;
++                positionIndex = PositionIndex(_positions.GetMappedIndex(pi));
+             } while (positionIndex != firstPositionIndex);
++            if (walked != polygonEdges.size()) {
++                TF_RUNTIME_ERROR("Draco mesh polygon edges do not form one loop.");
++                return false;
++            }
+         } else {
+             _faceVertexCounts[i] = 3;
+             for (size_t c = 0; c < 3; c++) {
+@@ -278,6 +341,7 @@ void UsdDracoImportTranslator::_PopulateIndicesFromMesh() {
+     for (size_t i = 0; i < _genericAttributes.size(); i++) {
+         _genericAttributes[i]->ResizeIndices(numPoints);
+     }
++    return true;
+ }
+ 
+ inline void UsdDracoImportTranslator::_SetIndices(
+diff --git a/pxr/usd/plugin/usdDraco/importTranslator.h b/pxr/usd/plugin/usdDraco/importTranslator.h
+index 789d74e..88ad0ac 100644
+--- a/pxr/usd/plugin/usdDraco/importTranslator.h
++++ b/pxr/usd/plugin/usdDraco/importTranslator.h
+@@ -40,7 +40,7 @@ private:
+     bool _CheckDescriptors() const;
+     bool _CheckData() const;
+     void _PopulateValuesFromMesh();
+-    void _PopulateIndicesFromMesh();
++    bool _PopulateIndicesFromMesh();
+     void _SetIndices(size_t vertexIndex, draco::PointIndex pointIndex);
+     void _SetAttributesToMesh(UsdGeomMesh *usdMesh) const;
+     bool _HasTrianglesOnly() const;
