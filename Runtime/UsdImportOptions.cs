@@ -152,6 +152,13 @@ namespace Unity.USDToolkit
         // the main thread.
         public Action<float, string> ProgressCallback;
 
+        // Optional receiver for the import's warnings about the stage as a whole -- prims of a type
+        // no loaded schema defines, and a stage that yields no geometry -- one line each, once per
+        // Import or ImportAsync, on the main thread. Null logs them with Debug.LogWarning. The
+        // import's other warnings go to the Console either way. Internal: the USD asset importer
+        // passes its import context's log here, reached through InternalsVisibleTo (AssemblyInfo.cs).
+        internal Action<string> StageWarningCallback;
+
         // Variant selections to compose with (native API 6). Applied in list order, so a set
         // nested inside another set's variant can follow the outer selection. The source file
         // is not edited; the choice is recorded on the import's UsdStageSource and written back

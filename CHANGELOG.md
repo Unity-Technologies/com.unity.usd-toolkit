@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Import warnings for unknown prim types and stages with no geometry**
+  An import now warns once when the stage holds prims whose type no loaded schema defines (a plugin
+  schema this build does not register): the warning gives their count and up to five prim paths, as
+  only their place in the hierarchy is imported. It also warns once when the import yields no mesh.
+  Both name only the file and prim paths. They reach the Console from `UsdImporter.Import` and
+  `ImportAsync`, and a USD asset shows them as import warnings, once each. What gets imported is
+  unchanged. Unknown types are found through the Stage API, so a native plugin older than 0.8.1 does
+  not report them.
+
 ## [0.8.1-exp.1] - 2026-10-22
 
 ### Added

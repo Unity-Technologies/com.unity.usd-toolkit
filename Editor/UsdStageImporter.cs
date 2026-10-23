@@ -146,7 +146,11 @@ namespace Unity.USDToolkit.Editor
             {
                 // An immutable package's files are not where their asset path says (they live in
                 // Library/PackageCache), so the path is mapped to the file on disk first.
-                result = UsdImporter.Import(Path.GetFullPath(FileUtil.GetPhysicalPath(ctx.assetPath)), CreateOptions());
+                UsdImportOptions options = CreateOptions();
+
+                // The import context logs them to the Console and keeps them with the asset.
+                options.StageWarningCallback = message => ctx.LogImportWarning(message);
+                result = UsdImporter.Import(Path.GetFullPath(FileUtil.GetPhysicalPath(ctx.assetPath)), options);
             }
             catch (Exception exception)
             {

@@ -868,6 +868,7 @@ namespace Unity.USDToolkit
         {
             importedWith = options.Clone();
             importedWith.ProgressCallback = null;
+            importedWith.StageWarningCallback = null;
             sourcePath = UsdProjectPaths.ToRecorded(path);
             defaultPrimPath = defaultPrim ?? string.Empty;
             metersPerUnit = unit;
