@@ -175,7 +175,9 @@ namespace Unity.USDToolkit
             {
                 try
                 {
-                    return await BuildResultAsync(data, options);
+                    UsdImportResult built = await BuildResultAsync(data, options);
+                    ReportStageWarnings(data, options, built);
+                    return built;
                 }
                 finally
                 {
@@ -215,6 +217,7 @@ namespace Unity.USDToolkit
                 throw;
             }
 
+            ReportStageWarnings(data, options, result);
             result.TexturesReady = AttachStreamedTexturesAsync(data, options, result, materials, decode,
                                                                () => decodeFailure);
             return result;
@@ -366,7 +369,9 @@ namespace Unity.USDToolkit
                 StageData data = ReadStageData(fullInputPath, options);
                 try
                 {
-                    return BuildResult(data, options);
+                    UsdImportResult result = BuildResult(data, options);
+                    ReportStageWarnings(data, options, result);
+                    return result;
                 }
                 finally
                 {
@@ -442,6 +447,7 @@ namespace Unity.USDToolkit
                 }
 
                 ReadPhysicsData(context, data, options);
+                FindUnknownTypePrims(context, data);
 
                 // UsdImportOptions.KeepStageOpen: the tables are read, so they go, and the stage
                 // stays for the UsdStageSource RecordSource puts on the root.
@@ -457,6 +463,117 @@ namespace Unity.USDToolkit
             finally
             {
                 UsdNative.Destroy(context);
+            }
+        }
+
+        // The prims the warning about unknown types names; the rest are only counted.
+        private const int MaxUnknownTypeExamples = 5;
+
+        // What every Xformable prim has from its schema, authored or not.
+        private static readonly string[] XformableBuiltins = { "xformOpOrder", "proxyPrim", "visibility", "purpose" };
+
+        // Prims whose type name no loaded schema defines (a plugin schema this build does not
+        // register). The walk keeps them as identity nodes, as it does typeless prims, so nothing
+        // their type describes is imported. Found among the nodes through the Stage API on the
+        // import's own stage, as ReadDoubleSided reads: a node with a type name is either
+        // Xformable, and has XformableBuiltins from its schema even where none is authored, or of
+        // a type no schema defines, and has only what is authored. The walk gives the latter an
+        // identity transform, so only identity nodes are asked. A plugin without the Stage API
+        // (before native API 13) finds none.
+        private static void FindUnknownTypePrims(IntPtr context, StageData data)
+        {
+            if (!UsdNative.SupportsStageApi)
+            {
+                return;
+            }
+
+            foreach (NodeData node in data.Nodes)
+            {
+                if (!IsIdentity(node.LocalMatrix))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    if (UsdNative.QueryText(context, UsdNative.QueryTypeName, node.Path).Length == 0 ||
+                        HasXformableBuiltins(UsdNative.QueryText(context, UsdNative.QueryProperties, node.Path)))
+                    {
+                        continue;
+                    }
+                }
+                catch (UsdStageException)
+                {
+                    // A path the Stage API cannot address: not counted rather than fail the import.
+                    continue;
+                }
+
+                data.UnknownTypePrimCount++;
+                if (data.UnknownTypePrimExamples.Count < MaxUnknownTypeExamples)
+                {
+                    data.UnknownTypePrimExamples.Add(node.Path);
+                }
+            }
+        }
+
+        // `properties` is RUSD_QUERY_PROPERTIES' text: one "name<TAB>kind<TAB>type" record a line.
+        private static bool HasXformableBuiltins(string properties)
+        {
+            var names = new HashSet<string>(StringComparer.Ordinal);
+            foreach (string record in properties.Split('\n'))
+            {
+                int tab = record.IndexOf('\t');
+                names.Add(tab < 0 ? record : record.Substring(0, tab));
+            }
+
+            foreach (string name in XformableBuiltins)
+            {
+                if (!names.Contains(name))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private static bool IsIdentity(RUsdMatrix4x4 m) =>
+            m.M00 == 1.0 && m.M01 == 0.0 && m.M02 == 0.0 && m.M03 == 0.0 &&
+            m.M10 == 0.0 && m.M11 == 1.0 && m.M12 == 0.0 && m.M13 == 0.0 &&
+            m.M20 == 0.0 && m.M21 == 0.0 && m.M22 == 1.0 && m.M23 == 0.0 &&
+            m.M30 == 0.0 && m.M31 == 0.0 && m.M32 == 0.0 && m.M33 == 1.0;
+
+        // The import's warnings about the stage as a whole, one line each and once per import:
+        // prims of a type no loaded schema defines (FindUnknownTypePrims), and a stage that yields
+        // no geometry -- no mesh in the result, so what the import made rather than what the stage
+        // authors. Called by Import and ImportAsync only, not by a live switch, whose rereads
+        // cover part of a stage. They name the file and prim paths, nothing else.
+        private static void ReportStageWarnings(StageData data, UsdImportOptions options, UsdImportResult result)
+        {
+            string file = Path.GetFileName(data.InputPath);
+            if (data.UnknownTypePrimCount > 0)
+            {
+                int more = data.UnknownTypePrimCount - data.UnknownTypePrimExamples.Count;
+                Warn($"USD import: '{file}' has {data.UnknownTypePrimCount} prim(s) of a type no loaded schema defines; " +
+                     $"only their place in the hierarchy is imported: '{string.Join("', '", data.UnknownTypePrimExamples)}'" +
+                     (more > 0 ? $" and {more} more." : "."));
+            }
+
+            if (result.MeshCount == 0)
+            {
+                Warn($"USD import: '{file}' yields no geometry; no mesh was imported.");
+            }
+
+            void Warn(string message)
+            {
+                if (options.StageWarningCallback != null)
+                {
+                    options.StageWarningCallback(message);
+                }
+                else
+                {
+                    Debug.LogWarning(message);
+                }
             }
         }
 
@@ -5542,6 +5659,10 @@ namespace Unity.USDToolkit
             // UsdImportOptions.ImportPhysics: the stage's physics, read on the read pass.
             public UsdNativePhysics Physics;
             public string PhysicsReadError;
+
+            // Nodes of a type no loaded schema defines, and the first of their paths (FindUnknownTypePrims).
+            public int UnknownTypePrimCount;
+            public readonly List<string> UnknownTypePrimExamples = new List<string>();
             public readonly List<NodeData> Nodes = new List<NodeData>();
             public readonly List<KeyValuePair<RUsdImportLight, string>> Lights = new List<KeyValuePair<RUsdImportLight, string>>();
             public readonly List<RUsdImportCamera> Cameras = new List<RUsdImportCamera>();
