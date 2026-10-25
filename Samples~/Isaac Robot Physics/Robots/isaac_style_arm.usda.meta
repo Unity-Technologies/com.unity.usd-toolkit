@@ -1,0 +1,41 @@
+fileFormatVersion: 2
+guid: ad6a52fb7294248a69152951cb925522
+ScriptedImporter:
+  internalIDToNameTable: []
+  externalObjects: {}
+  serializedVersion: 2
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+  script: {fileID: 11500000, guid: 564b64383ef84762808f1ba9fe507545, type: 3}
+  ApplyStageUpAxisAndUnits: 1
+  ShareIdenticalMeshes: 1
+  RecalculateNormalsIfMissing: 1
+  IncludeInvisible: 1
+  GenerateColliders: 0
+  ImportPhysics: 0
+  ImportMaterials: 1
+  ImportTextures: 1
+  CompressTextures: 1
+  AssignDefaultMaterial: 1
+  AllowExternalAssetPaths: 0
+  ReadAtStageStartTime: 1
+  ImportSkinning: 1
+  DualQuaternionSkinning: 1
+  ImportAnimation: 1
+  GenerateAnimationClip: 0
+  ImportLights: 1
+  ImportCameras: 1
+  ImportSpatialAudio: 1
+  LoadPayloads: 1
+  PayloadsToLoad: []
+  VariantSelections: []
+  Limits:
+    MaxNodes: 2000000
+    MaxMeshes: 1000000
+    MaxInstancePlacements: 4000000
+    MaxGeometryElements: 268435456
+    MaxTrackSamples: 1000000
+    MaxAnimationValues: 67108864
+    MaxJoints: 65536
+    WhenExceeded: 0

@@ -29,3 +29,5 @@ DevSamples~/
 # The Runtime Demo sample ships its own USD files (tracked with Git LFS, see .gitattributes).
 !Samples~/Runtime Demo/USDSamples/*.usda
 !Samples~/Runtime Demo/USDSamples/*.usdc
+# The Isaac Robot Physics sample ships one self-made arm (~11 KB text) so it runs offline.
+!Samples~/Isaac Robot Physics/Robots/isaac_style_arm.usda
