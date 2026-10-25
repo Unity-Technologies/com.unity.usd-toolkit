@@ -42,3 +42,7 @@ Samples~/Runtime[[:space:]]Demo/USDSamples/*.usdc  filter=lfs diff=lfs merge=lfs
 
 # Animated GIFs used as README and sample hero images are large, so they are tracked with Git LFS.
 Documentation~/images/*.gif  filter=lfs diff=lfs merge=lfs -text
+
+# The self-made arm shipped with the Isaac Robot Physics sample is tracked with Git LFS too,
+# like the Runtime Demo USD files above.
+Samples~/Isaac[[:space:]]Robot[[:space:]]Physics/Robots/isaac_style_arm.usda  filter=lfs diff=lfs merge=lfs -text
