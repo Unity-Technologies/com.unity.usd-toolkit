@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Composed Gripper Physics sample**
+  A vendor-neutral two-finger gripper authored with core UsdPhysics only, in three versions:
+  prismatic fingers, four-bar linkages closed by `excludeFromArticulation` joints, and both in one
+  asset whose physics is spread across sublayers, inherits, variants, references, payloads,
+  specializes and relocates. Each imports as one `ArticulationBody` tree with convex colliders and
+  drives. The v3 scene holds four grippers whose variant selections arrive through different arcs,
+  and its class override, specialized pad material and relocated pad links reach Unity as composed.
+  The same panel opens and closes every gripper and lists what composed, in Play Mode
+  (`ComposedGripperPhysics.unity`, where `GripperDrive` sets the drive targets through
+  `UsdPhysicsJoint.SetDriveTarget`) and in edit mode (**USD Toolkit > Composed Gripper Physics >
+  Window**, where it poses the links at those targets). The Python scripts that build and validate the USD
+  files ship in the sample's `USD~/source`.
+
 - **Import warnings for unknown prim types and stages with no geometry**
   An import now warns once when the stage holds prims whose type no loaded schema defines (a plugin
   schema this build does not register): the warning gives their count and up to five prim paths, as

@@ -113,7 +113,7 @@ To add the samples to your project:
 
 1. Open **Window > Package Management > Package Manager**.
 2. Select **Unity USD Toolkit**, then open the **Samples** tab.
-3. Next to **Runtime Examples**, **Live Sync Example**, **Runtime Demo**, **AGV Fleet LiveSync Demo**, **Isaac Robot Physics** or **Reference Look**, select **Import**.
+3. Next to **Runtime Examples**, **Live Sync Example**, **Runtime Demo**, **AGV Fleet LiveSync Demo**, **Isaac Robot Physics**, **Composed Gripper Physics** or **Reference Look**, select **Import**.
 
 Unity copies each sample to `Assets/Samples/Unity USD Toolkit/<version>/<sample>`, where you can open and edit the scenes. This works for every install method, including a Git URL, which Unity installs as a read-only package. The package doesn't compile the samples until you import them.
 
@@ -129,6 +129,10 @@ Unity copies each sample to `Assets/Samples/Unity USD Toolkit/<version>/<sample>
 <tr>
 <td width="50%" valign="top"><a href="Samples~/AGVFleet_LiveSync%20Demo/README.md"><img src="Documentation~/images/agv_fleet_livesync.png" alt="AGV Fleet LiveSync Demo: Isaac Sim and Unity side by side" width="100%"></a><br>✨ <b><a href="Samples~/AGVFleet_LiveSync%20Demo/README.md">AGV Fleet LiveSync Demo</a></b><br>Isaac Sim simulates an AGV fleet in a factory or a generated warehouse; Unity is the operator front end over a shared USD stage. <a href="https://youtu.be/P8_rpQgEzSU">Video</a>.</td>
 <td width="50%" valign="top"><a href="Samples~/Isaac%20Robot%20Physics/README.md"><img src="Documentation~/images/robot_physics.png" alt="Isaac Robot Physics: the robot picker and drive sliders on the left, the imported Franka Panda on the right" width="100%"></a><br>✨ <b><a href="Samples~/Isaac%20Robot%20Physics/README.md">Isaac Robot Physics</a></b><br>Imports an Isaac Sim robot with its physics and compares every joint limit, drive and mass with what Isaac Sim shows; drives the joints in Play Mode.</td>
+</tr>
+<tr>
+<td width="50%" valign="top"><a href="Samples~/Composed%20Gripper%20Physics/README.md"><img src="Documentation~/images/composed_gripper_physics_demo.png" alt="Composed Gripper Physics: four grippers whose variant selections arrive through different composition arcs, with the panel listing what composed" width="100%"></a><br>✨ <b><a href="Samples~/Composed%20Gripper%20Physics/README.md">Composed Gripper Physics</a></b><br>A vendor-neutral gripper in core UsdPhysics whose physics is spread across every composition arc; imports as one ArticulationBody tree with convex colliders and drives, and opens and closes in Play Mode.</td>
+<td width="50%" valign="top"></td>
 </tr>
 <tr>
 <td colspan="2" valign="top"><a href="Samples~/ReferenceLook/README.md"><img src="Documentation~/images/reference_look_before_after.png" alt="Reference Look: the same bench stage in Isaac Sim 6.2, with the default URP settings in 0.8.0, and with the Reference Look sample in 0.8.1" width="100%"></a><br>✨ <b><a href="Samples~/ReferenceLook/README.md">Reference Look</a></b> <i>(experimental)</i><br>A URP render setup that brings an imported stage close to Isaac Sim's RTX Real-Time renderer, with a menu that imports a USD file and fits the lighting to it. Needs Unity 6.7, which is in beta; the sample stays experimental until 6.7 ships and the setup is tuned for it.</td>
@@ -161,7 +165,7 @@ The importer applies the stage's up axis and `metersPerUnit` to the import root,
 2. Each articulation arrives as an `ArticulationBody` chain with the joint limits, drives, masses and collision filtering the stage authors.
 3. Enter Play mode: Unity's physics engine runs the robot, and you drive it through the `ArticulationBody` API.
 
-The **Isaac Robot Physics** sample does this for a bundled arm or NVIDIA's Franka Panda and compares every value with what Isaac Sim shows. See [Physics](Documentation~/Unity%20USD%20Toolkit%20User%20Manual%20EN.md#physics) in the manual.
+The **Isaac Robot Physics** sample does this for a bundled arm or NVIDIA's Franka Panda and compares every value with what Isaac Sim shows. The **Composed Gripper Physics** sample imports a gripper whose physics comes through sublayers, inherits, variants, references, payloads, specializes and relocates, and picks its configuration with `UsdImportOptions.VariantSelections`. See [Physics](Documentation~/Unity%20USD%20Toolkit%20User%20Manual%20EN.md#physics) in the manual.
 
 ### Round-trip a stage without flattening it
 
@@ -226,7 +230,7 @@ The package does not depend on `com.unity.formats.usd`, `com.unity.importer.usd`
 | [User Manual (Korean)](Documentation~/Unity%20USD%20Toolkit%20User%20Manual%20KR.md) | The same manual in Korean. |
 | [Live Sync Example](Samples~/Live%20Sync%20Example/README.md) | Setup, wire protocol, ownership, coordinate conversion and security. |
 | [AGV Fleet LiveSync Demo](Samples~/AGVFleet_LiveSync%20Demo/README.md) | The fleet demo: Isaac Sim side, Unity side, the shared stage and the hub. |
-| [Runtime Demo](Samples~/Runtime%20Demo/README.md), [Isaac Robot Physics](Samples~/Isaac%20Robot%20Physics/README.md), [Reference Look](Samples~/ReferenceLook/README.md) | Each sample's own guide. |
+| [Runtime Demo](Samples~/Runtime%20Demo/README.md), [Isaac Robot Physics](Samples~/Isaac%20Robot%20Physics/README.md), [Composed Gripper Physics](Samples~/Composed%20Gripper%20Physics/README.md), [Reference Look](Samples~/ReferenceLook/README.md) | Each sample's own guide. |
 | [Isaac Sim client](Samples~/Live%20Sync%20Example/Tools~/isaacsim/README.md) | The Kit extension, launchers and troubleshooting. |
 | [Changelog](CHANGELOG.md) | Release history. |
 
@@ -237,7 +241,7 @@ The package does not depend on `com.unity.formats.usd`, `com.unity.importer.usd`
 | `DllNotFoundException` | The native libraries are missing or are still Git LFS pointer files, for example after a ZIP download. | Install from the git URL, or run `git lfs pull` in a clone. |
 | An imported robot has no `ArticulationBody` | `ImportPhysics` is off by default. | Set `UsdImportOptions.ImportPhysics = true`, and check `UsdImportResult.PhysicsNotes`. |
 
-Black surfaces in Isaac Sim, flat materials right after import, missing textures, batch-mode export and player builds are covered in [Troubleshooting](Documentation~/Unity%20USD%20Toolkit%20User%20Manual%20EN.md#14-troubleshooting) in the User Manual.
+Black surfaces in Isaac Sim, flat materials right after import, missing textures, batch-mode export and player builds are covered in [Troubleshooting](Documentation~/Unity%20USD%20Toolkit%20User%20Manual%20EN.md#15-troubleshooting) in the User Manual.
 
 ---
 

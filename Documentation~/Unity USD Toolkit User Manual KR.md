@@ -23,8 +23,9 @@ Windows, macOS, Linux에서 Unity 런타임으로 OpenUSD stage를 읽고 씁니
 9. [Standalone 플레이어 빌드](#9-standalone-플레이어-빌드)
 10. [USD Live Sync 예제](#10-usd-live-sync-예제)
 11. [Isaac Robot Physics 예제](#11-isaac-robot-physics-예제)
-12. [Export한 USD 파일 확인](#12-export한-usd-파일-확인)
-13. [문제 해결](#13-문제-해결)
+12. [Composed Gripper Physics 예제](#12-composed-gripper-physics-예제)
+13. [Export한 USD 파일 확인](#13-export한-usd-파일-확인)
+14. [문제 해결](#14-문제-해결)
 - [부록 A. API 레퍼런스](#부록-a-api-레퍼런스)
 - [부록 B. 패키지 무결성 확인](#부록-b-패키지-무결성-확인)
 - [부록 C. 네이티브 플러그인 다시 빌드하기](#부록-c-네이티브-플러그인-다시-빌드하기)
@@ -746,13 +747,19 @@ OpenUSD는 `plugInfo.json` 파일이 지정한 라이브러리를 실행합니�
 
 Isaac Sim 로봇처럼 구성된 작은 팔이 함께 제공되고, NVIDIA의 Franka Panda는 요청할 때 Isaac Sim 6.0 에셋에서 다운로드합니다(약 29 MB, Apache 2.0). 모든 파일은 고정된 SHA-256으로 확인하며, 다운로드 위치는 직접 고를 수 있습니다. Edit mode에서는 **USD Toolkit > Robot Physics**를 쓰고, Play Mode에서는 `RobotPhysics.unity`를 열고 Play를 누릅니다. 왼쪽 패널(**H**로 숨김)에서 로봇(팔, Franka, 임의의 USD 파일)을 고르고, 비교 표, drive 슬라이더, limit test를 사용합니다. 자세한 내용은 [Isaac Robot Physics 가이드](../Samples~/Isaac%20Robot%20Physics/README.md)(영문)를 참고하세요.
 
-## 12. Export한 USD 파일 확인
+## 12. Composed Gripper Physics 예제
+
+`Samples~/Composed Gripper Physics`는 core UsdPhysics만으로 작성한, 특정 제조사와 무관한 2지 그리퍼를 세 가지 버전으로 제공합니다. 손가락이 prismatic joint로 미끄러지는 버전(v1), `excludeFromArticulation` joint로 루프를 닫는 4절 링크 버전(v2), 그리고 두 메커니즘을 한 에셋에 담고 physics를 sublayer, inherits, variant, reference, payload, specializes, relocates에 나누어 둔 버전(v3)입니다. 각 버전은 convex collider와 drive를 가진 하나의 `ArticulationBody` 트리로 import됩니다. v2의 루프를 닫는 joint는 `UsdImportResult.PhysicsNotes`에 나오고, 대신 서로 맞춘 drive가 링크를 유지합니다.
+
+v3의 `preset` variant set은 `UsdImportOptions.VariantSelections`로 고르고, 데모 scene에는 variant selection이 서로 다른 arc(local, sublayer, inherits, reference한 preset 파일)로 들어오는 그리퍼 네 개가 있습니다. Import는 physics를 만들기 전에 stage를 compose하므로, class override, specialize된 material, relocate된 link가 compose된 값 그대로 Unity에 들어옵니다. 같은 패널에서 에셋이나 preset을 고르고, 모든 그리퍼를 열고 닫으며, 그리퍼마다 selection, articulation, 손가락 drive, pad material을 봅니다. Edit mode에서는 **USD Toolkit > Composed Gripper Physics > Window**를 쓰며, physics가 돌지 않으므로 link를 joint target 위치에 배치합니다. Play Mode에서는 `ComposedGripperPhysics.unity`를 열고 Play를 누르면 drive가 link를 움직입니다(**H**로 패널 숨김). 자세한 내용은 [Composed Gripper Physics 가이드](../Samples~/Composed%20Gripper%20Physics/README.md)(영문)를 참고하세요.
+
+## 13. Export한 USD 파일 확인
 
 - `usdchecker <file>`로 구조와 유효성을 확인합니다.
 - `usdcat <file>`로 내용을 텍스트로 출력합니다.
 - usdview, Isaac Sim, Omniverse, Blender에서 geometry와 material을 확인합니다.
 
-## 13. 문제 해결
+## 14. 문제 해결
 
 | 증상 | 원인 | 해결 방법 |
 | --- | --- | --- |
