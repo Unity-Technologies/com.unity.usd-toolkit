@@ -50,6 +50,11 @@
       "displayName": "Isaac Robot Physics",
       "description": "Imports an Isaac Sim robot with its UsdPhysics (ArticulationBody joints, limits, drives, colliders) and compares every joint and body with what Isaac Sim shows; drives the joints and runs a limit test in Play Mode. Ships a small arm and downloads NVIDIA's Franka Panda (Isaac Sim 6.0) on request.",
       "path": "Samples~/Isaac Robot Physics"
+    },
+    {
+      "displayName": "Composed Gripper Physics",
+      "description": "A vendor-neutral two-finger gripper authored with core UsdPhysics that imports as one ArticulationBody tree with convex colliders and drives, with its physics spread across sublayers, inherits, variants, references, payloads, specializes and relocates. Opens and closes every gripper in edit mode and Play Mode and shows what composed.",
+      "path": "Samples~/Composed Gripper Physics"
     }
   ]
 }

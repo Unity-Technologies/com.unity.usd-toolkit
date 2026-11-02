@@ -31,3 +31,6 @@ DevSamples~/
 !Samples~/Runtime Demo/USDSamples/*.usdc
 # The Isaac Robot Physics sample ships one self-made arm (~11 KB text) so it runs offline.
 !Samples~/Isaac Robot Physics/Robots/isaac_style_arm.usda
+# The Composed Gripper Physics sample ships its three gripper versions (~1 MB, tracked with Git LFS).
+!Samples~/Composed Gripper Physics/USD~/**/*.usd
+!Samples~/Composed Gripper Physics/USD~/**/*.usda

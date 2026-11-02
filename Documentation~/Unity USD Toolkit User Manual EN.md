@@ -24,8 +24,9 @@ Read and write OpenUSD stages from Unity at runtime, on Windows, macOS and Linux
 10. [The USD Live Sync sample](#10-the-usd-live-sync-sample)
 11. [The AGV Fleet LiveSync Demo sample](#11-the-agv-fleet-livesync-demo-sample)
 12. [The Isaac Robot Physics sample](#12-the-isaac-robot-physics-sample)
-13. [Check exported USD files](#13-check-exported-usd-files)
-14. [Troubleshooting](#14-troubleshooting)
+13. [The Composed Gripper Physics sample](#13-the-composed-gripper-physics-sample)
+14. [Check exported USD files](#14-check-exported-usd-files)
+15. [Troubleshooting](#15-troubleshooting)
 - [Appendix A. API reference](#appendix-a-api-reference)
 - [Appendix B. Verify the package's integrity](#appendix-b-verify-the-packages-integrity)
 - [Appendix C. Rebuild the native plugin](#appendix-c-rebuild-the-native-plugin)
@@ -745,13 +746,19 @@ The sample needs URP and the Input System. For setup instructions, see the [AGV 
 
 It ships a small arm laid out like an Isaac Sim robot, and downloads NVIDIA's Franka Panda from the Isaac Sim 6.0 assets on request (about 29 MB, Apache 2.0), with every file checked against a pinned SHA-256, into a download location you can choose. Use **USD Toolkit > Robot Physics** in edit mode, or open `RobotPhysics.unity` and press Play: a panel on the left, which **H** hides, picks the robot (the arm, the Franka or any USD file) and holds the comparison, the drive sliders and the limit test. For details, see the [Isaac Robot Physics guide](../Samples~/Isaac%20Robot%20Physics/README.md).
 
-## 13. Check exported USD files
+## 13. The Composed Gripper Physics sample
+
+`Samples~/Composed Gripper Physics` ships a vendor-neutral two-finger gripper authored with core UsdPhysics only, in three versions: prismatic fingers (v1), four-bar linkages whose loops are closed by joints with `excludeFromArticulation` (v2), and both in one asset whose physics is spread across sublayers, inherits, variants, references, payloads, specializes and relocates (v3). Each version imports as one `ArticulationBody` tree with convex colliders and drives; v2's loop-closing joints are listed in `UsdImportResult.PhysicsNotes`, and the coordinated drives hold the linkage instead.
+
+v3's `preset` variant set is selected with `UsdImportOptions.VariantSelections`, and its demo scene holds four grippers whose variant selections arrive through different arcs (local, sublayer, inherits, a referenced preset file). The import composes the stage before it builds physics, so a class override, a specialized material and a relocated link arrive in Unity as composed values. The same panel picks the asset or preset, opens and closes every gripper, and shows per gripper the selections, the articulation, the finger drive and the pad material: in edit mode in **USD Toolkit > Composed Gripper Physics > Window**, where the links are posed at the joint targets since physics doesn't run, and in Play Mode in `ComposedGripperPhysics.unity`, where the drives move them (**H** hides the panel). For details, see the [Composed Gripper Physics guide](../Samples~/Composed%20Gripper%20Physics/README.md).
+
+## 14. Check exported USD files
 
 - `usdchecker <file>` checks the structure and validity.
 - `usdcat <file>` prints the contents as text.
 - usdview, Isaac Sim, Omniverse or Blender display the geometry and materials.
 
-## 14. Troubleshooting
+## 15. Troubleshooting
 
 | Symptom | Cause | Solution |
 | --- | --- | --- |

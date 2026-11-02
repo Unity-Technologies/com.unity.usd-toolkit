@@ -1,0 +1,19 @@
+{
+    "name": "Unity.USDToolkit.Samples.ComposedGripper.Editor",
+    "rootNamespace": "Unity.USDToolkit.ComposedGripper.Editor",
+    "references": [
+        "Unity.USDToolkit",
+        "Unity.USDToolkit.Samples.ComposedGripper"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}
