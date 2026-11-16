@@ -85,6 +85,16 @@ namespace Unity.USDToolkit
         /// </summary>
         public IReadOnlyList<string> PhysicsNotes { get; internal set; } = Array.Empty<string>();
 
+        /// <summary>
+        /// With UsdImportOptions.ImportPhysics: one entry per physics prim the stage holds (scene,
+        /// articulations, bodies, colliders, joints, materials, and what has no Unity counterpart),
+        /// each mapped, approximated or skipped, with the Unity component it became.
+        /// </summary>
+        public IReadOnlyList<UsdPhysicsMappingEntry> PhysicsMapping { get; internal set; } = Array.Empty<UsdPhysicsMappingEntry>();
+
+        /// <summary>The stage's kilogramsPerUnit as the physics import read it (1 when physics was not imported).</summary>
+        public double KilogramsPerUnit { get; internal set; } = 1.0;
+
         public IReadOnlyList<UsdImportedMeshInfo> Meshes => meshes;
 
         internal void AddMesh(string primPath, string gameObjectPath, int vertexCount, int triangleCount, int materialIndex)

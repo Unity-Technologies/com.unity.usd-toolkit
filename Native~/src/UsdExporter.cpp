@@ -124,6 +124,7 @@
 #include <pxr/usd/usdSkel/topology.h>
 #include <pxr/usd/usdSkel/utils.h>
 #include <pxr/usd/usdUtils/usdzPackage.h>
+#include <pxr/usd/usdUtils/dependencies.h>
 // Stage API (API v13)
 #include <pxr/base/gf/half.h>
 #include <pxr/base/gf/matrix2d.h>
@@ -476,7 +477,10 @@ namespace
 {
 constexpr int kSuccess = 0;
 constexpr int kFailure = 1;
-constexpr int kApiVersion = 13;
+// 18, not 14: 14-17 were development numbers before 0.8.1 was renumbered 13, and the managed
+// side reads a plugin reporting one of them as the 0.8.0 interface (UsdNative.LoadedApiVersion).
+// 18 adds RUsd_InspectLayer.
+constexpr int kApiVersion = 18;
 thread_local std::string g_lastError;
 thread_local std::string g_lastDiagnostics;
 
@@ -10452,6 +10456,133 @@ int RUsd_GetImportLayers(RUsdContext* context, char* buffer, int bufferCapacity,
     catch (...)
     {
         SetError(context, "Failed to list the stage's layers.");
+        return kFailure;
+    }
+}
+
+namespace
+{
+
+// One field of an RUsd_InspectLayer record: tabs and line breaks would split the record.
+std::string InspectField(std::string value)
+{
+    for (char& c : value)
+    {
+        if (c == '\t' || c == '\n' || c == '\r')
+        {
+            c = ' ';
+        }
+    }
+
+    return value;
+}
+
+void InspectDictionary(const VtDictionary& dictionary, const std::string& prefix, std::string& report, int depth)
+{
+    for (const auto& entry : dictionary)
+    {
+        const std::string key = prefix.empty() ? entry.first : prefix + ":" + entry.first;
+        // IsHolding<T> compares typeid, which differs across this plugin's DSO boundary
+        // (VtValueHoldsType).
+        if (VtValueHoldsType(entry.second, "VtDictionary") && depth < 8)
+        {
+            InspectDictionary(entry.second.UncheckedGet<VtDictionary>(), key, report, depth + 1);
+            continue;
+        }
+
+        std::string value = VtValueHoldsType(entry.second, "string") ? entry.second.UncheckedGet<std::string>()
+                                                                     : TfStringify(entry.second);
+        report += "C\t" + InspectField(key) + "\t" + InspectField(value) + "\n";
+    }
+}
+
+}  // namespace
+
+int RUsd_InspectLayer(const char* layerPath, char* buffer, int bufferCapacity, int* requiredLength)
+{
+    if (layerPath == nullptr || layerPath[0] == '\0')
+    {
+        SetError(nullptr, "RUsd_InspectLayer needs a layer path.");
+        return kFailure;
+    }
+
+    try
+    {
+        const std::string path(layerPath);
+        // Opened on its own: no stage, so nothing it references is read.
+        SdfLayerRefPtr layer = SdfLayer::OpenAsAnonymous(path);
+        if (!layer)
+        {
+            SetError(nullptr, "Could not open the layer " + path + ".");
+            return kFailure;
+        }
+
+        std::vector<std::string> subLayers;
+        std::vector<std::string> references;
+        std::vector<std::string> payloads;
+        UsdUtilsExtractExternalReferences(path, &subLayers, &references, &payloads);
+
+        std::string report;
+        for (const std::string& entry : subLayers)
+        {
+            report += "S\t" + InspectField(entry) + "\n";
+        }
+
+        for (const std::string& entry : references)
+        {
+            report += "R\t" + InspectField(entry) + "\n";
+        }
+
+        for (const std::string& entry : payloads)
+        {
+            report += "P\t" + InspectField(entry) + "\n";
+        }
+
+        const SdfPrimSpecHandle root = layer->GetPseudoRoot();
+        for (const char* field : {"upAxis", "metersPerUnit", "kilogramsPerUnit"})
+        {
+            const TfToken token(field);
+            if (root->HasInfo(token))
+            {
+                report += std::string("M\t") + field + "\t" + InspectField(TfStringify(root->GetInfo(token))) + "\n";
+            }
+        }
+
+        if (layer->HasDefaultPrim())
+        {
+            report += "M\tdefaultPrim\t" + InspectField(layer->GetDefaultPrim().GetString()) + "\n";
+        }
+
+        InspectDictionary(layer->GetCustomLayerData(), std::string(), report, 0);
+
+        const int required = static_cast<int>(report.size()) + 1;
+        if (requiredLength != nullptr)
+        {
+            *requiredLength = required;
+        }
+
+        if (buffer == nullptr)
+        {
+            return kSuccess; // size query
+        }
+
+        if (bufferCapacity < required)
+        {
+            SetError(nullptr, "Buffer too small for RUsd_InspectLayer.");
+            return kFailure;
+        }
+
+        std::memcpy(buffer, report.c_str(), report.size() + 1);
+        return kSuccess;
+    }
+    catch (const std::exception& exception)
+    {
+        SetError(nullptr, MakeError("Failed to inspect the layer", exception));
+        return kFailure;
+    }
+    catch (...)
+    {
+        SetError(nullptr, "Failed to inspect the layer.");
         return kFailure;
     }
 }

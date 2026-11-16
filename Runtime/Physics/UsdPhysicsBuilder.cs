@@ -25,6 +25,10 @@ namespace Unity.USDToolkit
     // which is the stage with X negated; the root carries the up-axis and unit correction.
     internal static class UsdPhysicsBuilder
     {
+        // PhysxSchema's defaults for solverPositionIterationCount when a stage authors none.
+        private const int PhysxRigidBodyPositionIterations = 16;
+        private const int PhysxArticulationPositionIterations = 32;
+
         // Unity's ConfigurableJoint takes angular X limits in [-177, 177] degrees.
         private const float ConfigurableAngularLimit = 177f;
 
@@ -50,12 +54,25 @@ namespace Unity.USDToolkit
             public readonly HashSet<string> Mimicked = new HashSet<string>(StringComparer.Ordinal);
             public readonly List<KeyValuePair<Collider, Collider>> Filtered = new List<KeyValuePair<Collider, Collider>>();
 
+            // Per collider: its volume in world cubic metres, for a body whose mass comes from
+            // density (0 when unknown).
+            public float[] ColliderVolumes;
+
+            // Bodies with no mass authored on them or their colliders (ApplyDensityMass).
+            public readonly List<int> DensityBodies = new List<int>();
+
+            // Colliders whose Unity shape is coarser than the authored one (a convex hull for an
+            // SDF, a decomposition or a moving triangle mesh): they may overlap neighbours the
+            // authored shape does not touch (FilterApproximationOverlaps).
+            public readonly HashSet<Collider> Approximated = new HashSet<Collider>();
+
             public string Path(int index) => Physics.String(index) ?? string.Empty;
         }
 
         // objectForPath(path, create): the GameObject the import made for a prim path, made when
         // `create` is set and it is missing; null otherwise.
-        internal static List<string> Build(UsdNativePhysics physics, Transform root, Func<string, bool, GameObject> objectForPath)
+        internal static List<string> Build(UsdNativePhysics physics, Transform root, Func<string, bool, GameObject> objectForPath,
+                                           List<UsdPhysicsMappingEntry> mapping = null)
         {
             var context = new Context
             {
@@ -95,7 +112,9 @@ namespace Unity.USDToolkit
             }
 
             BuildColliders(context);
+            ApplyDensityMass(context);
             CheckInertia(context);
+            ApplyArmature(context);
             for (int i = 0; i < physics.Joints.Length; i++)
             {
                 if (!context.ArticulatedJoints.Contains(i))
@@ -108,6 +127,8 @@ namespace Unity.USDToolkit
             CollectFilteredPairs(context);
             BuildScene(context);
             ReportUnsupported(context);
+            mapping?.AddRange(UsdPhysicsMappingLog.Build(context.Physics, context.Root, context.ColliderComponents, context.Notes,
+                                                         context.Mimicked));
             return context.Notes;
         }
 
@@ -241,10 +262,10 @@ namespace Unity.USDToolkit
 
             ArticulationBody rootLink = context.Links[rootBody];
             rootLink.immovable = articulation.FixedBase != 0;
-            if ((articulation.SetMask & UsdNative.PhysicsArticulationSetPositionIterations) != 0)
-            {
-                rootLink.solverIterations = Mathf.Max(1, articulation.SolverPositionIterations);
-            }
+            // Unauthored, PhysX's default for an articulation (PhysxArticulationAPI: 32), not Unity's 6.
+            rootLink.solverIterations = (articulation.SetMask & UsdNative.PhysicsArticulationSetPositionIterations) != 0
+                ? Mathf.Max(1, articulation.SolverPositionIterations)
+                : PhysxArticulationPositionIterations;
 
             if ((articulation.SetMask & UsdNative.PhysicsArticulationSetVelocityIterations) != 0)
             {
@@ -300,6 +321,8 @@ namespace Unity.USDToolkit
             link.anchorRotation = childRotation;
             link.parentAnchorPosition = parentPosition;
             link.parentAnchorRotation = parentRotation;
+            Transform parentLink = context.BodyObjects[edge.Parent].transform;
+            record.CaptureRest(link.transform, parentLink, parentLink.TransformPoint(parentPosition));
 
             switch (record.UnityType)
             {
@@ -335,10 +358,8 @@ namespace Unity.USDToolkit
                     break;
             }
 
-            if (record.JointFriction > 0f)
-            {
-                link.jointFriction = record.JointFriction;
-            }
+            // Always set: ArticulationBody defaults to 0.05, where UsdPhysics and PhysX default to none.
+            link.jointFriction = Mathf.Max(0f, record.JointFriction);
         }
 
         private static ArticulationDofLock LockFor(UsdPhysicsJoint record)
@@ -696,10 +717,12 @@ namespace Unity.USDToolkit
                 rigidbody.sleepThreshold = (float)(body.SleepThreshold * mpu * mpu);
             }
 
-            if ((body.SetMask & UsdNative.PhysicsBodySetPositionIterations) != 0)
-            {
-                rigidbody.solverIterations = Mathf.Max(1, body.SolverPositionIterations);
-            }
+            // Unauthored, PhysX's own default (PhysxRigidBodyAPI: 16), which the stage was tuned
+            // against, rather than Unity's 6: heavy parts hung on light ones (glass panes on doors)
+            // drift on fewer.
+            rigidbody.solverIterations = (body.SetMask & UsdNative.PhysicsBodySetPositionIterations) != 0
+                ? Mathf.Max(1, body.SolverPositionIterations)
+                : PhysxRigidBodyPositionIterations;
 
             if ((body.SetMask & UsdNative.PhysicsBodySetVelocityIterations) != 0)
             {
@@ -732,7 +755,8 @@ namespace Unity.USDToolkit
                 return (float)(total * context.KilogramsPerUnit);
             }
 
-            record.Note = AppendNote(record.Note, "No mass authored: Unity's default of 1 kg applies (Isaac Sim derives it from collider volume and density).");
+            // Derived from density and the colliders' volume once the colliders exist (ApplyDensityMass).
+            context.DensityBodies.Add(body);
             return 0f;
         }
 
@@ -822,6 +846,41 @@ namespace Unity.USDToolkit
             {
                 context.Notes.Add($"{flagged} bodies author an inertia over 1000× below what their colliders and mass give; " +
                                   "kept as authored, which Unity's PhysX may not keep stable under drives (UsdPhysicsBody.UseColliderInertia).");
+            }
+        }
+
+        // physxJoint:armature (PhysxJointAPI) adds inertia to a joint's own degree of freedom, which
+        // PhysX uses to keep very light links solvable. Unity's ArticulationBody has no armature, so
+        // it is added to the child link's inertia instead. Without it a link far lighter than its
+        // drive (OnRobot RG2's finger cover arms, ~5e-9 kg·m²) can fall below what the articulation
+        // solver responds to and stop following its drive altogether.
+        private static void ApplyArmature(Context context)
+        {
+            float scale = (float)(context.KilogramsPerUnit * context.MetersPerUnit * context.MetersPerUnit);
+            foreach (UsdPhysicsJoint record in context.Root.GetComponentsInChildren<UsdPhysicsJoint>(true))
+            {
+                if (!record.Articulated || record.Link == null || record.Armature <= 0f || float.IsInfinity(record.Armature))
+                {
+                    continue;
+                }
+
+                ArticulationBody link = record.Link;
+                float armature = record.Armature * scale;
+                if (link.automaticInertiaTensor)
+                {
+                    // Not yet computed: derive it from the colliders and mass first, or the
+                    // placeholder would be kept once the tensor stops being automatic.
+                    Physics.SyncTransforms();
+                    link.ResetInertiaTensor();
+                }
+
+                Vector3 inertia = link.inertiaTensor;
+                Quaternion rotation = link.inertiaTensorRotation;
+                link.automaticInertiaTensor = false;
+                link.inertiaTensor = inertia + (Vector3.one * armature);
+                link.inertiaTensorRotation = rotation;
+                record.Note = AppendNote(record.Note,
+                    $"Armature {record.Armature:G3} added to the link's inertia (Unity's articulation has no armature).");
             }
         }
 
@@ -926,9 +985,120 @@ namespace Unity.USDToolkit
             }
 
             record.UnityJoint = unityJoint;
-            if (record.DriveEnabled)
+            record.CaptureFreeRest();
+            if (record.DriveEnabled && unityJoint is ConfigurableJoint driven &&
+                (record.UnityType == UsdPhysicsJointType.Revolute || record.UnityType == UsdPhysicsJointType.Prismatic))
             {
-                record.Note = AppendNote(record.Note, "Drives on joints outside an articulation are not applied.");
+                ApplyFreeDrive(context, record, driven);
+            }
+            else if (record.DriveEnabled)
+            {
+                record.Note = AppendNote(record.Note, "Drives on this kind of joint outside an articulation are not applied.");
+            }
+        }
+
+        // PhysicsDriveAPI on a revolute or prismatic joint outside an articulation: a
+        // ConfigurableJoint drive on the joint's axis, in the same units as an articulation drive
+        // (UsdPhysicsSpace.DriveScales). PhysX's D6 drive is a spring towards the target rather
+        // than the articulation's reduced-coordinate drive, so it is noted as approximated.
+        private static void ApplyFreeDrive(Context context, UsdPhysicsJoint record, ConfigurableJoint joint)
+        {
+            UsdPhysicsSpace.DriveScales(record.IsAngular, context.MetersPerUnit, context.KilogramsPerUnit,
+                                        out float _, out float stiffness, out float force);
+            var drive = new JointDrive
+            {
+                positionSpring = record.DriveStiffness * stiffness,
+                positionDamper = record.DriveDamping * stiffness,
+                maximumForce = float.IsInfinity(record.DriveMaxForce) || record.DriveMaxForce * force >= float.MaxValue
+                    ? float.MaxValue
+                    : record.DriveMaxForce * force,
+                useAcceleration = record.DriveIsAcceleration,
+            };
+
+            if (record.UnityType == UsdPhysicsJointType.Revolute)
+            {
+                joint.rotationDriveMode = RotationDriveMode.XYAndZ;
+                joint.angularXDrive = drive;
+            }
+            else
+            {
+                joint.xDrive = drive;
+            }
+
+            record.SetDriveTarget(record.DriveTargetPosition);
+            record.Note = AppendNote(record.Note, "Drive applied as a ConfigurableJoint drive (a D6 spring outside an articulation).");
+        }
+
+        // PhysX's default density when neither the body, its colliders nor their materials author
+        // one (kg/m^3).
+        private const float DefaultDensity = 1000f;
+
+        // Bodies with no mass authored anywhere get density x collider volume, as Isaac Sim does:
+        // the body's density, else a collider's, else its material's, else PhysX's default.
+        private static void ApplyDensityMass(Context context)
+        {
+            UsdNativePhysics physics = context.Physics;
+            double toKgPerCubicMetre = context.KilogramsPerUnit / (context.MetersPerUnit * context.MetersPerUnit * context.MetersPerUnit);
+            foreach (int body in context.DensityBodies)
+            {
+                GameObject host = context.BodyObjects[body];
+                if (host == null || !host.TryGetComponent(out UsdPhysicsBody record))
+                {
+                    continue;
+                }
+
+                RUsdPhysicsBody source = physics.Bodies[body];
+                double volume = 0.0;
+                float density = (source.SetMask & UsdNative.PhysicsBodySetDensity) != 0 && source.Density > 0f ? source.Density : 0f;
+                string from = density > 0f ? "the body's density" : string.Empty;
+                foreach (int colliderIndex in physics.List(source.Colliders))
+                {
+                    if (colliderIndex < 0 || colliderIndex >= context.ColliderVolumes.Length)
+                    {
+                        continue;
+                    }
+
+                    volume += context.ColliderVolumes[colliderIndex];
+                    RUsdPhysicsCollider collider = physics.Colliders[colliderIndex];
+                    if (density <= 0f && (collider.SetMask & UsdNative.PhysicsColliderSetDensity) != 0 && collider.Density > 0f)
+                    {
+                        density = collider.Density;
+                        from = "a collider's density";
+                    }
+
+                    int[] materials = physics.List(collider.Materials);
+                    if (density <= 0f && materials.Length > 0 && materials[0] >= 0 && materials[0] < physics.Materials.Length &&
+                        physics.Materials[materials[0]].Density > 0f)
+                    {
+                        density = physics.Materials[materials[0]].Density;
+                        from = "its physics material's density";
+                    }
+                }
+
+                double kgPerCubicMetre = density > 0f ? density * toKgPerCubicMetre : DefaultDensity;
+                if (density <= 0f)
+                {
+                    from = "PhysX's default density";
+                }
+
+                if (volume <= 0.0)
+                {
+                    record.Note = AppendNote(record.Note, "No mass authored and no collider volume to derive one from: Unity's default of 1 kg applies.");
+                    continue;
+                }
+
+                float mass = (float)(kgPerCubicMetre * volume);
+                if (context.Links[body] != null)
+                {
+                    context.Links[body].mass = mass;
+                }
+                else if (context.Rigidbodies[body] != null)
+                {
+                    context.Rigidbodies[body].mass = mass;
+                }
+
+                record.Note = AppendNote(record.Note,
+                    $"No mass authored: {mass:G4} kg from {from} ({kgPerCubicMetre:G4} kg/m³) × collider volume ({volume:G4} m³).");
             }
         }
 
@@ -1041,6 +1211,7 @@ namespace Unity.USDToolkit
         {
             RUsdPhysicsCollider[] colliders = context.Physics.Colliders;
             context.ColliderComponents = new List<Collider>[colliders.Length];
+            context.ColliderVolumes = new float[colliders.Length];
             for (int i = 0; i < colliders.Length; i++)
             {
                 context.ColliderComponents[i] = new List<Collider>();
@@ -1065,7 +1236,9 @@ namespace Unity.USDToolkit
                 bool dynamic = bodyIndex >= 0 && (context.Links[bodyIndex] != null ||
                                                   (context.Rigidbodies[bodyIndex] != null && !context.Rigidbodies[bodyIndex].isKinematic));
                 List<Collider> made = context.ColliderComponents[i];
-                AddShape(context, collider, helper, dynamic, path, made);
+                float localVolume = AddShape(context, collider, helper, dynamic, path, made);
+                Vector3 lossy = helper.transform.lossyScale;
+                context.ColliderVolumes[i] = Mathf.Abs(localVolume * lossy.x * lossy.y * lossy.z);
 
                 PhysicsMaterial material = null;
                 int[] materials = context.Physics.List(collider.Materials);
@@ -1105,9 +1278,12 @@ namespace Unity.USDToolkit
             }
         }
 
-        private static void AddShape(Context context, RUsdPhysicsCollider collider, GameObject helper, bool dynamic, string path, List<Collider> made)
+        // Adds the shape's Unity collider(s) and returns the shape's volume in the helper's own
+        // units (0 for a plane or an unreadable mesh).
+        private static float AddShape(Context context, RUsdPhysicsCollider collider, GameObject helper, bool dynamic, string path, List<Collider> made)
         {
             int axis = Mathf.Clamp(collider.Axis, 0, 2);
+            float volume = 0f;
             switch (collider.Shape)
             {
                 case UsdNative.PhysicsShapeSphere:
@@ -1115,6 +1291,7 @@ namespace Unity.USDToolkit
                     SphereCollider sphere = helper.AddComponent<SphereCollider>();
                     sphere.radius = collider.Radius0;
                     made.Add(sphere);
+                    volume = 4f / 3f * Mathf.PI * collider.Radius0 * collider.Radius0 * collider.Radius0;
                     break;
                 }
 
@@ -1123,6 +1300,7 @@ namespace Unity.USDToolkit
                     BoxCollider box = helper.AddComponent<BoxCollider>();
                     box.size = 2f * UsdPhysicsSpace.UsdVector(collider.HalfExtents);
                     made.Add(box);
+                    volume = box.size.x * box.size.y * box.size.z;
                     break;
                 }
 
@@ -1135,6 +1313,7 @@ namespace Unity.USDToolkit
                     capsule.height = 2f * (collider.HalfHeight + radius);
                     capsule.direction = axis;
                     made.Add(capsule);
+                    volume = (Mathf.PI * radius * radius * 2f * collider.HalfHeight) + (4f / 3f * Mathf.PI * radius * radius * radius);
                     if (collider.Shape == UsdNative.PhysicsShapeCapsuleTapered)
                     {
                         context.Notes.Add($"Collider {path}: tapered capsule approximated with the larger radius.");
@@ -1158,6 +1337,8 @@ namespace Unity.USDToolkit
                     mesh.sharedMesh = RoundMesh(LastSegment(path), top, bottom, collider.HalfHeight, axis);
                     mesh.convex = true;
                     made.Add(mesh);
+                    // A frustum: h/3 * pi * (R^2 + Rr + r^2); a cylinder and a cone are its ends.
+                    volume = 2f * collider.HalfHeight / 3f * Mathf.PI * ((top * top) + (top * bottom) + (bottom * bottom));
                     break;
                 }
 
@@ -1193,28 +1374,38 @@ namespace Unity.USDToolkit
                         sphere.center = new Vector3(-floats[at], floats[at + 1], floats[at + 2]);
                         sphere.radius = floats[at + 3];
                         made.Add(sphere);
+                        volume += 4f / 3f * Mathf.PI * sphere.radius * sphere.radius * sphere.radius;
                     }
 
                     break;
                 }
 
                 case UsdNative.PhysicsShapeMesh:
-                    AddMeshShape(context, collider, helper, dynamic, path, made);
+                    volume = AddMeshShape(context, collider, helper, dynamic, path, made);
                     break;
 
                 default:
                     context.Notes.Add($"Collider {path}: shape {collider.Shape} is not supported.");
                     break;
             }
+
+            return volume;
         }
 
-        private static void AddMeshShape(Context context, RUsdPhysicsCollider collider, GameObject helper, bool dynamic, string path, List<Collider> made)
+        private static float AddMeshShape(Context context, RUsdPhysicsCollider collider, GameObject helper, bool dynamic, string path, List<Collider> made)
         {
             Mesh mesh = CollisionMesh(context, collider, LastSegment(path));
             if (mesh == null)
             {
                 context.Notes.Add($"Collider {path}: the collision mesh has no points; not built.");
-                return;
+                return 0f;
+            }
+
+            // The enclosed volume, or for an open mesh its bounds'.
+            float volume = UsdConvexPieces.Volume(mesh);
+            if (volume <= 0f)
+            {
+                volume = mesh.bounds.size.x * mesh.bounds.size.y * mesh.bounds.size.z;
             }
 
             switch (collider.MeshApproximation)
@@ -1225,7 +1416,7 @@ namespace Unity.USDToolkit
                     sphere.center = mesh.bounds.center;
                     sphere.radius = mesh.bounds.extents.magnitude;
                     made.Add(sphere);
-                    return;
+                    return volume;
                 }
 
                 case UsdNative.PhysicsMeshBoundingCube:
@@ -1234,7 +1425,25 @@ namespace Unity.USDToolkit
                     box.center = mesh.bounds.center;
                     box.size = mesh.bounds.size;
                     made.Add(box);
-                    return;
+                    return volume;
+                }
+
+                case UsdNative.PhysicsMeshConvexDecomposition:
+                {
+                    List<Mesh> pieces = UsdConvexPieces.Split(mesh);
+                    foreach (Mesh piece in pieces)
+                    {
+                        MeshCollider pieceCollider = helper.AddComponent<MeshCollider>();
+                        pieceCollider.sharedMesh = piece;
+                        pieceCollider.convex = true;
+                        made.Add(pieceCollider);
+                        context.Approximated.Add(pieceCollider);
+                    }
+
+                    context.Notes.Add(pieces.Count > 1
+                        ? $"Collider {path}: convex decomposition approximated by {pieces.Count} convex hulls (one per connected part or half), not a decomposer's."
+                        : $"Collider {path}: convex decomposition approximated by a single convex hull (one connected, mostly solid part).");
+                    return volume;
                 }
             }
 
@@ -1247,16 +1456,18 @@ namespace Unity.USDToolkit
             {
                 context.Notes.Add($"Collider {path}: a moving body's triangle mesh collider is built convex (Unity needs that).");
             }
-            else if (collider.MeshApproximation == UsdNative.PhysicsMeshConvexDecomposition)
-            {
-                context.Notes.Add($"Collider {path}: convex decomposition approximated by a single convex hull.");
-            }
             else if (collider.MeshApproximation == UsdNative.PhysicsMeshSdf)
             {
                 context.Notes.Add($"Collider {path}: SDF collision approximated by a convex hull.");
             }
 
             made.Add(meshCollider);
+            if (meshCollider.convex && collider.MeshApproximation != UsdNative.PhysicsMeshConvexHull)
+            {
+                context.Approximated.Add(meshCollider);
+            }
+
+            return volume;
         }
 
         // The collision mesh in the prim's local space, X negated, winding reversed to match.
@@ -1436,6 +1647,13 @@ namespace Unity.USDToolkit
             // Collision groups that filter each other, with merged groups acting as one.
             BuildGroupPairs(context, AddPairs);
 
+            int overlaps = FilterApproximationOverlaps(context, AddPairs);
+            if (overlaps > 0)
+            {
+                context.Notes.Add($"{overlaps} collider pair(s) overlap at the authored pose only because their shapes are approximated " +
+                                  "(convex hulls for SDF or decomposed meshes); they are kept from colliding with each other.");
+            }
+
             // A free joint's bodies, when it turns their collisions off, are filtered by the
             // joint itself (Joint.enableCollision); articulation links by Unity's own rule.
             if (truncated)
@@ -1456,6 +1674,74 @@ namespace Unity.USDToolkit
             }
 
             filter.ApplyNow();
+        }
+
+        // Deeper than this (metres) at the authored pose counts as an overlap. Not the contact offset:
+        // Unity's default of 1 cm would let a pane sunk 9 mm into a cabinet's hull through.
+        private const float OverlapTolerance = 0.0005f;
+
+        // Most check this many approximated colliders against the rest; beyond it they are left as they are.
+        private const int MaxOverlapChecks = 200000;
+
+        // An approximated collider that interpenetrates another body's collider where the stage
+        // puts them was not touching it as authored: the overlap is the approximation's (a convex
+        // hull fills a cabinet's hollow, so its doors sit inside it), and PhysX would push the parts
+        // apart. Such pairs are filtered. Returns how many.
+        private static int FilterApproximationOverlaps(Context context, Action<IEnumerable<Collider>, IEnumerable<Collider>> addPairs)
+        {
+            if (context.Approximated.Count == 0)
+            {
+                return 0;
+            }
+
+            Physics.SyncTransforms();
+            var all = new List<(Collider Collider, int Body)>();
+            for (int body = 0; body < context.BodyColliders.Length; body++)
+            {
+                foreach (Collider collider in context.BodyColliders[body])
+                {
+                    if (collider != null && collider.enabled)
+                    {
+                        all.Add((collider, body));
+                    }
+                }
+            }
+
+            int found = 0;
+            int checks = 0;
+            var seen = new HashSet<(Collider, Collider)>();
+            foreach ((Collider a, int bodyA) in all)
+            {
+                if (!context.Approximated.Contains(a))
+                {
+                    continue;
+                }
+
+                foreach ((Collider b, int bodyB) in all)
+                {
+                    if (bodyA == bodyB || seen.Contains((b, a)) || ++checks > MaxOverlapChecks)
+                    {
+                        continue;
+                    }
+
+                    seen.Add((a, b));
+                    if (!a.bounds.Intersects(b.bounds) || Physics.GetIgnoreCollision(a, b))
+                    {
+                        continue;
+                    }
+
+                    Transform ta = a.transform;
+                    Transform tb = b.transform;
+                    if (Physics.ComputePenetration(a, ta.position, ta.rotation, b, tb.position, tb.rotation, out Vector3 _, out float depth) &&
+                        depth > OverlapTolerance)
+                    {
+                        addPairs(new[] { a }, new[] { b });
+                        found++;
+                    }
+                }
+            }
+
+            return found;
         }
 
         private static Dictionary<string, List<Collider>> CollidersByPath(Context context)

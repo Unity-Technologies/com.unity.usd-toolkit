@@ -1454,9 +1454,14 @@ namespace Unity.USDToolkit
                 known.Add(node.Path);
             }
 
+            var mapping = new List<UsdPhysicsMappingEntry>();
             List<string> notes = UsdPhysicsBuilder.Build(data.Physics, root, (path, create) =>
-                create || known.Contains(path) ? CreatePrimPathObject(root, path) : null);
+                create || known.Contains(path) ? CreatePrimPathObject(root, path) : null, mapping);
             result.PhysicsNotes = notes;
+            result.PhysicsMapping = mapping;
+            result.KilogramsPerUnit = data.Physics.KilogramsPerUnit > 0.0 && !double.IsInfinity(data.Physics.KilogramsPerUnit)
+                ? data.Physics.KilogramsPerUnit
+                : 1.0;
             if (notes.Count > 0)
             {
                 Debug.LogWarning($"USD import: {notes.Count} physics note(s) for {data.InputPath}:\n  " + string.Join("\n  ", notes));

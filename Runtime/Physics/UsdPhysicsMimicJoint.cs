@@ -38,13 +38,27 @@ namespace Unity.USDToolkit
             return Follower != null && Follower.IsAngular ? follower * Mathf.Rad2Deg : follower;
         }
 
-        /// <summary>Sets the follower's drive target from where the reference joint is now.</summary>
+        /// <summary>The follower's velocity (USD units per second) for a reference joint velocity (USD units per second).</summary>
+        public float FollowerVelocity(float referenceVelocity) => FollowerPosition(referenceVelocity) - FollowerPosition(0f);
+
+        /// <summary>
+        /// Sets the follower's drive from the reference joint: its target where the reference will be
+        /// at the end of this physics step, and its target velocity the coupled velocity. Without the
+        /// velocity the drive's damping holds the follower back while the reference moves (the
+        /// OnRobot RG2's fingers fell 3.5° behind each other while dragged); without the step ahead
+        /// it trails by one step.
+        /// </summary>
         public void Step()
         {
-            if (Follower != null && Reference != null)
+            if (Follower == null || Reference == null)
             {
-                Follower.SetDriveTarget(FollowerPosition(Reference.GetPosition()));
+                return;
             }
+
+            float velocity = Reference.GetVelocity();
+            float ahead = Reference.GetPosition() + (velocity * Time.fixedDeltaTime);
+            Follower.SetDriveTarget(FollowerPosition(ahead));
+            Follower.SetDriveTargetVelocity(FollowerVelocity(velocity));
         }
 
         private void FixedUpdate() => Step();
