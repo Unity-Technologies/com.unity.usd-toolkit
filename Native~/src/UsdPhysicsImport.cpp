@@ -1,4 +1,5 @@
 #include "UsdPhysicsImport.h"
+#include "PolygonTriangulation.h"
 
 #include <algorithm>
 #include <cmath>
@@ -364,6 +365,9 @@ private:
 
     long long _objects = 0;
     long long _meshElements = 0;
+    // What ear clipping may still spend on concave collision faces in this read; one allowance
+    // for all of it, as the mesh import keeps (RUsdContext::concaveFaceAllowance).
+    long long _concaveFaceAllowance = 1000000000LL;
     std::unordered_set<std::string> _limitsHit;
     std::unordered_map<std::string, int> _strings;
 
@@ -807,6 +811,10 @@ void Reader::ReadMesh(const SdfPath& path, RUsdPhysicsCollider* record)
     // Faces whose counts or indices do not fit the arrays are dropped, not trusted.
     record->meshTriangles.offset = static_cast<int>(_store->indices.size());
     const size_t pointCount = points.size();
+    static_assert(sizeof(GfVec3f) == 3 * sizeof(float), "points are read below as packed floats");
+    rusd::PolygonScratch scratch;
+    scratch.allowance = _concaveFaceAllowance;
+    std::vector<int> triangles;
     size_t start = 0;
     for (const int count : counts)
     {
@@ -824,15 +832,23 @@ void Reader::ReadMesh(const SdfPath& path, RUsdPhysicsCollider* record)
 
         if (valid)
         {
-            for (int i = 1; i + 1 < count; ++i)
+            // The same triangulation the rendered mesh gets (PolygonTriangulation.h): a fan where
+            // that covers the face, ear clipping for a concave one. A fan across a concave face
+            // gave the collider a surface over the notch that the visible mesh did not have. A
+            // face that cannot be clipped cleanly still comes back as count - 2 triangles.
+            triangles.clear();
+            rusd::TriangulateCorners(points.cdata()->data(), faceIndices.cdata() + start, count, &scratch, &triangles);
+            for (const int corner : triangles)
             {
-                _store->indices.insert(_store->indices.end(),
-                                       {faceIndices[start], faceIndices[start + i], faceIndices[start + i + 1]});
-                record->meshTriangles.count += 3;
+                _store->indices.push_back(faceIndices[start + static_cast<size_t>(corner)]);
             }
+
+            record->meshTriangles.count += static_cast<int>(triangles.size());
         }
         start += static_cast<size_t>(count);
     }
+
+    _concaveFaceAllowance = std::max<long long>(scratch.allowance, 0);
 }
 
 void Reader::ResolveColliders()

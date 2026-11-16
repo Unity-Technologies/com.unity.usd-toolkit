@@ -129,8 +129,8 @@ UNITY_LICENSE = "Unity Companion License / see LICENSE.md"
 # these whenever a payload is rebuilt on a different machine (see BUILD_NOTES.md).
 TOOLCHAIN = {
     "macOS universal": (
-        "macOS 26.6.2 (25G83), Xcode 26.6 (17F113), Apple clang 21.0.0 (clang-2100.1.1.101), "
-        "CMake 3.31.6 (OpenUSD) and 4.3.2 (wrapper), SDK 26.5, x86_64+arm64"
+        "macOS 27.2.1 (26B131), Xcode 27.2 (27B52), Apple clang 21.0.0 (clang-2100.4.1.1), "
+        "CMake 3.31.6 (OpenUSD) and 4.4.4 (wrapper), SDK 27.2, x86_64+arm64"
     ),
     "Windows x64": (
         "Windows, VS Build Tools 2022 (MSVC 14.44), Windows SDK 10.0.26100, CMake 4.3.3, x64"

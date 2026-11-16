@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.2-exp.1] - 2026-11-16
+
 ### Added
 
 - **SimReady Central Loader sample**
@@ -106,6 +108,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stays ASCII wherever the package is installed. A custom `PluginSearchPath` outside that folder that
   still has non-ASCII characters now throws `UsdExportException` before OpenUSD loads, unless the
   system code page is UTF-8. macOS and Linux are unchanged. No native rebuild is needed.
+
+- **Concave faces import with their own shape**
+  Every face was triangulated as a fan from its first corner, which fills in the notch of a concave
+  face: a U-shaped face of area 7 imported with area 11. A face the fan cannot cover is now
+  triangulated by ear clipping. Convex faces keep the same triangles as before, and vertices,
+  normals, UVs, material subsets and the triangle count per face are unchanged. Collision meshes
+  read by the physics import get the same triangulation. A face that crosses itself keeps the fan
+  and is reported as an import warning. Needs the 0.8.2 native plugin.
+
+- **Prims that reset their transform stack import where the stage places them**
+  A prim whose `xformOpOrder` begins with `!resetXformStack!` ignores its parents' transforms, but
+  the importer placed it under them: a prim authored at X 2 under a parent at X 10 arrived at X 12.
+  The hierarchy is kept and the node now gets the local transform that puts it where the stage
+  does, at the read time and at each of its own animation samples. A parent with a zero scale, a
+  parent whose rotation and non-uniform scale would need shear to undo, and an animated parent are
+  reported as import warnings instead. Prims inside a point-instancer prototype are unchanged.
+  Needs the 0.8.2 native plugin.
+
+### Performance
+
+- **The macOS native plugin is built with optimisation**
+  Opening a stage on macOS is several times faster on large stages. Implicit shapes (sphere,
+  cylinder, cone, capsule) differ in the last bit of some coordinates, by at most 2.4e-7; every
+  other imported value is identical.
+
+- **Faster mesh and material import**
+  Mesh points, topology, normals and UVs are read in place instead of through copies, and
+  UsdPreviewSurface materials are read with fewer lookups. Imported data is unchanged. Needs the
+  0.8.2 native plugin.
 
 ## [0.8.1-exp.1] - 2026-10-22
 
@@ -838,8 +869,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   coordinates, with transform animation as tracks and animated points as point caches -- and a
   stage that references or payloads a `.drc` mesh composes it. Alembic 1.8.5 (with Imath 3.1.9),
   and Draco 1.5.6, are linked statically into the OpenUSD library: no new files beside it but the
-  two plugins' `plugInfo.json`. In the project, `UsdStageImporter` imports `.abc` files, and `.drc`
-  files on macOS and Linux; `.abc` becomes an override extension when Unity's Alembic package
+  two plugins' `plugInfo.json`. In the project, `UsdStageImporter` imports `.abc` and `.drc`
+  files on every platform; `.abc` becomes an override extension when Unity's Alembic package
   (com.unity.formats.alembic) is installed, as `.usd` does with the USD package. Alembic has no
   units, and OpenUSD reads it as centimeters, as Unity's Alembic package does by default: an
   `.abc` written in meters (Blender's default) imports at 1/100 scale unless

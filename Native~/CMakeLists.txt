@@ -2,6 +2,17 @@ cmake_minimum_required(VERSION 3.23)
 
 project(UnityUSDToolkitNative LANGUAGES C CXX)
 
+# A single-config generator (Unix Makefiles, Ninja) with an empty CMAKE_BUILD_TYPE compiles with no
+# optimisation flags, and `cmake --build --config Release` does not change that: --config selects a
+# configuration only under a multi-config generator (Visual Studio, Xcode). build_linux.sh has
+# always passed the build type; build_macos.sh did not, and plain CMake does not either, so the
+# default lives here where no way of building the wrapper can miss it.
+get_property(_RUSD_MULTI_CONFIG GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+if(NOT _RUSD_MULTI_CONFIG AND NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type (single-config generators)" FORCE)
+    message(STATUS "CMAKE_BUILD_TYPE was not set; building Release.")
+endif()
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -152,6 +163,7 @@ message(STATUS "Inflater: libdeflate from ${_RUSD_DEFLATE_DIR} (29 files verifie
 
 add_library(UnityUSDToolkitNative SHARED
     include/unity_usd_toolkit_native.h
+    src/PolygonTriangulation.h
     src/UsdExporter.cpp
     src/UsdImageCodecs.cpp
     src/UsdPhysicsImport.cpp
