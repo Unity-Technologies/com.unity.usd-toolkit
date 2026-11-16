@@ -916,6 +916,27 @@ RUSD_API int RUsd_GetImportLayers(
     int bufferCapacity,
     int* requiredLength);
 
+/* API 18. Opens one layer file (.usda, .usdc, .usd; never a .usdz package) on its own, without
+   composing a stage, and reports what it authors, one record per line, fields tab-separated:
+
+     S <tab> path           a sublayer, as authored
+     R <tab> path           a reference, or an asset-valued attribute (texture, MDL module)
+     P <tab> path           a payload; every payload of every variant, selected or not
+     M <tab> field <tab> v  layer metadata: upAxis, metersPerUnit, kilogramsPerUnit, defaultPrim
+     C <tab> key <tab> v    customLayerData, nested dictionaries flattened to "outer:inner"
+
+   Paths come back as authored (relative to the layer, not resolved), so the caller decides what
+   to fetch and where; nothing is opened but the one file. Tabs and newlines inside a value are
+   replaced with spaces. Call with buffer == NULL to learn `requiredLength` (terminator
+   included), then with a buffer that large. Errors go to RUsd_GetLastError(NULL, ...).
+
+   Additive: a host must skip this when the plugin reports an older API. */
+RUSD_API int RUsd_InspectLayer(
+    const char* layerPath,
+    char* buffer,
+    int bufferCapacity,
+    int* requiredLength);
+
 /* `weights` takes blendShapeCount floats (at the time static values were read); `times`
    blendShapeSampleCount doubles; `samples` blendShapeSampleCount * blendShapeCount floats. */
 RUSD_API int RUsd_CopyImportMeshBlendShapeWeights(

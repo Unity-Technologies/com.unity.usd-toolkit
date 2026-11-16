@@ -17,7 +17,7 @@ namespace Unity.USDToolkit.RuntimeDemo.Editor
     /// under Resources ships unconditionally, so a material there is the reference.
     ///
     /// URP also strips keyword variants no built material uses. The toolkit's importer creates
-    /// URP/Lit materials with _NORMALMAP, _METALLICSPECGLOSSMAP, _EMISSION, _ALPHATEST_ON and
+    /// URP/Lit materials with _NORMALMAP, _METALLICSPECGLOSSMAP, _OCCLUSIONMAP, _EMISSION, _ALPHATEST_ON and
     /// _SURFACE_TYPE_TRANSPARENT at runtime, so every combination it can
     /// produce, recorded in a ShaderVariantCollection; otherwise an imported glass or emissive part
     /// renders with the wrong variant. This is used instead of Always Included Shaders, which would
@@ -89,7 +89,7 @@ namespace Unity.USDToolkit.RuntimeDemo.Editor
                 new[] { "_ALPHATEST_ON" },
                 new[] { "_SURFACE_TYPE_TRANSPARENT" }
             };
-            string[] optional = { "_NORMALMAP", "_METALLICSPECGLOSSMAP", "_EMISSION" };
+            string[] optional = { "_NORMALMAP", "_METALLICSPECGLOSSMAP", "_OCCLUSIONMAP", "_EMISSION" };
             PassType[] passes = { PassType.ScriptableRenderPipeline, PassType.ShadowCaster };
 
             var collection = new ShaderVariantCollection();

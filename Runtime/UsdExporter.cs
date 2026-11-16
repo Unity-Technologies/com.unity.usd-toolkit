@@ -1630,7 +1630,8 @@ namespace Unity.USDToolkit
                 // Checked before the variable is written, because writing it is what lets OpenUSD
                 // act on these descriptors.
                 ValidatePluginDescriptorLibraryPaths(info);
-                Environment.SetEnvironmentVariable("PXR_PLUGINPATH_NAME", pluginSearchPath);
+                info.PluginPathEnvironmentValue = ToOpenUsdPluginPathValue(pluginSearchPath, info);
+                Environment.SetEnvironmentVariable("PXR_PLUGINPATH_NAME", info.PluginPathEnvironmentValue);
             }
 
             if (options.ValidateOpenUsdPluginPath)
@@ -2173,6 +2174,95 @@ namespace Unity.USDToolkit
             return string.Join(Path.PathSeparator.ToString(), paths);
         }
 
+        // On Windows, OpenUSD reads PXR_PLUGINPATH_NAME through the ANSI GetEnvironmentVariableA,
+        // so a non-ASCII folder name arrives in the system code page (CP949 on Korean Windows),
+        // is then treated as UTF-8, and no plugInfo.json is found: the first stage open aborts
+        // the process (exit code 3) with nothing for C# to catch. OpenUSD anchors relative entries
+        // to the directory of the library that hosts Plug, which it resolves with the Unicode
+        // GetModuleFileNameW, so entries under usd_rt's own folder are written relative to it and
+        // stay ASCII whatever the install path. info.PluginSearchPath keeps the absolute form for
+        // the trust and plugInfo.json checks. macOS and Linux pass the bytes through unchanged.
+        private static string ToOpenUsdPluginPathValue(string pluginSearchPath, NativeRuntimeInfo info)
+        {
+#if UNITY_EDITOR_WIN || (!UNITY_EDITOR && UNITY_STANDALONE_WIN)
+            string openUsdDirectory = null;
+            foreach (string basePath in info.BasePaths)
+            {
+                if (HasAnyFile(basePath, GetOpenUsdNativeFileNames()))
+                {
+                    openUsdDirectory = Path.GetFullPath(basePath)
+                        .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                    break;
+                }
+            }
+
+            var entries = new List<string>();
+            var nonAsciiEntries = new List<string>();
+            foreach (string entry in pluginSearchPath.Split(Path.PathSeparator))
+            {
+                if (string.IsNullOrWhiteSpace(entry))
+                {
+                    continue;
+                }
+
+                string value = entry;
+                if (openUsdDirectory != null)
+                {
+                    string full = Path.GetFullPath(entry)
+                        .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                    if (full.Equals(openUsdDirectory, PathComparison) ||
+                        full.StartsWith(openUsdDirectory + Path.DirectorySeparatorChar, PathComparison))
+                    {
+                        value = Path.GetRelativePath(openUsdDirectory, full);
+                    }
+                }
+
+                if (!IsAscii(value))
+                {
+                    nonAsciiEntries.Add(entry);
+                }
+
+                entries.Add(value);
+            }
+
+            // An entry outside usd_rt's folder (a custom PluginSearchPath) cannot be made relative.
+            // If it is still non-ASCII and the code page is not UTF-8, OpenUSD would abort the
+            // process on the first stage open, so fail here with an exception the caller can catch.
+            if (nonAsciiEntries.Count > 0 && GetACP() != Utf8CodePage)
+            {
+                throw new UsdExportException(
+                    "The OpenUSD plugin search path contains non-ASCII characters that OpenUSD cannot " +
+                    "read on this system code page: " + string.Join(", ", nonAsciiEntries) + ". Move " +
+                    "the plugin folders to an ASCII-only path.",
+                    info.ToDiagnosticString());
+            }
+
+            return string.Join(Path.PathSeparator.ToString(), entries);
+#else
+            return pluginSearchPath;
+#endif
+        }
+
+#if UNITY_EDITOR_WIN || (!UNITY_EDITOR && UNITY_STANDALONE_WIN)
+        private const uint Utf8CodePage = 65001;
+
+        [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+        private static extern uint GetACP();
+
+        private static bool IsAscii(string value)
+        {
+            foreach (char c in value)
+            {
+                if (c > 0x7F)
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+#endif
+
         private static string TryGetDefaultDllSearchPath()
         {
             var paths = new List<string>();
@@ -2408,6 +2498,7 @@ namespace Unity.USDToolkit
             public readonly List<string> MissingRuntimeFiles = new List<string>();
             public readonly List<string> PluginPathWarnings = new List<string>();
             public string PluginSearchPath;
+            public string PluginPathEnvironmentValue;
             public string DllSearchPath;
 
             public string ToDiagnosticString()
@@ -2426,6 +2517,13 @@ namespace Unity.USDToolkit
                 {
                     builder.AppendLine("PXR_PLUGINPATH_NAME:");
                     builder.AppendLine(PluginSearchPath);
+                }
+
+                if (!string.IsNullOrWhiteSpace(PluginPathEnvironmentValue) &&
+                    PluginPathEnvironmentValue != PluginSearchPath)
+                {
+                    builder.AppendLine("PXR_PLUGINPATH_NAME as written (relative to the OpenUSD library):");
+                    builder.AppendLine(PluginPathEnvironmentValue);
                 }
 
                 AppendSection(builder, "Plugin path warnings", PluginPathWarnings);

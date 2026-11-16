@@ -24,10 +24,11 @@ namespace Unity.USDToolkit.Native
         // mismatch message.
         //
         // The number goes up once per package release that changes the native interface, not once
-        // per change: 0.8.0 shipped 12 and 0.8.1 ships 13. Messages name the release, not the
-        // number (PluginRelease); the table of both is in BUILD_NOTES.md.
+        // per change: 0.8.0 shipped 12, 0.8.1 13, and the next release 18 (14-17 are the legacy
+        // development numbers LoadedApiVersion reads as 12, so they are skipped). Messages name the
+        // release, not the number (PluginRelease); the table of both is in BUILD_NOTES.md.
         internal const int MinimumApiVersion = 6;
-        internal const int LatestApiVersion = 13;
+        internal const int LatestApiVersion = 18;
         // usdz packaging and resolver-backed asset reads (textures inside a .usdz).
         internal const int UsdzApiVersion = 5;
         // Sublayers, references, payloads, instancing, variant selections and sparse overrides
@@ -88,6 +89,10 @@ namespace Unity.USDToolkit.Native
         // writer, which the OpenUSD library exports from openusd-26.05-windows-draco.patch on.
         internal const int DracoExportApiVersion = 13;
 
+        // RUsd_InspectLayer: one layer's authored asset paths, metadata and customLayerData, read
+        // without composing a stage (UsdLayerInfo).
+        internal const int LayerInspectionApiVersion = 18;
+
         // Mirrors kMaxImportInstancePlacements in UsdExporter.cpp.
         internal const int MaxImportInstancePlacements = 4000000;
 
@@ -147,6 +152,7 @@ namespace Unity.USDToolkit.Native
         // people read "the 0.8.1 native plugin", not an interface number.
         internal static string PluginRelease(int apiVersion)
         {
+            if (apiVersion >= 18) return "0.8.2";
             if (apiVersion >= 13) return "0.8.1";
             if (apiVersion >= 6) return "0.8.0";
             if (apiVersion >= 4) return "0.7.1";
@@ -1137,6 +1143,27 @@ namespace Unity.USDToolkit.Native
             Check(context, RUsd_GetImportLayers(context, buffer, buffer.Length, out required));
             string text = Encoding.UTF8.GetString(buffer, 0, Math.Max(0, Math.Min(required, buffer.Length) - 1));
             return text.Split(new[] { '\n' }, StringSplitOptions.RemoveEmptyEntries);
+        }
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int RUsd_InspectLayer(
+            byte[] layerPath, [Out] byte[] buffer, int bufferCapacity, out int requiredLength);
+
+        internal static bool SupportsLayerInspection => IsSupportedPlatform && LoadedApiVersion >= LayerInspectionApiVersion;
+
+        // RUsd_InspectLayer's report for one layer file (UsdLayerInfo parses it), UTF-8.
+        internal static string InspectLayer(string layerPath)
+        {
+            byte[] path = Utf8(layerPath);
+            Check(IntPtr.Zero, RUsd_InspectLayer(path, null, 0, out int required));
+            if (required <= 1)
+            {
+                return string.Empty;
+            }
+
+            var buffer = new byte[required];
+            Check(IntPtr.Zero, RUsd_InspectLayer(path, buffer, buffer.Length, out required));
+            return Encoding.UTF8.GetString(buffer, 0, Math.Max(0, Math.Min(required, buffer.Length) - 1));
         }
 
         // ---- Animation and skinning on export (API v13) ----

@@ -108,7 +108,10 @@ namespace Unity.USDToolkit
         /// <summary>physxJoint:jointFriction, applied to the articulation link.</summary>
         public float JointFriction;
 
-        /// <summary>physxJoint:maxJointVelocity and the armature: recorded, not applied.</summary>
+        /// <summary>
+        /// physxJoint:maxJointVelocity (recorded, not applied) and the armature, which the importer
+        /// adds to the link's inertia inside an articulation (Unity has no armature).
+        /// </summary>
         public float MaxJointVelocity = float.PositiveInfinity;
         public float Armature;
 
@@ -140,6 +143,165 @@ namespace Unity.USDToolkit
         /// <summary>What the mapping could not keep, in a sentence; empty when nothing.</summary>
         public string Note = string.Empty;
 
+        // The pose the import built the joint at (CaptureRest): the moving body in its frame's
+        // space, the joint's pivot and axis there, and the USD position that pose is.
+        [SerializeField, HideInInspector] private bool restCaptured;
+        [SerializeField, HideInInspector] private Transform movingTransform;
+        [SerializeField, HideInInspector] private Transform frameTransform;
+        [SerializeField, HideInInspector] private Quaternion restRotation = Quaternion.identity;
+        [SerializeField, HideInInspector] private Vector3 restOffset;
+        [SerializeField, HideInInspector] private Vector3 restPivot;
+        [SerializeField, HideInInspector] private Vector3 axisInFrame = Vector3.right;
+        [SerializeField, HideInInspector] private Vector3 stageUnitInFrame = Vector3.right;
+        [SerializeField, HideInInspector] private float restPosition;
+
+        /// <summary>The joint has the rest pose <see cref="MeasurePosition"/> and <see cref="PoseKinematically"/> work from.</summary>
+        public bool HasRestPose => restCaptured && movingTransform != null;
+
+        /// <summary>The body the joint moves (its Unity joint's object).</summary>
+        public Transform MovingTransform => movingTransform;
+
+        /// <summary>
+        /// What the joint moves <see cref="MovingTransform"/> against: the parent link, the
+        /// connected body, or for a joint to the world the import root.
+        /// </summary>
+        public Transform FrameTransform => frameTransform;
+
+        /// <summary>The USD position (degrees or stage units) of the pose the import built.</summary>
+        public float RestPosition => restPosition;
+
+        /// <summary>The joint's pivot in world space, where it is now.</summary>
+        public Vector3 PivotWorld => frameTransform != null ? frameTransform.TransformPoint(restPivot) : Vector3.zero;
+
+        /// <summary>The joint's axis in world space, as the frame holds it now (USD's direction, in Unity's basis).</summary>
+        public Vector3 AxisWorld => frameTransform != null ? frameTransform.TransformDirection(axisInFrame).normalized : Vector3.right;
+
+        /// <summary>
+        /// World displacement of the moving body for one USD unit of the joint (a stage unit along
+        /// a prismatic axis; for a revolute joint, the motion of <paramref name="worldPoint"/> per degree).
+        /// </summary>
+        public Vector3 WorldMotionPerUnit(Vector3 worldPoint)
+        {
+            if (frameTransform == null)
+            {
+                return Vector3.zero;
+            }
+
+            float sign = Reversed ? -1f : 1f;
+            if (!IsAngular)
+            {
+                return frameTransform.TransformVector(stageUnitInFrame) * sign;
+            }
+
+            // USD's right-handed +1 degree is Unity's -1 degree about the mirrored axis.
+            Vector3 pivot = PivotWorld;
+            Vector3 turned = Quaternion.AngleAxis(-sign, AxisWorld) * (worldPoint - pivot);
+            return turned - (worldPoint - pivot);
+        }
+
+        /// <summary>
+        /// Records the current pose as the joint's rest pose, at <see cref="UsdPhysicsJoint.HasInitialPosition"/>
+        /// or 0. The importer calls it once the joint is built; the pose it builds is the authored
+        /// one, which is where the stage's JointStateAPI puts the joint.
+        /// </summary>
+        public void CaptureRest(Transform moving, Transform frame, Vector3 pivotWorld)
+        {
+            if (moving == null || StageRoot == null)
+            {
+                return;
+            }
+
+            frame = frame != null ? frame : StageRoot;
+            movingTransform = moving;
+            frameTransform = frame;
+            restRotation = Quaternion.Inverse(frame.rotation) * moving.rotation;
+            restOffset = frame.InverseTransformPoint(moving.position);
+            restPivot = frame.InverseTransformPoint(pivotWorld);
+            Vector3 axisLocal = new Vector3(-AxisInStage.x, AxisInStage.y, AxisInStage.z).normalized;
+            axisInFrame = frame.InverseTransformDirection(StageRoot.TransformDirection(axisLocal)).normalized;
+            stageUnitInFrame = frame.InverseTransformVector(StageRoot.TransformVector(axisLocal));
+            restPosition = HasInitialPosition ? InitialPosition : 0f;
+            restCaptured = true;
+        }
+
+        // A joint outside an articulation: its rest is the pose the ConfigurableJoint was built at.
+        internal void CaptureFreeRest()
+        {
+            if (UnityJoint == null)
+            {
+                return;
+            }
+
+            Transform host = UnityJoint.transform;
+            Transform frame = UnityJoint.connectedBody != null ? UnityJoint.connectedBody.transform
+                : UnityJoint.connectedArticulationBody != null ? UnityJoint.connectedArticulationBody.transform
+                : null;
+            CaptureRest(host, frame, host.TransformPoint(UnityJoint.anchor));
+        }
+
+        /// <summary>
+        /// The joint's position read from the transforms (USD units and sign), in edit mode or
+        /// play mode, inside an articulation or not. 0 without a rest pose.
+        /// </summary>
+        public float MeasurePosition()
+        {
+            if (!HasRestPose || frameTransform == null)
+            {
+                return 0f;
+            }
+
+            float sign = Reversed ? -1f : 1f;
+            if (IsAngular)
+            {
+                Quaternion current = Quaternion.Inverse(frameTransform.rotation) * movingTransform.rotation;
+                Quaternion delta = current * Quaternion.Inverse(restRotation);
+                // USD's right-handed angle is minus Unity's about the mirrored axis.
+                return restPosition - (sign * TwistDegrees(delta, axisInFrame));
+            }
+
+            Vector3 moved = frameTransform.InverseTransformPoint(movingTransform.position) - restOffset;
+            float unit = stageUnitInFrame.sqrMagnitude;
+            return unit > 0f ? restPosition + (sign * Vector3.Dot(moved, stageUnitInFrame) / unit) : restPosition;
+        }
+
+        /// <summary>
+        /// Places the moving body where the joint at <paramref name="usdPosition"/> puts it,
+        /// against its frame where that is now, without simulating: the edit-mode way to pose an
+        /// asset. Bodies below it in the hierarchy move with it; a body jointed to it elsewhere
+        /// needs its own joint posed after this one.
+        /// </summary>
+        public void PoseKinematically(float usdPosition)
+        {
+            if (!HasRestPose || frameTransform == null)
+            {
+                return;
+            }
+
+            float delta = (usdPosition - restPosition) * (Reversed ? -1f : 1f);
+            Vector3 offset = restOffset;
+            Quaternion rotation = restRotation;
+            if (IsAngular)
+            {
+                Quaternion turn = Quaternion.AngleAxis(-delta, axisInFrame);
+                offset = restPivot + (turn * (restOffset - restPivot));
+                rotation = turn * restRotation;
+            }
+            else
+            {
+                offset += stageUnitInFrame * delta;
+            }
+
+            movingTransform.SetPositionAndRotation(frameTransform.TransformPoint(offset), frameTransform.rotation * rotation);
+        }
+
+        // The signed angle (degrees, Unity's sense) of the part of `rotation` about `axis`.
+        internal static float TwistDegrees(Quaternion rotation, Vector3 axis)
+        {
+            Vector3 v = new Vector3(rotation.x, rotation.y, rotation.z);
+            float angle = 2f * Mathf.Atan2(Vector3.Dot(v, axis.normalized), rotation.w) * Mathf.Rad2Deg;
+            return Mathf.DeltaAngle(0f, angle);
+        }
+
         /// <summary>A rotation (degrees) rather than a translation (stage units).</summary>
         public bool IsAngular => UnityType == UsdPhysicsJointType.Revolute || UnityType == UsdPhysicsJointType.Spherical;
 
@@ -157,7 +319,12 @@ namespace Unity.USDToolkit
         /// </summary>
         public float GetPosition()
         {
-            if (!Articulated || Link == null || Link.dofCount < 1)
+            if (!Articulated)
+            {
+                return UnityJoint != null ? MeasurePosition() : 0f;
+            }
+
+            if (Link == null || Link.dofCount < 1)
             {
                 return 0f;
             }
@@ -167,10 +334,60 @@ namespace Unity.USDToolkit
             return Reversed ? -usd : usd;
         }
 
+        /// <summary>
+        /// The joint's velocity in USD's units and sign: degrees or stage units per second of body1
+        /// relative to body0. Articulated joints only; 0 otherwise.
+        /// </summary>
+        public float GetVelocity()
+        {
+            if (!Articulated || Link == null || Link.dofCount < 1)
+            {
+                return 0f;
+            }
+
+            float value = Link.jointVelocity[0];
+            float usd = IsAngular ? value * Mathf.Rad2Deg : (float)(value / MetersPerUnit);
+            return Reversed ? -usd : usd;
+        }
+
+        /// <summary>
+        /// Sets the drive's target velocity (USD units per second). Articulated joints only: with it
+        /// the drive's damping pulls towards that velocity instead of towards rest.
+        /// </summary>
+        public void SetDriveTargetVelocity(float usdVelocity)
+        {
+            if (!Articulated || Link == null)
+            {
+                return;
+            }
+
+            ArticulationDrive drive = Link.xDrive;
+            float signed = Reversed ? -usdVelocity : usdVelocity;
+            drive.targetVelocity = IsAngular ? signed : (float)(signed * MetersPerUnit);
+            Link.xDrive = drive;
+        }
+
         /// <summary>Places an articulated joint at a position (USD units), at rest. Play mode only.</summary>
         public void SetPosition(float usdPosition)
         {
-            if (!Articulated || Link == null || Link.dofCount < 1)
+            if (!Articulated)
+            {
+                if (UnityJoint != null)
+                {
+                    PoseKinematically(usdPosition);
+                    if (UnityJoint.TryGetComponent(out Rigidbody body) && !body.isKinematic)
+                    {
+                        body.position = body.transform.position;
+                        body.rotation = body.transform.rotation;
+                        body.linearVelocity = Vector3.zero;
+                        body.angularVelocity = Vector3.zero;
+                    }
+                }
+
+                return;
+            }
+
+            if (Link == null || Link.dofCount < 1)
             {
                 return;
             }
@@ -187,7 +404,13 @@ namespace Unity.USDToolkit
         /// </summary>
         public void SetDriveTarget(float usdTarget)
         {
-            if (!Articulated || Link == null)
+            if (!Articulated)
+            {
+                SetFreeDriveTarget(usdTarget);
+                return;
+            }
+
+            if (Link == null)
             {
                 return;
             }
@@ -196,6 +419,33 @@ namespace Unity.USDToolkit
             float signed = Reversed ? -usdTarget : usdTarget;
             drive.target = IsAngular ? signed : (float)(signed * MetersPerUnit);
             Link.xDrive = drive;
+        }
+
+        // ConfigurableJoint targets are relative to the pose the joint was built at (the rest pose)
+        // and point the opposite way to the joint's own measure: PhysX's D6 drives actor0 towards
+        // the target expressed in actor1's frame. Checked by SimReady's FreeJointDriveTests.
+        private const float FreeAngularTargetSign = -1f;
+        private const float FreeLinearTargetSign = -1f;
+
+        private void SetFreeDriveTarget(float usdTarget)
+        {
+            if (!(UnityJoint is ConfigurableJoint joint))
+            {
+                return;
+            }
+
+            float delta = (usdTarget - restPosition) * (Reversed ? -1f : 1f);
+            if (IsAngular)
+            {
+                joint.targetRotation = Quaternion.AngleAxis(FreeAngularTargetSign * delta, Vector3.right);
+            }
+            else
+            {
+                // The builder centres the connected anchor on the limit range (UsdPhysicsBuilder.ConfigureFreeJoint).
+                float middle = LimitEnabled && LowerLimit <= UpperLimit ? 0.5f * (LowerLimit + UpperLimit) : 0f;
+                float fromMiddle = (usdTarget - middle) * (Reversed ? -1f : 1f);
+                joint.targetPosition = new Vector3(FreeLinearTargetSign * (float)(fromMiddle * MetersPerUnit), 0f, 0f);
+            }
         }
 
         /// <summary>

@@ -1,0 +1,14 @@
+fileFormatVersion: 2
+guid: 4e67b8ce50f6a48e282b149d21e9470e
+MonoImporter:
+  externalObjects: {}
+  serializedVersion: 2
+  defaultReferences:
+  - OrbitCamera: {instanceID: 0}
+  - StageDecor: {instanceID: 0}
+  - DefaultPanelSettings: {fileID: 11400000, guid: f15e33867355e4f6494c0307dc7638b3, type: 2}
+  executionOrder: 0
+  icon: {instanceID: 0}
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 

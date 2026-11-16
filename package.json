@@ -55,6 +55,11 @@
       "displayName": "Composed Gripper Physics",
       "description": "A vendor-neutral two-finger gripper authored with core UsdPhysics that imports as one ArticulationBody tree with convex colliders and drives, with its physics spread across sublayers, inherits, variants, references, payloads, specializes and relocates. Opens and closes every gripper in edit mode and Play Mode and shows what composed.",
       "path": "Samples~/Composed Gripper Physics"
+    },
+    {
+      "displayName": "SimReady Central Loader",
+      "description": "Paste a file link from NVIDIA's SimReady Central (Hugging Face) and load the asset with everything it composes from: it downloads over HTTPS from an editable host allowlist, imports it with its UsdPhysics (Physics variants kept switchable), logs every physics prim as mapped, approximated or skipped, and gives each moving part a drag handle like the Space's Interactive USD preview, kinematic in edit mode and driven in Play Mode or a player. Needs the UnityWebRequest and UI Toolkit modules.",
+      "path": "Samples~/SimReady Central Loader"
     }
   ]
 }

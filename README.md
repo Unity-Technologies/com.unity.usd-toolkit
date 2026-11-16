@@ -132,14 +132,14 @@ Unity copies each sample to `Assets/Samples/Unity USD Toolkit/<version>/<sample>
 </tr>
 <tr>
 <td width="50%" valign="top"><a href="Samples~/Composed%20Gripper%20Physics/README.md"><img src="Documentation~/images/composed_gripper_physics_demo.png" alt="Composed Gripper Physics: four grippers whose variant selections arrive through different composition arcs, with the panel listing what composed" width="100%"></a><br>✨ <b><a href="Samples~/Composed%20Gripper%20Physics/README.md">Composed Gripper Physics</a></b><br>A vendor-neutral gripper in core UsdPhysics whose physics is spread across every composition arc; imports as one ArticulationBody tree with convex colliders and drives, and opens and closes in Play Mode.</td>
-<td width="50%" valign="top"></td>
+<td width="50%" valign="top"><a href="Samples~/SimReady%20Central%20Loader/README.md"><img src="Documentation~/images/simready_central_sample.png" alt="SimReady Central Loader: the Comau N-220-27 arm loaded from Hugging Face, with the asset card, variants and joint sliders on the left and drag handles in the Scene view" width="100%"></a><br>✨ <b><a href="Samples~/SimReady%20Central%20Loader/README.md">SimReady Central Loader</a></b><br>Paste a file link from NVIDIA's SimReady Central on Hugging Face to download the asset with everything it composes from and import it with its physics. Each moving part gets a drag handle: kinematic in edit mode, driven in Play Mode, or kinematic in Play Mode too for assets such as humanoids that can't hold themselves up.</td>
 </tr>
 <tr>
 <td colspan="2" valign="top"><a href="Samples~/ReferenceLook/README.md"><img src="Documentation~/images/reference_look_before_after.png" alt="Reference Look: the same bench stage in Isaac Sim 6.2, with the default URP settings in 0.8.0, and with the Reference Look sample in 0.8.1" width="100%"></a><br>✨ <b><a href="Samples~/ReferenceLook/README.md">Reference Look</a></b> <i>(experimental)</i><br>A URP render setup that brings an imported stage close to Isaac Sim's RTX Real-Time renderer, with a menu that imports a USD file and fits the lighting to it. Needs Unity 6.7, which is in beta; the sample stays experimental until 6.7 ships and the setup is tuned for it.</td>
 </tr>
 </table>
 
-✨ marks the samples added since 0.8.0. The Export and Import examples import together as **Runtime Examples**; the others are separate samples. Runtime Demo needs URP, the Input System and uGUI in the project, AGV Fleet LiveSync Demo needs URP and the Input System, and Reference Look needs URP.
+✨ marks the samples added since 0.8.0. The Export and Import examples import together as **Runtime Examples**; the others are separate samples. Runtime Demo needs URP, the Input System and uGUI in the project, AGV Fleet LiveSync Demo needs URP and the Input System, Reference Look needs URP, and SimReady Central Loader needs the UnityWebRequest and UI Toolkit modules.
 
 If you imported the samples before, delete the old copy under `Assets/Samples/Unity USD Toolkit` before you import them again.
 
@@ -230,7 +230,7 @@ The package does not depend on `com.unity.formats.usd`, `com.unity.importer.usd`
 | [User Manual (Korean)](Documentation~/Unity%20USD%20Toolkit%20User%20Manual%20KR.md) | The same manual in Korean. |
 | [Live Sync Example](Samples~/Live%20Sync%20Example/README.md) | Setup, wire protocol, ownership, coordinate conversion and security. |
 | [AGV Fleet LiveSync Demo](Samples~/AGVFleet_LiveSync%20Demo/README.md) | The fleet demo: Isaac Sim side, Unity side, the shared stage and the hub. |
-| [Runtime Demo](Samples~/Runtime%20Demo/README.md), [Isaac Robot Physics](Samples~/Isaac%20Robot%20Physics/README.md), [Composed Gripper Physics](Samples~/Composed%20Gripper%20Physics/README.md), [Reference Look](Samples~/ReferenceLook/README.md) | Each sample's own guide. |
+| [Runtime Demo](Samples~/Runtime%20Demo/README.md), [Isaac Robot Physics](Samples~/Isaac%20Robot%20Physics/README.md), [Composed Gripper Physics](Samples~/Composed%20Gripper%20Physics/README.md), [SimReady Central Loader](Samples~/SimReady%20Central%20Loader/README.md), [Reference Look](Samples~/ReferenceLook/README.md) | Each sample's own guide. |
 | [Isaac Sim client](Samples~/Live%20Sync%20Example/Tools~/isaacsim/README.md) | The Kit extension, launchers and troubleshooting. |
 | [Changelog](CHANGELOG.md) | Release history. |
 

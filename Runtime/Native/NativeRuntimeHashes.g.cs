@@ -32,10 +32,10 @@ namespace Unity.USDToolkit.Native
         internal static readonly Dictionary<string, string> Expected =
             new Dictionary<string, string>(StringComparer.Ordinal)
         {
-            { "linux/lib/libMaterialXCore.so.1", "d7ea70e6265fee19eeddda5fcd7bb3b707a3778a489dc50691dcdb3e64fafb14" },
-            { "linux/lib/libMaterialXFormat.so.1", "f13db2108d04511151da826db9d0a1126961189da8ecded1ae89eff812b7ea42" },
-            { "linux/lib/libtbb.so.2", "e583e0c8935be42906169b38c06fcede77a06fba8823a151c4894e2c588cd611" },
-            { "linux/lib/libusd_ms.so", "af38b5e3c8827feffd48fe308833a2467eb435216680498e46d0929b691c4bdd" },
+            { "linux/lib/libMaterialXCore.so.1", "560c63c66f82cdb1dd8f803a0e203b10f8cd6af752f8c8cd27233165905657f0" },
+            { "linux/lib/libMaterialXFormat.so.1", "1800d771ef01e88533f6b52335e71d23328266c3c65a90b9da94a329768a14d2" },
+            { "linux/lib/libtbb.so.2", "0b431e72362d43f93aef73196230336812ca6f04c2bfd250cff513a969877e7b" },
+            { "linux/lib/libusd_ms.so", "59a1373d81e74c1c892e4308481c75b52d1f6a9cc2a79456c668b1116b9573e8" },
             { "linux/lib/usd/ar/resources/plugInfo.json", "9e1f7de1980772441033787853be0dd5b7a6619c3abc86285ac242b8589e326c" },
             { "linux/lib/usd/esf/resources/plugInfo.json", "83ac5a08ce424a84261e8948ecb5ccba69279c30553ab3826c198759fa1af4ca" },
             { "linux/lib/usd/esfUsd/resources/plugInfo.json", "b455afac3e18337d01658c3540443052335c8aa6bf1bffe7f28c5577af5c5b73" },
@@ -155,7 +155,7 @@ namespace Unity.USDToolkit.Native
             { "linux/lib/usd/usdVol/resources/generatedSchema.usda", "50777f52292b86a69aeffbd3df7b0e795e0edb2346ae7a954df5daaf329392a8" },
             { "linux/lib/usd/usdVol/resources/plugInfo.json", "fdbddc6d2fc503efdeef579e748b5176efcfd40366897a1a5c6f8b8549f2cfa7" },
             { "linux/lib/usd/usdVol/resources/usdVol/schema.usda", "e1ad6c11b3f7866754dd6d4ccc49e42efc7d5864b658ffb71f4a2739a9c15397" },
-            { "linux/libUnityUSDToolkitNative.so", "46c23ead949a9d5b76c6e94da86fde97909d23e95eed40a4337d5ca23037d47d" },
+            { "linux/libUnityUSDToolkitNative.so", "64421e99009525b836e8723325bafb0b6374262ac942c23b91d09c54a7cb2352" },
             { "linux/plugin/usd/plugInfo.json", "7b7a874c34b5e0151a1406805557c498fe8095609c9d11ced4977cec02df349d" },
             { "linux/plugin/usd/usdAbc/resources/plugInfo.json", "62d1639f0fc76309cc6ec6a91c54627ead4c7ee340d223f7ebc5b3fa12fffc61" },
             { "linux/plugin/usd/usdDraco/resources/plugInfo.json", "261fca70334d67f3efb44e03d293b1ad659a0e7495913357bdb97add47e2f846" },
@@ -165,7 +165,7 @@ namespace Unity.USDToolkit.Native
             { "linux/plugin/usd/usdShaders/resources/shaders/shaderDefs.usda", "ef8e906e21a6aec1185f8b948c26b2369f503c1dac10881932ef1af2c07a8b08" },
             { "linux/plugin/usd/usdShaders/resources/shaders/transform2d.glslfx", "299c943671e189c25334f264cfd7d6988dea08bf68d46d4d63002b56fa5502ff" },
             { "linux/plugin/usd/usdShaders/resources/shaders/uvTexture.glslfx", "ecdfcca50b391ae761bf979e525d625f16b59b4cf3b6195ddc845799fbfa802b" },
-            { "macOS/UnityUSDToolkitNative.dylib", "3ec3d7ee8f82aff0e1c2f5b4bdd1ece293f38bc371bcfa4ad977d9a992542e65" },
+            { "macOS/UnityUSDToolkitNative.dylib", "9b7ac9d799a4911dde6d002e44e249bb39879d0c2af1d585dc213df211f685c5" },
             { "macOS/lib/usd/ar/resources/plugInfo.json", "9e1f7de1980772441033787853be0dd5b7a6619c3abc86285ac242b8589e326c" },
             { "macOS/lib/usd/esf/resources/plugInfo.json", "83ac5a08ce424a84261e8948ecb5ccba69279c30553ab3826c198759fa1af4ca" },
             { "macOS/lib/usd/esfUsd/resources/plugInfo.json", "b455afac3e18337d01658c3540443052335c8aa6bf1bffe7f28c5577af5c5b73" },
@@ -300,9 +300,9 @@ namespace Unity.USDToolkit.Native
             { "macOS/plugin/usd/usdShaders/resources/shaders/shaderDefs.usda", "ef8e906e21a6aec1185f8b948c26b2369f503c1dac10881932ef1af2c07a8b08" },
             { "macOS/plugin/usd/usdShaders/resources/shaders/transform2d.glslfx", "299c943671e189c25334f264cfd7d6988dea08bf68d46d4d63002b56fa5502ff" },
             { "macOS/plugin/usd/usdShaders/resources/shaders/uvTexture.glslfx", "ecdfcca50b391ae761bf979e525d625f16b59b4cf3b6195ddc845799fbfa802b" },
-            { "windows/MaterialXCore.dll", "73947876b515880db3db7e68b8d9253ae12c9ab39c506f753ed0bdb3b0ca72cc" },
-            { "windows/MaterialXFormat.dll", "92a0a0549dfb1292f7cb9f229fd5a43b68ce487f711ea8858a6fc2c374b15372" },
-            { "windows/UnityUSDToolkitNative.dll", "d1165b9efc58d293bef10fe9edfbbe36a1dd717b8306b3fbcf0e39ff3d263b43" },
+            { "windows/MaterialXCore.dll", "108360fc0f02cb532cdf2bbac493bbba338694e18c2c05aaec31adba9a606d50" },
+            { "windows/MaterialXFormat.dll", "5af6b0589c76e6df305d24ca91b23cdf7c6b1184b36ed6c6a321839cd233be30" },
+            { "windows/UnityUSDToolkitNative.dll", "7335c41377e268ee0af7a912e9d5cc5c4d9d26ea00e3faadb5e7b247159eb30e" },
             { "windows/lib/usd/ar/resources/plugInfo.json", "b37fc05c907b7756bec87a500893a325731b9c39ef0ad0f73c4d9b6351183ba2" },
             { "windows/lib/usd/esf/resources/plugInfo.json", "a3fc119dd765cfeb0c83029478a47eff55e646e3ced348bd0fbfa3c36e50d294" },
             { "windows/lib/usd/esfUsd/resources/plugInfo.json", "ee665096987f48e158f9b1d6cf9f098e6dc82067ecd6bac2bfa5c4478964fc62" },
@@ -432,7 +432,7 @@ namespace Unity.USDToolkit.Native
             { "windows/plugin/usd/usdShaders/resources/shaders/transform2d.glslfx", "299c943671e189c25334f264cfd7d6988dea08bf68d46d4d63002b56fa5502ff" },
             { "windows/plugin/usd/usdShaders/resources/shaders/uvTexture.glslfx", "ecdfcca50b391ae761bf979e525d625f16b59b4cf3b6195ddc845799fbfa802b" },
             { "windows/tbb_usdrt.dll", "692380cecd03181d7fd536e4402783e7f38ea0765b35bb52a3236256959b40cd" },
-            { "windows/usd_rt.dll", "9cca8dc59edf1272fd99422d48b404c280f6ea896d789f7c578cf6d061f49a76" },
+            { "windows/usd_rt.dll", "2ad5f816c4d13126a30e6d0d86a8cf21715cf65d830ecac22ac51980b1fd1a54" },
         };
     }
 }
