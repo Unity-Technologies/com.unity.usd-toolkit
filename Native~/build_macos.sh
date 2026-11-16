@@ -250,9 +250,16 @@ INSTALL_DIR="${PACKAGE_DIR}/Runtime/Plugins/macOS"
 
 mkdir -p "${BUILD_DIR}" "${INSTALL_DIR}"
 
+# CMAKE_BUILD_TYPE is what selects the configuration here. The default generator on macOS is Unix
+# Makefiles, a single-config generator, and `cmake --build --config` below is ignored by those: it
+# only picks a configuration under a multi-config generator (Xcode, Visual Studio). Without this
+# argument the build type stayed empty, so the wrapper was compiled with no optimisation flags at
+# all, and the 0.8.1 macOS payload shipped that way: opening a mesh-heavy stage took 3 to 10 times
+# as long as the same source built as Release.
 CMAKE_CONFIGURE_ARGS=(
     -S "${SCRIPT_DIR}"
     -B "${BUILD_DIR}"
+    -DCMAKE_BUILD_TYPE="${CONFIGURATION}"
     -DOPENUSD_ROOT="${OPENUSD_ROOT}"
     -DCMAKE_INSTALL_PREFIX="${INSTALL_DIR}"
 )

@@ -20,8 +20,10 @@ The package includes four key capabilities:
 - **Safe handling of untrusted files,** which confines texture paths to the stage folder, checks mesh topology and caps image sizes, so you can open USD files from any source.
 - **USD Live Sync,** a sample that streams transform changes between the Unity Editor and Isaac Sim in both directions, and the AGV Fleet LiveSync Demo built on it.
 
-✨ **New in 0.8.1:**
+✨ **New:**
 
+- ✨ **SimReady Central Loader.** A sample that loads an asset from a SimReady Central file link with everything it composes from, and `UsdLayerInfo`, which reads one layer's asset paths and metadata without composing a stage.
+- ✨ **Faster import.** Meshes and materials load faster, most of all on macOS, where the native plugin is now built with optimisation.
 - ✨ **Animation.** Time-sampled transforms, UsdSkel skeletons, blend shapes and point caches play back with `UsdAnimationPlayer`; `UsdAnimationRecorder` records Unity animation to USD.
 - ✨ **Physics on import.** UsdPhysics becomes `ArticulationBody` chains, rigidbodies, colliders and physics materials, so an Isaac Sim robot moves in Unity with the same limits and drives (`UsdImportOptions.ImportPhysics`).
 - ✨ **USD composition and a stage API.** References, payloads, variants and instancing survive a round trip, variants and payloads switch at runtime, and `UsdStage` reads and edits stages from C#.
@@ -59,7 +61,7 @@ Mobile, WebGL and console platforms are not supported.
    https://github.com/Unity-Technologies/com.unity.usd-toolkit.git
    ```
 
-Add `#<tag>` to the URL to pin a release, for example `...usd-toolkit.git#v0.8.1-exp.1`; the [Releases](https://github.com/Unity-Technologies/com.unity.usd-toolkit/releases) page lists them. Don't install from **Code > Download ZIP** or from a release's source archive: those leave out the native libraries, which are stored with Git LFS. To install from `Packages/manifest.json` or a local clone, see [Install the package](Documentation~/Unity%20USD%20Toolkit%20User%20Manual%20EN.md#3-install-the-package) in the manual.
+Add `#<tag>` to the URL to pin a release, for example `...usd-toolkit.git#v0.8.2-exp.1`; the [Releases](https://github.com/Unity-Technologies/com.unity.usd-toolkit/releases) page lists them. Don't install from **Code > Download ZIP** or from a release's source archive: those leave out the native libraries, which are stored with Git LFS. To install from `Packages/manifest.json` or a local clone, see [Install the package](Documentation~/Unity%20USD%20Toolkit%20User%20Manual%20EN.md#3-install-the-package) in the manual.
 
 ## Quick start
 

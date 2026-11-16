@@ -2,7 +2,7 @@
   "$schema": "http://cyclonedx.org/schema/bom-1.6.schema.json",
   "bomFormat": "CycloneDX",
   "specVersion": "1.6",
-  "serialNumber": "urn:uuid:1fb98638-2f3b-5e08-8a84-b99a6b60d6ed",
+  "serialNumber": "urn:uuid:56cad410-16fb-5b2c-80f9-e5d023ea6501",
   "version": 1,
   "metadata": {
     "lifecycles": [
@@ -29,7 +29,7 @@
       "bom-ref": "com.unity.usd-toolkit",
       "type": "library",
       "name": "com.unity.usd-toolkit",
-      "version": "0.8.1-exp.1",
+      "version": "0.8.2-exp.1",
       "description": "Runtime USD toolkit for Unity applications using a custom native OpenUSD wrapper. A C# integration layer for connecting Unity to NVIDIA's Omniverse/OpenUSD ecosystem. Wraps Pixar's OpenUSD 26.05 native binaries via P/Invoke so Unity can read, write, and round-trip USD stages.",
       "licenses": [
         {
@@ -765,7 +765,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "ef2c69b6daaead018271bafdcd04892049481173f769de8348adb95f8fa30473"
+          "content": "b085737604a4bbf372064ddb0490370018b97b9f250ea731fe455cca1614c1af"
         }
       ],
       "properties": [
@@ -779,7 +779,7 @@
         },
         {
           "name": "unity:toolchain",
-          "value": "macOS 26.6.2 (25G83), Xcode 26.6 (17F113), Apple clang 21.0.0 (clang-2100.1.1.101), CMake 3.31.6 (OpenUSD) and 4.3.2 (wrapper), SDK 26.5, x86_64+arm64"
+          "value": "macOS 27.2.1 (26B131), Xcode 27.2 (27B52), Apple clang 21.0.0 (clang-2100.4.1.1), CMake 3.31.6 (OpenUSD) and 4.4.4 (wrapper), SDK 27.2, x86_64+arm64"
         },
         {
           "name": "unity:sourceCommit",
@@ -915,7 +915,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "a4e1e33c6d7e8a0dcc2f812135c174dcd58d4979eaeb50ff34e757f6789c23d7"
+          "content": "6153a1e7ef0cdddf1e6ddaacc965e7e20e8cf2e50d6887d32da6b527e1c2fbfd"
         }
       ],
       "properties": [
@@ -961,7 +961,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "d2407e44a05fbe52eb62a889e07f645cee69c76389f5334ca50e6e0907cf4403"
+          "content": "17770e8e45762e84f92e3be9a6d7f508aacec6c21e17f7f009ddaf8bf34ec131"
         }
       ],
       "properties": [
@@ -1007,7 +1007,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "1508fe7e360ff7784ea3dc1560308085adee158426d32afd08f276dbf97a2ef1"
+          "content": "541343d39797df99abb89de328837838f9667a672c2edac2005a8f34fcea2f1a"
         }
       ],
       "properties": [
@@ -1299,7 +1299,7 @@
       "bom-ref": "wrapper-macos",
       "type": "library",
       "name": "Unity USD Toolkit native wrapper",
-      "version": "0.8.1-exp.1",
+      "version": "0.8.2-exp.1",
       "scope": "required",
       "description": "First-party native wrapper (Native~/src) built for macOS universal.",
       "licenses": [
@@ -1312,7 +1312,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "9b7ac9d799a4911dde6d002e44e249bb39879d0c2af1d585dc213df211f685c5"
+          "content": "18e2141605ac23699e8a9de32d654d46b46104bc6e987f8daf94b03e789c2805"
         }
       ],
       "properties": [
@@ -1326,7 +1326,7 @@
         },
         {
           "name": "unity:toolchain",
-          "value": "macOS 26.6.2 (25G83), Xcode 26.6 (17F113), Apple clang 21.0.0 (clang-2100.1.1.101), CMake 3.31.6 (OpenUSD) and 4.3.2 (wrapper), SDK 26.5, x86_64+arm64"
+          "value": "macOS 27.2.1 (26B131), Xcode 27.2 (27B52), Apple clang 21.0.0 (clang-2100.4.1.1), CMake 3.31.6 (OpenUSD) and 4.4.4 (wrapper), SDK 27.2, x86_64+arm64"
         },
         {
           "name": "unity:nativeApiVersion",
@@ -1338,7 +1338,7 @@
       "bom-ref": "wrapper-windows",
       "type": "library",
       "name": "Unity USD Toolkit native wrapper",
-      "version": "0.8.1-exp.1",
+      "version": "0.8.2-exp.1",
       "scope": "required",
       "description": "First-party native wrapper (Native~/src) built for Windows x64.",
       "licenses": [
@@ -1351,7 +1351,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "7335c41377e268ee0af7a912e9d5cc5c4d9d26ea00e3faadb5e7b247159eb30e"
+          "content": "09d542d716e03cef43340fe90799738638d0ba4afed10c4799fda915b4c51b64"
         }
       ],
       "properties": [
@@ -1377,7 +1377,7 @@
       "bom-ref": "wrapper-linux",
       "type": "library",
       "name": "Unity USD Toolkit native wrapper",
-      "version": "0.8.1-exp.1",
+      "version": "0.8.2-exp.1",
       "scope": "required",
       "description": "First-party native wrapper (Native~/src) built for Linux x64.",
       "licenses": [
@@ -1390,7 +1390,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "64421e99009525b836e8723325bafb0b6374262ac942c23b91d09c54a7cb2352"
+          "content": "ffff2ed80edcd8081c3963b72a9f12b391402037575034b4b821453897eec9bf"
         }
       ],
       "properties": [
@@ -1430,7 +1430,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "6bb36210057da19850f510bdb7a4eb098ae23536ac37bc331d1a04336910a752"
+          "content": "01a353970907a7183481051e4b9d62e6c3871d18fb0c636727df21889378bb07"
         }
       ],
       "properties": [
@@ -1472,7 +1472,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "551348dba8935de148fd7318c4850103665a7707d9ab4214c979cabed9ebf9af"
+          "content": "e9e75984ac3340ea43ee634028952e66fa1f9b43ed10618ef0cf72367dba595e"
         }
       ],
       "properties": [

@@ -1,4 +1,5 @@
 #include "unity_usd_toolkit_native.h"
+#include "PolygonTriangulation.h"
 #include "UsdPhysicsImport.h"
 
 #if defined(_WIN32)
@@ -399,6 +400,14 @@ struct RUsdContext
     std::string firstSkippedNode;
     size_t skippedMeshes = 0;
     size_t skippedPlacements = 0;
+
+    // What ear clipping may still spend on concave faces in this import (rusd::PolygonScratch).
+    // One allowance for the whole import rather than one per mesh, so the total stays bounded
+    // however the stage splits its faces across meshes. A billion corner tests is seconds at
+    // worst, and far more than real content asks for: a concave face of 5,000 corners takes
+    // about twelve million.
+    static constexpr long long kConcaveFaceAllowance = 1000000000LL;
+    long long concaveFaceAllowance = kConcaveFaceAllowance;
 
     // Point instancers drawn from their arrays instead of expanded into prims (API v8). One
     // record per prototype mesh: the mesh is imported once, and `matrices` holds that mesh's
@@ -985,6 +994,46 @@ bool VtValueHoldsType(const VtValue& value, const char* typeName)
     return value.GetTypeName() == typeName;
 }
 
+// The names the material readers ask OpenUSD for, interned once. Building a TfToken from a string
+// literal hashes the text and looks it up in the global token table, and reading a single
+// UsdPreviewSurface material did that several dozen times: once per input, per texture and per
+// comparison.
+struct ImportShadeTokens
+{
+    const TfToken usdPreviewSurface{"UsdPreviewSurface"};
+    const TfToken usdUvTexture{"UsdUVTexture"};
+    const TfToken usdTransform2d{"UsdTransform2d"};
+    const TfToken usdPrimvarReaderFloat3{"UsdPrimvarReader_float3"};
+    const TfToken usdPrimvarReaderFloat4{"UsdPrimvarReader_float4"};
+    const TfToken standardSurface{"ND_standard_surface_surfaceshader"};
+    const TfToken diffuseColor{"diffuseColor"};
+    const TfToken emissiveColor{"emissiveColor"};
+    const TfToken specularColor{"specularColor"};
+    const TfToken useSpecularWorkflow{"useSpecularWorkflow"};
+    const TfToken metallic{"metallic"};
+    const TfToken roughness{"roughness"};
+    const TfToken normal{"normal"};
+    const TfToken occlusion{"occlusion"};
+    const TfToken opacity{"opacity"};
+    const TfToken opacityThreshold{"opacityThreshold"};
+    const TfToken file{"file"};
+    const TfToken st{"st"};
+    const TfToken scale{"scale"};
+    const TfToken translation{"translation"};
+    const TfToken varname{"varname"};
+    const TfToken fallback{"fallback"};
+    const TfToken sourceColorSpace{"sourceColorSpace"};
+    const TfToken autoColorSpace{"auto"};
+    const TfTokenVector mdlContext{TfToken("mdl")};
+    const TfTokenVector mtlxContext{TfToken("mtlx")};
+};
+
+const ImportShadeTokens& ShadeTokens()
+{
+    static const ImportShadeTokens tokens;
+    return tokens;
+}
+
 bool GetUsdShadeInputFloat(const UsdShadeShader& shader, const TfToken& name, float* value)
 {
     if (value == nullptr)
@@ -1227,6 +1276,7 @@ std::string AnchorOnAuthoringLayer(const UsdAttribute& source, const std::string
 // a Material input). Empty when nothing is authored, which USD reads as "auto".
 static std::string AuthoredColorSpace(const UsdAttribute& attribute, int depth = 0)
 {
+    const ImportShadeTokens& tokens = ShadeTokens();
     if (!attribute || depth > 8)
     {
         return std::string();
@@ -1235,9 +1285,9 @@ static std::string AuthoredColorSpace(const UsdAttribute& attribute, int depth =
     UsdShadeShader shader(attribute.GetPrim());
     if (shader)
     {
-        UsdShadeInput space = shader.GetInput(TfToken("sourceColorSpace"));
+        UsdShadeInput space = shader.GetInput(tokens.sourceColorSpace);
         TfToken token;
-        if (space && space.Get(&token) && !token.IsEmpty() && token != TfToken("auto"))
+        if (space && space.Get(&token) && !token.IsEmpty() && token != tokens.autoColorSpace)
         {
             return token.GetString();
         }
@@ -1246,7 +1296,7 @@ static std::string AuthoredColorSpace(const UsdAttribute& attribute, int depth =
     if (attribute.HasColorSpace())
     {
         const TfToken space = attribute.GetColorSpace();
-        if (!space.IsEmpty() && space != TfToken("auto"))
+        if (!space.IsEmpty() && space != tokens.autoColorSpace)
         {
             return space.GetString();
         }
@@ -1328,6 +1378,7 @@ TextureReadStatus ReadConnectedTexture(
     size_t capacity,
     std::string* sourcePrimPath)
 {
+    const ImportShadeTokens& tokens = ShadeTokens();
     UsdShadeShader textureShader = GetConnectedShader(shader, inputName);
     if (!textureShader)
     {
@@ -1340,12 +1391,12 @@ TextureReadStatus ReadConnectedTexture(
     }
 
     TfToken textureId;
-    if (!textureShader.GetShaderId(&textureId) || textureId != TfToken("UsdUVTexture"))
+    if (!textureShader.GetShaderId(&textureId) || textureId != tokens.usdUvTexture)
     {
         return TextureReadStatus::NotUvTexture;
     }
 
-    UsdShadeInput fileInput = textureShader.GetInput(TfToken("file"));
+    UsdShadeInput fileInput = textureShader.GetInput(tokens.file);
     if (!fileInput)
     {
         return TextureReadStatus::NoFileInput;
@@ -1451,25 +1502,26 @@ bool GetUsdShadeInputVec3(const UsdShadeShader& shader, const TfToken& name, flo
 // UsdTransform2d node (matching the export layout).
 void ReadUvTransformFromTexture(const UsdShadeShader& textureShader, RUsdMaterial* material)
 {
+    const ImportShadeTokens& tokens = ShadeTokens();
     if (!textureShader || material == nullptr)
     {
         return;
     }
 
-    UsdShadeShader stSource = GetConnectedShader(textureShader, TfToken("st"));
+    UsdShadeShader stSource = GetConnectedShader(textureShader, tokens.st);
     if (!stSource)
     {
         return;
     }
 
     TfToken stId;
-    if (!stSource.GetShaderId(&stId) || stId != TfToken("UsdTransform2d"))
+    if (!stSource.GetShaderId(&stId) || stId != tokens.usdTransform2d)
     {
         return;
     }
 
     VtValue vtValue;
-    UsdShadeInput scale = stSource.GetInput(TfToken("scale"));
+    UsdShadeInput scale = stSource.GetInput(tokens.scale);
     if (scale && scale.Get(&vtValue) && VtValueHoldsType(vtValue, "GfVec2f"))
     {
         const GfVec2f& value = vtValue.UncheckedGet<GfVec2f>();
@@ -1477,7 +1529,7 @@ void ReadUvTransformFromTexture(const UsdShadeShader& textureShader, RUsdMateria
         material->uvScale[1] = value[1];
     }
 
-    UsdShadeInput translation = stSource.GetInput(TfToken("translation"));
+    UsdShadeInput translation = stSource.GetInput(tokens.translation);
     if (translation && translation.Get(&vtValue) && VtValueHoldsType(vtValue, "GfVec2f"))
     {
         const GfVec2f& value = vtValue.UncheckedGet<GfVec2f>();
@@ -1489,12 +1541,16 @@ void ReadUvTransformFromTexture(const UsdShadeShader& textureShader, RUsdMateria
 // Reads UsdPreviewSurface's `opacity` connection and `opacityThreshold`. A connected opacity
 // means the authored transparency lives in a texture's alpha channel, which the constant in
 // RUsdMaterial cannot express (it reports the connection's fallback, i.e. usually 1 = opaque).
+// `surface` is material.ComputeSurfaceSource(), which ExtractMaterial has already resolved:
+// following the outputs again for every reader was a third of the calls made per material.
 void ExtractOpacityInfo(
     RUsdContext* context,
     const UsdShadeMaterial& material,
+    const UsdShadeShader& surface,
     std::string* texturePath,
     float* threshold)
 {
+    const ImportShadeTokens& tokens = ShadeTokens();
     texturePath->clear();
     *threshold = 0.0f;
 
@@ -1503,22 +1559,22 @@ void ExtractOpacityInfo(
         return;
     }
 
-    UsdShadeShader shader = material.ComputeSurfaceSource();
+    const UsdShadeShader& shader = surface;
     TfToken shaderId;
-    if (!shader || !shader.GetShaderId(&shaderId) || shaderId != TfToken("UsdPreviewSurface"))
+    if (!shader || !shader.GetShaderId(&shaderId) || shaderId != tokens.usdPreviewSurface)
     {
         return;
     }
 
     char buffer[1024] = {0};
     if (ReadConnectedTextureFileReported(
-            context, shader, TfToken("opacity"), material.GetPath().GetString(),
+            context, shader, tokens.opacity, material.GetPath().GetString(),
             buffer, sizeof(buffer)))
     {
         *texturePath = buffer;
     }
 
-    GetUsdShadeInputFloat(shader, TfToken("opacityThreshold"), threshold);
+    GetUsdShadeInputFloat(shader, tokens.opacityThreshold, threshold);
 }
 
 // A UsdPrimvarReader_float3/float4 feeding `inputName`: its varname, and its fallback as the
@@ -1531,15 +1587,16 @@ bool ReadPrimvarReaderColor(
     std::string* varname,
     RUsdMaterial* fallback)
 {
+    const ImportShadeTokens& tokens = ShadeTokens();
     UsdShadeShader reader = GetConnectedShader(shader, inputName);
     TfToken readerId;
     if (!reader || !reader.GetShaderId(&readerId) ||
-        (readerId != TfToken("UsdPrimvarReader_float3") && readerId != TfToken("UsdPrimvarReader_float4")))
+        (readerId != tokens.usdPrimvarReaderFloat3 && readerId != tokens.usdPrimvarReaderFloat4))
     {
         return false;
     }
 
-    UsdShadeInput nameInput = reader.GetInput(TfToken("varname"));
+    UsdShadeInput nameInput = reader.GetInput(tokens.varname);
     VtValue value;
     if (!nameInput || !nameInput.Get(&value))
     {
@@ -1561,7 +1618,7 @@ bool ReadPrimvarReaderColor(
         return false;
     }
 
-    GetUsdShadeInputColor(reader, TfToken("fallback"), fallback);
+    GetUsdShadeInputColor(reader, tokens.fallback, fallback);
     return true;
 }
 
@@ -1580,7 +1637,8 @@ static void ConvertSpecularWorkflow(
     bool hasMetallicTexture,
     RUsdMaterial* result)
 {
-    UsdShadeInput workflow = shader.GetInput(TfToken("useSpecularWorkflow"));
+    const ImportShadeTokens& tokens = ShadeTokens();
+    UsdShadeInput workflow = shader.GetInput(tokens.useSpecularWorkflow);
     int useSpecular = 0;
     VtValue value;
     if (!workflow || !workflow.Get(&value) || !value.IsHolding<int>())
@@ -1593,7 +1651,7 @@ static void ConvertSpecularWorkflow(
         return;
     }
 
-    UsdShadeInput specularInput = shader.GetInput(TfToken("specularColor"));
+    UsdShadeInput specularInput = shader.GetInput(tokens.specularColor);
     if (specularInput && specularInput.HasConnectedSource())
     {
         AppendImportWarning(context,
@@ -1652,11 +1710,14 @@ static void ConvertSpecularWorkflow(
     }
 }
 
+// `surface` is material.ComputeSurfaceSource(), resolved once by the caller (see ExtractOpacityInfo).
 RUsdMaterial ExtractPreviewMaterial(
     RUsdContext* context,
     const UsdShadeMaterial& material,
+    const UsdShadeShader& surface,
     RUsdContext::ImportedMaterial* extras)
 {
+    const ImportShadeTokens& tokens = ShadeTokens();
     std::string* diffusePrimvar = extras != nullptr ? &extras->diffusePrimvar : nullptr;
     RUsdMaterial result = {1.0f, 1.0f, 1.0f, 1.0f, 0.0f, 0.5f};
     result.uvScale[0] = 1.0f;
@@ -1668,7 +1729,7 @@ RUsdMaterial ExtractPreviewMaterial(
 
     const std::string materialPath = material.GetPath().GetString();
 
-    UsdShadeShader shader = material.ComputeSurfaceSource();
+    const UsdShadeShader& shader = surface;
     if (!shader)
     {
         AppendImportWarning(
@@ -1678,7 +1739,7 @@ RUsdMaterial ExtractPreviewMaterial(
     }
 
     TfToken shaderId;
-    if (!shader.GetShaderId(&shaderId) || shaderId != TfToken("UsdPreviewSurface"))
+    if (!shader.GetShaderId(&shaderId) || shaderId != tokens.usdPreviewSurface)
     {
         AppendImportWarning(
             context,
@@ -1694,10 +1755,10 @@ RUsdMaterial ExtractPreviewMaterial(
     result.r = result.g = result.b = 0.18f;
 
     // Scalar fallbacks (used when the matching input has no texture connection).
-    GetUsdShadeInputColor(shader, TfToken("diffuseColor"), &result);
-    GetUsdShadeInputFloat(shader, TfToken("opacity"), &result.a);
-    GetUsdShadeInputFloat(shader, TfToken("metallic"), &result.metallic);
-    GetUsdShadeInputFloat(shader, TfToken("roughness"), &result.roughness);
+    GetUsdShadeInputColor(shader, tokens.diffuseColor, &result);
+    GetUsdShadeInputFloat(shader, tokens.opacity, &result.a);
+    GetUsdShadeInputFloat(shader, tokens.metallic, &result.metallic);
+    GetUsdShadeInputFloat(shader, tokens.roughness, &result.roughness);
 
     // Connected UsdUVTexture file paths (mirror of the export layout). The metallic and
     // roughness inputs are driven by the same packed metallic+smoothness texture on export,
@@ -1706,7 +1767,7 @@ RUsdMaterial ExtractPreviewMaterial(
     // otherwise warn that the source "is not a UsdUVTexture".
     std::string primvarName;
     bool hasAlbedo = false;
-    if (ReadPrimvarReaderColor(shader, TfToken("diffuseColor"), &primvarName, &result))
+    if (ReadPrimvarReaderColor(shader, tokens.diffuseColor, &primvarName, &result))
     {
         if (diffusePrimvar != nullptr)
         {
@@ -1716,7 +1777,7 @@ RUsdMaterial ExtractPreviewMaterial(
     else
     {
         hasAlbedo = ReadConnectedTextureFileReported(
-            context, shader, TfToken("diffuseColor"), materialPath,
+            context, shader, tokens.diffuseColor, materialPath,
             result.albedoTexturePath, sizeof(result.albedoTexturePath));
         if (!hasAlbedo)
         {
@@ -1724,19 +1785,19 @@ RUsdMaterial ExtractPreviewMaterial(
             // wires diffuseColor to one) still carries the colour the spec says to show in that
             // case: its 'fallback' input. Read it when it is authored; otherwise the shader's own
             // diffuseColor value above stands.
-            UsdShadeShader texture = GetConnectedShader(shader, TfToken("diffuseColor"));
+            UsdShadeShader texture = GetConnectedShader(shader, tokens.diffuseColor);
             TfToken textureId;
-            if (texture && texture.GetShaderId(&textureId) && textureId == TfToken("UsdUVTexture"))
+            if (texture && texture.GetShaderId(&textureId) && textureId == tokens.usdUvTexture)
             {
-                GetUsdShadeInputColor(texture, TfToken("fallback"), &result);
+                GetUsdShadeInputColor(texture, tokens.fallback, &result);
             }
         }
     }
     ReadConnectedTextureFileReported(
-        context, shader, TfToken("normal"), materialPath,
+        context, shader, tokens.normal, materialPath,
         result.normalTexturePath, sizeof(result.normalTexturePath));
     bool hasMetallic = ReadConnectedTextureFileReported(
-        context, shader, TfToken("metallic"), materialPath,
+        context, shader, tokens.metallic, materialPath,
         result.metallicTexturePath, sizeof(result.metallicTexturePath));
 
     // Roughness in the same file as metallic is the packed map this exporter writes (metallic
@@ -1746,7 +1807,7 @@ RUsdMaterial ExtractPreviewMaterial(
     // metallic and its (absent) alpha became smoothness 1: every surface a mirror.
     char roughnessPath[512] = {0};
     const bool hasRoughness = ReadConnectedTextureFileReported(
-        context, shader, TfToken("roughness"), materialPath, roughnessPath, sizeof(roughnessPath));
+        context, shader, tokens.roughness, materialPath, roughnessPath, sizeof(roughnessPath));
     const bool roughnessIsSeparate =
         hasRoughness && (!hasMetallic || std::strcmp(roughnessPath, result.metallicTexturePath) != 0);
     if (extras != nullptr)
@@ -1760,7 +1821,7 @@ RUsdMaterial ExtractPreviewMaterial(
 
         char occlusionPath[512] = {0};
         if (ReadConnectedTextureFileReported(
-                context, shader, TfToken("occlusion"), materialPath, occlusionPath, sizeof(occlusionPath)))
+                context, shader, tokens.occlusion, materialPath, occlusionPath, sizeof(occlusionPath)))
         {
             extras->occlusionTexturePath = occlusionPath;
         }
@@ -1770,28 +1831,28 @@ RUsdMaterial ExtractPreviewMaterial(
 
     // emissiveColor: texture takes priority, otherwise read the constant color.
     bool hasEmissiveTex = ReadConnectedTextureFileReported(
-        context, shader, TfToken("emissiveColor"), materialPath,
+        context, shader, tokens.emissiveColor, materialPath,
         result.emissiveTexturePath, sizeof(result.emissiveTexturePath));
     if (!hasEmissiveTex)
     {
-        GetUsdShadeInputVec3(shader, TfToken("emissiveColor"), result.emissive);
+        GetUsdShadeInputVec3(shader, tokens.emissiveColor, result.emissive);
     }
 
     // UV tiling/offset is shared across textures on export; read it from any present texture.
     if (hasAlbedo)
     {
         ReadUvTransformFromTexture(
-            GetConnectedShader(shader, TfToken("diffuseColor")), &result);
+            GetConnectedShader(shader, tokens.diffuseColor), &result);
     }
     else if (hasMetallic)
     {
         ReadUvTransformFromTexture(
-            GetConnectedShader(shader, TfToken("metallic")), &result);
+            GetConnectedShader(shader, tokens.metallic), &result);
     }
     else if (hasEmissiveTex)
     {
         ReadUvTransformFromTexture(
-            GetConnectedShader(shader, TfToken("emissiveColor")), &result);
+            GetConnectedShader(shader, tokens.emissiveColor), &result);
     }
 
     return result;
@@ -3560,6 +3621,7 @@ bool ExtractMaterial(
     const UsdShadeMaterial& material,
     RUsdContext::ImportedMaterial* out)
 {
+    const ImportShadeTokens& tokens = ShadeTokens();
     out->material = DefaultImportMaterial();
     const std::string materialPath = material.GetPath().GetString();
 
@@ -3573,10 +3635,10 @@ bool ExtractMaterial(
     UsdShadeShader universal = material.ComputeSurfaceSource();
     TfToken shaderId;
     const bool hasPreview =
-        universal && universal.GetShaderId(&shaderId) && shaderId == TfToken("UsdPreviewSurface");
+        universal && universal.GetShaderId(&shaderId) && shaderId == tokens.usdPreviewSurface;
 
     // ComputeSurfaceSource falls back to the universal output when a context has none of its own.
-    UsdShadeShader mdl = material.ComputeSurfaceSource(TfTokenVector{TfToken("mdl")});
+    UsdShadeShader mdl = material.ComputeSurfaceSource(tokens.mdlContext);
     if (mdl && universal && mdl.GetPath() == universal.GetPath())
     {
         mdl = UsdShadeShader();
@@ -3606,7 +3668,7 @@ bool ExtractMaterial(
     }
 
     out->material = DefaultImportMaterial();
-    UsdShadeShader mtlx = material.ComputeSurfaceSource(TfTokenVector{TfToken("mtlx")});
+    UsdShadeShader mtlx = material.ComputeSurfaceSource(tokens.mtlxContext);
     TfToken mtlxId;
     const MtlxSurfaceInputs* mtlxInputs = nullptr;
     if (mtlx && !(universal && mtlx.GetPath() == universal.GetPath()) && mtlx.GetShaderId(&mtlxId))
@@ -3620,7 +3682,7 @@ bool ExtractMaterial(
             // constants. One whose metalness or roughness is a texture was not written that
             // way, and ExtractMtlxMaterial has already said those maps are not used.
             char unused[1024] = {0};
-            if (mtlxId == TfToken("ND_standard_surface_surfaceshader") &&
+            if (mtlxId == tokens.standardSurface &&
                 !ReadMtlxTexture(nullptr, mtlx, mtlxInputs->metallic, unused, sizeof(unused)) &&
                 !ReadMtlxTexture(nullptr, mtlx, mtlxInputs->roughness, unused, sizeof(unused)))
             {
@@ -3633,8 +3695,8 @@ bool ExtractMaterial(
 
     if (hasPreview)
     {
-        out->material = ExtractPreviewMaterial(context, material, out);
-        ExtractOpacityInfo(context, material, &out->opacityTexturePath, &out->opacityThreshold);
+        out->material = ExtractPreviewMaterial(context, material, universal, out);
+        ExtractOpacityInfo(context, material, universal, &out->opacityTexturePath, &out->opacityThreshold);
         return true;
     }
 
@@ -3884,17 +3946,42 @@ int AddImportedMaterial(
     return AddDisplayColorMaterial(context, key, name, displayColor);
 }
 
-// Triangulates one polygon face (fan) into `indices` with the import winding flip.
-// `leftHanded` is USD's other face orientation. The flip below turns USD's default rightHanded
-// winding into Unity's; a mesh that already authors the opposite winding needs that flip undone,
-// or its faces end up pointing away from the viewer. Moore Lane authors leftHanded on all 740 of
-// its meshes, which is why its terrain could only be seen from underneath.
+// What TriangulateFace needs to recognise a concave face and clip it, and what it found on the
+// way. Without positions (`pointXyz` null) every face is fanned: the caller vouches for its
+// faces, as the implicit surfaces built here do.
+struct ConcaveFaces
+{
+    const float* pointXyz = nullptr;   // three floats per point
+    const int* cornerPoints = nullptr; // the point each corner names, already checked against the points
+    rusd::PolygonScratch scratch;
+    int found = 0;
+    int unresolved = 0; // of those, the ones ear clipping could not finish; reported by the caller
+};
+
+// Appends one triangle of a face: three of the face's corners, in the order the face lists them,
+// with the import winding flip. `leftHanded` is USD's other face orientation. The flip turns
+// USD's default rightHanded winding into Unity's; a mesh that already authors the opposite
+// winding needs that flip undone, or its faces end up pointing away from the viewer. Moore Lane
+// authors leftHanded on all 740 of its meshes, which is why its terrain could only be seen from
+// underneath.
+void AppendTriangle(const int* faceVertices, int a, int b, int c, bool leftHanded, std::vector<int>* indices)
+{
+    indices->push_back(faceVertices[a]);
+    indices->push_back(faceVertices[leftHanded ? b : c]);
+    indices->push_back(faceVertices[leftHanded ? c : b]);
+}
+
+// Triangulates one polygon face into `indices`: as a fan from its first corner when that covers
+// the face, which is every convex face, and by ear clipping when it does not (see
+// PolygonTriangulation.h). The fan was once used for every face, and a concave face came out
+// with its notch filled in: a U-shaped face of area 7 imported as 11.
 void TriangulateFace(
     const int* cornerVertices,
     int cornerCount,
     int faceStart,
     int faceVertexCount,
     bool leftHanded,
+    ConcaveFaces* concave,
     std::vector<int>* indices)
 {
     // Subtraction, not addition. `faceStart + faceVertexCount` sums two values that come from
@@ -3907,14 +3994,31 @@ void TriangulateFace(
         return;
     }
 
+    const int* faceVertices = cornerVertices + faceStart;
+    double normal[3];
+    if (faceVertexCount > 3 && concave->pointXyz != nullptr &&
+        !rusd::FanIsExact(concave->pointXyz, concave->cornerPoints + faceStart, faceVertexCount, normal))
+    {
+        std::vector<int>& triangles = concave->scratch.triangles;
+        triangles.clear();
+        ++concave->found;
+        if (!rusd::ClipEars(concave->pointXyz, concave->cornerPoints + faceStart, faceVertexCount, normal,
+                            &concave->scratch, &triangles))
+        {
+            ++concave->unresolved;
+        }
+
+        for (size_t t = 0; t + 2 < triangles.size(); t += 3)
+        {
+            AppendTriangle(faceVertices, triangles[t], triangles[t + 1], triangles[t + 2], leftHanded, indices);
+        }
+
+        return;
+    }
+
     for (int i = 1; i + 1 < faceVertexCount; ++i)
     {
-        const int first = cornerVertices[static_cast<size_t>(faceStart)];
-        const int second = cornerVertices[static_cast<size_t>(faceStart + i + 1)];
-        const int third = cornerVertices[static_cast<size_t>(faceStart + i)];
-        indices->push_back(first);
-        indices->push_back(leftHanded ? third : second);
-        indices->push_back(leftHanded ? second : third);
+        AppendTriangle(faceVertices, 0, i, i + 1, leftHanded, indices);
     }
 }
 
@@ -3922,6 +4026,9 @@ void TriangulateFace(
 // UsdGeomSubsets get the subset's material; the rest use the mesh's direct binding. Produces
 // a single `indices` buffer with one contiguous RUsdSubmesh range per material (so each maps
 // to a Unity submesh). Returns the mesh's default (whole-mesh) material index.
+// `pointXyz` (three floats per point) and `cornerPoints` (the point each corner names, already
+// checked against the points) let concave faces be found and triangulated properly; both null
+// for geometry built here, whose faces are convex by construction.
 int BuildImportedSubmeshes(
     RUsdContext* context,
     const UsdPrim& meshPrim,
@@ -3929,6 +4036,8 @@ int BuildImportedSubmeshes(
     const int* cornerVertices,
     int cornerCount,
     bool leftHanded,
+    const float* pointXyz,
+    const int* cornerPoints,
     const DisplayColor& displayColor,
     std::vector<int>* indices,
     std::vector<RUsdSubmesh>* submeshes)
@@ -4116,6 +4225,10 @@ int BuildImportedSubmeshes(
         indices->reserve(indices->size() + (triangles * 3));
     }
 
+    ConcaveFaces concave;
+    concave.pointXyz = pointXyz;
+    concave.cornerPoints = cornerPoints;
+    concave.scratch.allowance = context->concaveFaceAllowance;
     for (size_t slot = 0; slot < materialOrder.size(); ++slot)
     {
         const int matIndex = materialOrder[slot];
@@ -4123,7 +4236,7 @@ int BuildImportedSubmeshes(
         for (int f : facesByMaterial[slot])
         {
             TriangulateFace(cornerVertices, cornerCount, faceStart[static_cast<size_t>(f)],
-                faceVertexCounts[static_cast<size_t>(f)], leftHanded, indices);
+                faceVertexCounts[static_cast<size_t>(f)], leftHanded, &concave, indices);
         }
 
         int count = static_cast<int>(indices->size()) - start;
@@ -4131,6 +4244,20 @@ int BuildImportedSubmeshes(
         {
             submeshes->push_back(RUsdSubmesh{start, count, matIndex});
         }
+    }
+
+    context->concaveFaceAllowance = std::max<long long>(concave.scratch.allowance, 0);
+
+    // A concave face that could not be triangulated keeps the fan for what was left of it, which
+    // can cover area outside the face. That is a change to the shape, so it is said.
+    if (concave.unresolved > 0)
+    {
+        AppendImportWarning(context,
+            "mesh '" + meshPrim.GetPath().GetString() + "' has " + std::to_string(concave.unresolved) +
+            " concave face(s) of " + std::to_string(concave.found) +
+            " that could not be triangulated cleanly (the face crosses itself, or the import's "
+            "allowance for concave faces is spent); they are filled as a fan and may cover area "
+            "outside the face.");
     }
 
     return defaultMaterialIndex;
@@ -4456,6 +4583,11 @@ void ResolveNormalSource(const UsdGeomMesh& mesh, ImportNormalSource* source, Us
 
 // Resolves an attribute for every face-corner up front. Returns false (and leaves the source
 // marked invalid) when any corner is unreachable, so a malformed primvar drops out cleanly.
+//
+// The same answer as ImportAttrLayout::Element gives corner by corner, with the interpolation
+// decided once per attribute instead: Element compares up to three tokens on every call, and this
+// runs once per corner per attribute. `cornerFace` is read only for a `uniform` attribute, so the
+// caller builds it only when one is present.
 bool ResolveCornerElements(
     ImportAttrLayout* layout,
     const VtIntArray& faceVertexIndices,
@@ -4468,28 +4600,110 @@ bool ResolveCornerElements(
         return false;
     }
 
-    const int cornerCount = static_cast<int>(cornerFace.size());
-    elements->resize(static_cast<size_t>(cornerCount));
-    for (int corner = 0; corner < cornerCount; ++corner)
-    {
-        int point = faceVertexIndices[static_cast<size_t>(corner)];
-        if (point < 0 || point >= pointCount)
-        {
-            point = 0;
-        }
+    const int cornerCount = static_cast<int>(faceVertexIndices.size());
+    const int* const cornerPoints = faceVertexIndices.cdata();
+    const int valueCount = layout->valueCount;
+    const int* const indices = layout->indices.cdata();
+    const int indexCount = static_cast<int>(layout->indices.size());
+    const bool indexed = !layout->indices.empty();
 
-        const int element = layout->Element(corner, point, cornerFace[static_cast<size_t>(corner)]);
+    elements->resize(static_cast<size_t>(cornerCount));
+    int* const out = elements->data();
+
+    // What Element does with the element it picked: through the index table when there is one,
+    // then range-checked against the values. -1 when the data cannot cover it.
+    const auto resolve = [=](int element) -> int
+    {
         if (element < 0)
         {
-            layout->valid = false;
-            elements->clear();
-            return false;
+            return -1;
         }
 
-        (*elements)[static_cast<size_t>(corner)] = element;
+        if (indexed)
+        {
+            if (element >= indexCount)
+            {
+                return -1;
+            }
+
+            element = indices[element];
+        }
+
+        return element >= 0 && element < valueCount ? element : -1;
+    };
+
+    const auto resolveAll = [&](const auto& pick) -> bool
+    {
+        for (int corner = 0; corner < cornerCount; ++corner)
+        {
+            const int element = resolve(pick(corner));
+            if (element < 0)
+            {
+                return false;
+            }
+
+            out[corner] = element;
+        }
+
+        return true;
+    };
+
+    bool covered;
+    if (layout->interpolation == UsdGeomTokens->constant)
+    {
+        covered = resolveAll([](int) { return 0; });
+    }
+    else if (layout->interpolation == UsdGeomTokens->uniform)
+    {
+        const int* const faces = cornerFace.data();
+        covered = cornerFace.size() >= static_cast<size_t>(cornerCount) &&
+            resolveAll([=](int corner) { return faces[corner]; });
+    }
+    else if (layout->interpolation == UsdGeomTokens->faceVarying)
+    {
+        covered = resolveAll([](int corner) { return corner; });
+    }
+    else
+    {
+        covered = resolveAll([=](int corner)
+        {
+            const int point = cornerPoints[corner];
+            return point < 0 || point >= pointCount ? 0 : point;
+        });
+    }
+
+    if (!covered)
+    {
+        layout->valid = false;
+        elements->clear();
+        return false;
     }
 
     return true;
+}
+
+// Hashes a small trivially-copyable key eight bytes at a time: one multiply per word, with the
+// high half folded back down because the tables index with the low bits. The keys here are 8, 12
+// and 20 bytes, so this is one to three multiplies where a byte-wise FNV-1a ran one per byte in a
+// chain, and at one lookup per corner the hash was most of what MergeEqualElements cost. Which
+// hash is used cannot change a result: the tables compare keys exactly, so it only decides which
+// slot is tried first.
+inline size_t HashKeyBytes(const void* data, size_t size)
+{
+    const unsigned char* bytes = static_cast<const unsigned char*>(data);
+    uint64_t hash = 0x9E3779B97F4A7C15ull;
+    while (size > 0)
+    {
+        const size_t take = size < sizeof(uint64_t) ? size : sizeof(uint64_t);
+        uint64_t word = 0;
+        std::memcpy(&word, bytes, take);
+        hash = (hash ^ word) * 0xFF51AFD7ED558CCDull;
+        hash ^= hash >> 32;
+        bytes += take;
+        size -= take;
+    }
+
+    return static_cast<size_t>(hash);
 }
 
 // A flat hash table: open addressing with linear probing, and one allocation for the whole thing.
@@ -4574,15 +4788,7 @@ struct ByteValueHash
 {
     size_t operator()(const T& value) const
     {
-        const unsigned char* bytes = reinterpret_cast<const unsigned char*>(&value);
-        size_t hash = 1469598103934665603ull;
-        for (size_t i = 0; i < sizeof(T); ++i)
-        {
-            hash ^= static_cast<size_t>(bytes[i]);
-            hash *= 1099511628211ull;
-        }
-
-        return hash;
+        return HashKeyBytes(&value, sizeof(T));
     }
 };
 
@@ -4637,14 +4843,7 @@ struct SplitVertexKeyHash
 {
     size_t operator()(const SplitVertexKey& key) const
     {
-        size_t hash = 1469598103934665603ull;
-        for (int value : key)
-        {
-            hash ^= static_cast<size_t>(static_cast<uint32_t>(value));
-            hash *= 1099511628211ull;
-        }
-
-        return hash;
+        return HashKeyBytes(key.data(), sizeof(SplitVertexKey));
     }
 };
 
@@ -4681,8 +4880,11 @@ std::vector<GfVec3f> ComputeSmoothPointNormals(
         GfVec3f faceNormal(0.0f, 0.0f, 0.0f);
         for (int i = 0; i < count; ++i)
         {
+            // The next corner, wrapping at the end of the face. Written as a comparison because
+            // `(i + 1) % count` is an integer division per corner.
+            const int next = i + 1 == count ? 0 : i + 1;
             const int a = faceVertexIndices[start + static_cast<size_t>(i)];
-            const int b = faceVertexIndices[start + static_cast<size_t>((i + 1) % count)];
+            const int b = faceVertexIndices[start + static_cast<size_t>(next)];
             if (a < 0 || a >= pointCount || b < 0 || b >= pointCount)
             {
                 continue;
@@ -4787,23 +4989,34 @@ bool BuildImportedMesh(
     }
 
     const UsdTimeCode time = context->importTime;
-    VtArray<GfVec3f> points;
-    if (!mesh.GetPointsAttr().Get(&points, time) || points.empty())
+
+    // The topology and the points are only read, and they are read through const references on
+    // purpose. An array that comes out of a layer shares its buffer with that layer (or points
+    // into the mapped crate file), and the non-const operator[], begin() and data() of a VtArray
+    // first check for that and copy the whole buffer when it is shared. Indexing the arrays
+    // themselves therefore copied every one of them once per mesh, and then paid a call into
+    // OpenUSD for the check on every element after that.
+    VtArray<GfVec3f> pointsValue;
+    if (!mesh.GetPointsAttr().Get(&pointsValue, time) || pointsValue.empty())
     {
         return false;
     }
 
+    const VtArray<GfVec3f>& points = pointsValue;
     importedMesh->sourcePointCount = points.size();
 
-    VtIntArray faceVertexCounts;
-    VtIntArray faceVertexIndices;
-    if (!mesh.GetFaceVertexCountsAttr().Get(&faceVertexCounts, time) ||
-        !mesh.GetFaceVertexIndicesAttr().Get(&faceVertexIndices, time) ||
-        faceVertexCounts.empty() ||
-        faceVertexIndices.empty())
+    VtIntArray faceVertexCountsValue;
+    VtIntArray faceVertexIndicesValue;
+    if (!mesh.GetFaceVertexCountsAttr().Get(&faceVertexCountsValue, time) ||
+        !mesh.GetFaceVertexIndicesAttr().Get(&faceVertexIndicesValue, time) ||
+        faceVertexCountsValue.empty() ||
+        faceVertexIndicesValue.empty())
     {
         return false;
     }
+
+    const VtIntArray& faceVertexCounts = faceVertexCountsValue;
+    const VtIntArray& faceVertexIndices = faceVertexIndicesValue;
 
     // Everything below allocates per corner (split tables, normals, UVs) before triangulation
     // counts its output, so an oversized corner list is refused here, before any of it.
@@ -4837,6 +5050,7 @@ bool BuildImportedMesh(
     // USD→Unity basis flip (negate X) so local coordinates match the converted transforms.
     importedMesh->primPath = mesh.GetPath().GetString();
     importedMesh->name = mesh.GetPrim().GetName().GetString();
+    static_assert(sizeof(GfVec3f) == 3 * sizeof(float), "points are read below as packed floats");
 
     // Face winding. Only consulted when normals have to be computed; authored normals are used
     // as they stand.
@@ -4867,6 +5081,10 @@ bool BuildImportedMesh(
     ImportNormalSource normalSource;
     ResolveNormalSource(mesh, &normalSource, time);
 
+    // Read-only views of the attribute values, for the same reason as the points above. The
+    // sources themselves stay mutable: resolving the corners can still mark a layout invalid.
+    const VtArray<GfVec3f>& normalValues = normalSource.values;
+
     bool needsSplit = normalSource.layout.NeedsSplit();
     for (int set = 0; set < RUSD_MAX_UV_SETS; ++set)
     {
@@ -4882,22 +5100,24 @@ bool BuildImportedMesh(
     {
         // Everything is authored per point (possibly indexed), so USD points map 1:1 onto Unity
         // vertices and the buffers stay identical to what previous versions produced.
-        importedMesh->points.reserve(points.size());
-        for (const GfVec3f& point : points)
-        {
-            importedMesh->points.push_back(ToUnityVector(point));
-        }
+        // The bulk copies below size their buffer once and write it in place. A push_back per
+        // element re-checks the capacity and stores the vector's end every time, which is most of
+        // the cost of a loop this small and keeps it from being vectorised.
+        const auto toUnity = [](const GfVec3f& value) { return ToUnityVector(value); };
+        importedMesh->points.resize(points.size());
+        std::transform(points.cbegin(), points.cend(), importedMesh->points.begin(), toUnity);
 
         if (normalSource.layout.IsDirectPerPoint(pointCount))
         {
-            importedMesh->normals.reserve(static_cast<size_t>(pointCount));
-            for (int point = 0; point < pointCount; ++point)
+            importedMesh->normals.resize(static_cast<size_t>(pointCount));
+            std::transform(normalValues.cbegin(), normalValues.cbegin() + pointCount,
+                importedMesh->normals.begin(), toUnity);
+            if (recordVertexPoints)
             {
-                importedMesh->normals.push_back(
-                    ToUnityVector(normalSource.values[static_cast<size_t>(point)]));
-                if (recordVertexPoints)
+                importedMesh->vertexNormalElements.resize(static_cast<size_t>(pointCount));
+                for (int point = 0; point < pointCount; ++point)
                 {
-                    importedMesh->vertexNormalElements.push_back(point);
+                    importedMesh->vertexNormalElements[static_cast<size_t>(point)] = point;
                 }
             }
         }
@@ -4916,7 +5136,7 @@ bool BuildImportedMesh(
                     break;
                 }
 
-                normals.push_back(ToUnityVector(normalSource.values[static_cast<size_t>(element)]));
+                normals.push_back(ToUnityVector(normalValues[static_cast<size_t>(element)]));
                 elements.push_back(element);
             }
 
@@ -4935,11 +5155,8 @@ bool BuildImportedMesh(
             // the same so both paths produce a shaded mesh.
             const std::vector<GfVec3f> smooth =
                 ComputeSmoothPointNormals(points, faceVertexCounts, faceVertexIndices, leftHanded);
-            importedMesh->normals.reserve(smooth.size());
-            for (const GfVec3f& normal : smooth)
-            {
-                importedMesh->normals.push_back(ToUnityVector(normal));
-            }
+            importedMesh->normals.resize(smooth.size());
+            std::transform(smooth.begin(), smooth.end(), importedMesh->normals.begin(), toUnity);
         }
 
         for (int set = 0; set < RUSD_MAX_UV_SETS; ++set)
@@ -4952,12 +5169,10 @@ bool BuildImportedMesh(
 
             if (source.layout.IsDirectPerPoint(pointCount))
             {
-                importedMesh->uvSets[set].reserve(static_cast<size_t>(pointCount));
-                for (int point = 0; point < pointCount; ++point)
-                {
-                    const GfVec2f& value = source.values[static_cast<size_t>(point)];
-                    importedMesh->uvSets[set].push_back({value[0], value[1]});
-                }
+                importedMesh->uvSets[set].resize(static_cast<size_t>(pointCount));
+                std::transform(source.values.cbegin(), source.values.cbegin() + pointCount,
+                    importedMesh->uvSets[set].begin(),
+                    [](const GfVec2f& value) { return RUsdVec2{value[0], value[1]}; });
 
                 continue;
             }
@@ -4984,8 +5199,22 @@ bool BuildImportedMesh(
     {
         // At least one attribute is per face-corner, so vertices are split: corners that agree
         // on the point and on every resolved attribute value still share a vertex.
-        std::vector<int> cornerFace(static_cast<size_t>(cornerCount), 0);
+        // Which face each corner belongs to. Only a `uniform` attribute asks (one value per
+        // face), so the table is built only when one of the attributes is authored that way.
+        const auto isUniform = [](const ImportAttrLayout& layout)
         {
+            return layout.valid && layout.interpolation == UsdGeomTokens->uniform;
+        };
+        bool needsCornerFace = isUniform(normalSource.layout);
+        for (int set = 0; set < RUSD_MAX_UV_SETS; ++set)
+        {
+            needsCornerFace = needsCornerFace || isUniform(uvSources[set].layout);
+        }
+
+        std::vector<int> cornerFace;
+        if (needsCornerFace)
+        {
+            cornerFace.assign(static_cast<size_t>(cornerCount), 0);
             int corner = 0;
             for (size_t face = 0; face < faceVertexCounts.size() && corner < cornerCount; ++face)
             {
@@ -5003,7 +5232,7 @@ bool BuildImportedMesh(
         std::vector<int> normalElements;
         ResolveCornerElements(
             &normalSource.layout, faceVertexIndices, cornerFace, pointCount, &normalElements);
-        MergeEqualElements(&normalElements, normalSource.values);
+        MergeEqualElements(&normalElements, normalValues);
 
         // No authored normals: smooth ones per point, so the split below does not facet the mesh.
         std::vector<GfVec3f> smoothNormals;
@@ -5022,6 +5251,28 @@ bool BuildImportedMesh(
 
         FlatIndexTable<SplitVertexKey, SplitVertexKeyHash, std::equal_to<SplitVertexKey>> vertexMap;
         vertexMap.reset(static_cast<size_t>(cornerCount));
+
+        // The split makes at least one vertex per referenced point, so the buffers start at the
+        // point count instead of growing to it by doubling, each step of which copies what is
+        // there. Anything past that is the seams, and grows as before.
+        importedMesh->points.reserve(static_cast<size_t>(pointCount));
+        if (recordVertexPoints)
+        {
+            importedMesh->vertexPoints.reserve(static_cast<size_t>(pointCount));
+        }
+
+        if (normalSource.layout.valid || !smoothNormals.empty())
+        {
+            importedMesh->normals.reserve(static_cast<size_t>(pointCount));
+        }
+
+        for (int set = 0; set < RUSD_MAX_UV_SETS; ++set)
+        {
+            if (uvSources[set].layout.valid)
+            {
+                importedMesh->uvSets[set].reserve(static_cast<size_t>(pointCount));
+            }
+        }
 
         for (int corner = 0; corner < cornerCount; ++corner)
         {
@@ -5064,7 +5315,7 @@ bool BuildImportedMesh(
             if (normalSource.layout.valid)
             {
                 importedMesh->normals.push_back(
-                    ToUnityVector(normalSource.values[static_cast<size_t>(key[1])]));
+                    ToUnityVector(normalValues[static_cast<size_t>(key[1])]));
                 if (recordVertexPoints)
                 {
                     importedMesh->vertexNormalElements.push_back(key[1]);
@@ -5082,15 +5333,18 @@ bool BuildImportedMesh(
                     continue;
                 }
 
-                const GfVec2f& value =
-                    uvSources[set].values[static_cast<size_t>(key[static_cast<size_t>(set) + 2])];
+                const VtArray<GfVec2f>& uvValues = uvSources[set].values;
+                const GfVec2f& value = uvValues[static_cast<size_t>(key[static_cast<size_t>(set) + 2])];
                 importedMesh->uvSets[set].push_back({value[0], value[1]});
             }
         }
     }
 
+    // Positions for the concave-face test come from the stage's own points and corners, which is
+    // what `cornerVertices` was derived from on either path above.
     importedMesh->materialIndex = BuildImportedSubmeshes(
         context, mesh.GetPrim(), faceVertexCounts, cornerVertices, cornerCount, leftHanded,
+        points.cdata()->data(), faceVertexIndices.cdata(),
         ReadDisplayColor(mesh.GetPrim(), time), &importedMesh->indices, &importedMesh->submeshes);
 
     importedMesh->visible = UsdGeomImageable(mesh.GetPrim()).ComputeVisibility(time) == UsdGeomTokens->invisible ? 0 : 1;
@@ -5978,6 +6232,7 @@ bool BuildImportedImplicitSurface(RUsdContext* context, const UsdPrim& prim, RUs
     out->materialIndex = BuildImportedSubmeshes(
         context, prim, m.faceCounts, m.corners.data(), static_cast<int>(m.corners.size()),
         /*leftHanded=*/false,   // built here, always in USD's default winding
+        /*pointXyz=*/nullptr, /*cornerPoints=*/nullptr,   // and always convex
         ReadDisplayColor(prim, context->importTime), &out->indices, &out->submeshes);
     out->visible = UsdGeomImageable(prim).ComputeVisibility(context->importTime) == UsdGeomTokens->invisible ? 0 : 1;
     return !out->indices.empty();
@@ -6089,6 +6344,95 @@ void AppendMatrix(std::vector<float>* out, const GfMatrix4d& matrix)
     }
 }
 
+// True when `matrix` holds more than a translation, a rotation and a scale. The rows of such a
+// matrix are a rotation's rows, each scaled: at right angles to one another. Rows that are not
+// mean shear, which a host transform cannot hold.
+bool Shears(const GfMatrix4d& matrix)
+{
+    const GfVec3d rows[3] = {matrix.GetRow3(0), matrix.GetRow3(1), matrix.GetRow3(2)};
+    for (int a = 0; a < 3; ++a)
+    {
+        for (int b = a + 1; b < 3; ++b)
+        {
+            if (std::abs(GfDot(rows[a], rows[b])) > 1e-5 * rows[a].GetLength() * rows[b].GetLength())
+            {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+// The local transform the host is given for a prim that resets its transform stack.
+//
+// A prim whose xformOpOrder starts with !resetXformStack! is placed by its own ops alone: nothing
+// above it in namespace moves it. The host rebuilds the hierarchy and multiplies every node by
+// its parent, so handing it the prim's own local put the prim at parent * local, which is the
+// one place the stage says it is not (a prim authored at world X 2 under a parent at X 10
+// imported at 12). The hierarchy is kept, and the node is given the local that lands it where the
+// stage puts it. With row vectors, as GfMatrix4d has them:
+//     local' * parentToWorld == local      so      local' = local * inverse(parentToWorld)
+// Two cases cannot be expressed this way, and are reported instead of left quietly wrong: a
+// parent that collapses space (a zero scale) has no inverse, and a result that shears cannot be
+// held by a host transform of translation, rotation and scale. `report` is false for the samples
+// of an animated prim, which would otherwise say the same thing once per sample.
+GfMatrix4d ResetStackLocal(
+    ImportWalk* walk, const UsdPrim& prim, const GfMatrix4d& local, const GfMatrix4d& parentToWorld, bool report)
+{
+    double determinant = 0.0;
+    const GfMatrix4d inverse = parentToWorld.GetInverse(&determinant);
+    if (determinant == 0.0 || !std::isfinite(determinant))
+    {
+        if (report)
+        {
+            AppendImportWarning(walk->context,
+                "'" + prim.GetPath().GetString() + "' resets its transform stack under a parent whose "
+                "transform cannot be inverted (a zero scale); it is imported under that parent's "
+                "transform, not where the stage places it.");
+        }
+
+        return local;
+    }
+
+    const GfMatrix4d result = local * inverse;
+    if (report && Shears(result))
+    {
+        AppendImportWarning(walk->context,
+            "'" + prim.GetPath().GetString() + "' resets its transform stack under a parent whose "
+            "rotation and non-uniform scale it can only undo with shear; its placement is "
+            "approximate.");
+    }
+
+    return result;
+}
+
+// ResetStackLocal undoes the parent as it stands at the read time (and at the prim's own samples,
+// when it has them). A parent that moves afterwards takes the node with it, which the stage does
+// not, so that is said, once. An ancestor that resets its own stack ends the search: nothing
+// above it reaches down here either.
+void WarnWhenResetFollowsAnimation(ImportWalk* walk, const UsdPrim& prim)
+{
+    for (UsdPrim above = prim.GetParent(); above && !above.IsPseudoRoot(); above = above.GetParent())
+    {
+        if (walk->xformCache.TransformMightBeTimeVarying(above))
+        {
+            AppendImportWarning(walk->context,
+                "'" + prim.GetPath().GetString() + "' resets its transform stack under an animated "
+                "parent ('" + above.GetPath().GetString() + "'); it is placed for the read time and "
+                "follows that parent during playback.");
+            return;
+        }
+
+        bool aboveResets = false;
+        walk->xformCache.GetLocalTransformation(above, &aboveResets);
+        if (aboveResets)
+        {
+            return;
+        }
+    }
+}
+
 // A node's own animated transform and visibility, sampled where the stage authors samples.
 void EmitNodeTracks(ImportWalk* walk, const UsdPrim& prim, int nodeIndex)
 {
@@ -6113,6 +6457,13 @@ void EmitNodeTracks(ImportWalk* walk, const UsdPrim& prim, int nodeIndex)
             GfMatrix4d local(1.0);
             bool resetsXformStack = false;
             xformable.GetLocalTransformation(&local, &resetsXformStack, UsdTimeCode(time));
+            if (resetsXformStack)
+            {
+                // The same correction the static value gets, at this sample's time.
+                local = ResetStackLocal(walk, prim, local,
+                    UsdGeomImageable(prim).ComputeParentToWorldTransform(UsdTimeCode(time)), /*report=*/false);
+            }
+
             AppendMatrix(&track.values, local);
         }
 
@@ -7328,6 +7679,16 @@ void ImportSubtree(ImportWalk* walk, const UsdPrim& prim, const std::string& out
     {
         bool resetsXformStack = false;
         GfMatrix4d local = walk->xformCache.GetLocalTransformation(prim, &resetsXformStack);
+
+        // A copy inside a point-instancer instance is placed relative to its prototype, not to
+        // the stage, so it is left as authored.
+        if (resetsXformStack && outPath == prim.GetPath().GetString())
+        {
+            local = ResetStackLocal(walk, prim, local, walk->xformCache.GetParentToWorldTransform(prim),
+                                    /*report=*/true);
+            WarnWhenResetFollowsAnimation(walk, prim);
+        }
+
         if (!EmitNode(walk, prim, outPath, local, visible))
         {
             return;
@@ -12237,6 +12598,7 @@ void ResetImportTables(RUsdContext* context)
     context->firstSkippedNode.clear();
     context->skippedMeshes = 0;
     context->skippedPlacements = 0;
+    context->concaveFaceAllowance = RUsdContext::kConcaveFaceAllowance;
     context->importWarningCount = 0;
     {
         std::lock_guard<std::mutex> lock(context->diagnosticsMutex);
